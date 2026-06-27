@@ -1,6 +1,6 @@
 [package]
 name = "openipc-web"
-version = "0.1.3"
+version = "0.1.4"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -14,8 +14,8 @@ path = "src/lib.rs"
 [dependencies]
 js-sys = "0.3"
 nusb.workspace = true
-openipc-core = { version = "0.1.3", path = "../openipc-core" }
-openipc-rtl88xx = { version = "0.1.3", path = "../openipc-rtl88xx" }
+openipc-core = { version = "0.1.4", path = "../openipc-core" }
+openipc-rtl88xx = { version = "0.1.4", path = "../openipc-rtl88xx" }
 wasm-bindgen = "0.2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

@@ -1,13 +1,13 @@
 [package]
 name = "openipc-rtl88xx"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Rust Realtek rtl88xx USB WiFi receiver driver for OpenIPC"
 
 [dependencies]
-openipc-core = { version = "0.1.0", path = "../openipc-core" }
+openipc-core = { version = "0.1.1", path = "../openipc-core" }
 nusb.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

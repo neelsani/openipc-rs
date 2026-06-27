@@ -5,6 +5,6 @@ shared-version = true
 tag-name = "v{{version}}"
 pre-release-commit-message = "chore: release v{{version}}"
 tag-message = "v{{version}}"
-pre-release-hook = ["bash", "scripts/pre-release.sh"]
+pre-release-hook = ["bash", "-c", "$WORKSPACE_ROOT/scripts/pre-release.sh"]
 publish = false
 push = false

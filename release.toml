@@ -8,3 +8,4 @@ tag-message = "v{{version}}"
 pre-release-hook = ["bash", "-c", "$WORKSPACE_ROOT/scripts/pre-release.sh"]
 publish = false
 push = false
+tag = true

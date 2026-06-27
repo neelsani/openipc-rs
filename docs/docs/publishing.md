@@ -58,7 +58,8 @@ Configure npm trusted publishing for `@openipc-rs/web` on npmjs.com:
 | Workflow filename    | `ci.yml`       |
 | Allowed action       | `npm publish`  |
 
-The existing Cloudflare secrets are still required for `master` deploys:
+The existing Cloudflare secrets are still required for `master` and release-tag
+deploys:
 
 - `CLOUDFLARE_API_TOKEN`
 - `CLOUDFLARE_ACCOUNT_ID`
@@ -68,9 +69,10 @@ CI deploys the public sites:
 - Station: [station.openipc-rs.neels.dev](https://station.openipc-rs.neels.dev)
 - Docs: [openipc-rs.neels.dev](https://openipc-rs.neels.dev)
 
-Release commits on `master` skip the normal branch CI/deploy jobs. The tag
-workflow for the same commit is the one that validates and publishes the
-release.
+Release commits on `master` run the normal branch CI/deploy jobs, so the commit
+status in GitHub stays meaningful. The tag workflow for the same commit runs the
+release path: validation, station/docs deploy, crates.io publish, npm publish,
+and desktop artifact upload.
 
 ## Generated Artifacts
 
@@ -143,7 +145,12 @@ is released as bundled applications, not as a crates.io package.
 
 ## Desktop Releases
 
-Tauri desktop bundles are uploaded to the GitHub Release for each `v*` tag for:
+Tauri desktop bundles are uploaded to the GitHub Release for each `v*` tag.
+Release assets are renamed before upload so the platform is visible in the file
+name, for example `OpenIPC-Station-v0.2.0-macos-apple-silicon.dmg` or
+`OpenIPC-Station-v0.2.0-windows-x64.msi`.
+
+Build targets:
 
 | Release label         | GitHub runner      | Rust target                 |
 | --------------------- | ------------------ | --------------------------- |
@@ -172,4 +179,5 @@ npm run build
 ```
 
 The deployable output is `apps/openipc-station/dist`. GitHub Actions deploys it
-to Cloudflare from `master`; there is no local deploy script.
+to Cloudflare from normal `master` pushes and `v*` release tags; there is no
+local deploy script.

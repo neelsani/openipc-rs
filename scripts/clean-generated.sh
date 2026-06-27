@@ -17,6 +17,7 @@ docs/build
 docs/.docusaurus
 docs/.wrangler
 docs/bun.lock
+release-assets
 "
 
 DRY_RUN=0

@@ -23,7 +23,6 @@ jobs:
     rust:
         name: Rust Workspace
         runs-on: ubuntu-latest
-        if: "github.event_name != 'push' || github.ref != 'refs/heads/master' || !startsWith(github.event.head_commit.message, 'chore: release v')"
 
         steps:
             - name: Checkout
@@ -138,7 +137,6 @@ jobs:
     wasm-package:
         name: WASM SDK Package
         runs-on: ubuntu-latest
-        if: "github.event_name != 'push' || github.ref != 'refs/heads/master' || !startsWith(github.event.head_commit.message, 'chore: release v')"
 
         steps:
             - name: Checkout
@@ -186,7 +184,7 @@ jobs:
         runs-on: ubuntu-latest
         needs:
             - wasm-package
-        if: "github.event_name == 'push' && github.ref == 'refs/heads/master'"
+        if: "github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))"
         permissions:
             contents: read
             deployments: write
@@ -239,7 +237,7 @@ jobs:
                   apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
                   accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
                   workingDirectory: apps/openipc-station
-                  command: pages deploy dist --project-name=openipc-rs-station
+                  command: pages deploy dist --project-name=openipc-rs-station --branch=master
 
             - name: Skip station deploy
               if: env.CLOUDFLARE_API_TOKEN == '' || env.CLOUDFLARE_ACCOUNT_ID == ''
@@ -248,7 +246,6 @@ jobs:
     docs:
         name: Docs Site
         runs-on: ubuntu-latest
-        if: "github.event_name != 'push' || github.ref != 'refs/heads/master' || !startsWith(github.event.head_commit.message, 'chore: release v')"
 
         steps:
             - name: Checkout
@@ -274,7 +271,7 @@ jobs:
         runs-on: ubuntu-latest
         needs:
             - docs
-        if: "github.event_name == 'push' && github.ref == 'refs/heads/master'"
+        if: "github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))"
         permissions:
             contents: read
             deployments: write
@@ -308,7 +305,7 @@ jobs:
                   apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
                   accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
                   workingDirectory: docs
-                  command: pages deploy build --project-name=openipc-rs-docs
+                  command: pages deploy build --project-name=openipc-rs-docs --branch=master
 
             - name: Skip docs deploy
               if: env.CLOUDFLARE_API_TOKEN == '' || env.CLOUDFLARE_ACCOUNT_ID == ''
@@ -317,7 +314,6 @@ jobs:
     desktop:
         name: Desktop Check (${{ matrix.label }})
         runs-on: ${{ matrix.os }}
-        if: "github.event_name != 'push' || github.ref != 'refs/heads/master' || !startsWith(github.event.head_commit.message, 'chore: release v')"
 
         strategy:
             fail-fast: false
@@ -518,14 +514,33 @@ jobs:
                   fi
                   npm publish crates/openipc-web/pkg --access public
 
-    desktop-release:
-        name: Desktop Release (${{ matrix.label }})
-        runs-on: ${{ matrix.os }}
+    create-github-release:
+        name: Create GitHub Release
+        runs-on: ubuntu-latest
         needs:
             - rust
             - wasm-package
             - docs
             - desktop
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        permissions:
+            contents: write
+
+        steps:
+            - name: Create or update release
+              uses: softprops/action-gh-release@v2
+              with:
+                  tag_name: ${{ github.ref_name }}
+                  name: OpenIPC Station ${{ github.ref_name }}
+                  body: Desktop installers and application bundles for OpenIPC Station.
+                  draft: false
+                  prerelease: ${{ contains(github.ref_name, '-') }}
+
+    desktop-release:
+        name: Desktop Release (${{ matrix.label }})
+        runs-on: ${{ matrix.os }}
+        needs:
+            - create-github-release
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         permissions:
             contents: write
@@ -602,14 +617,21 @@ jobs:
               working-directory: apps/openipc-station
               run: npm ci
 
-            - name: Build and upload desktop bundles
-              uses: tauri-apps/tauri-action@v0
+            - name: Build desktop bundles
+              working-directory: apps/openipc-station
+              run: npm run tauri -- build --target ${{ matrix.rust_target }}
+
+            - name: Prepare release asset names
               env:
-                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  RELEASE_TAG: ${{ github.ref_name }}
+                  ASSET_LABEL: ${{ matrix.label }}
+              run: node scripts/prepare-tauri-release-assets.mjs apps/openipc-station/src-tauri/target/${{ matrix.rust_target }} release-assets
+
+            - name: Upload desktop bundles
+              uses: softprops/action-gh-release@v2
               with:
-                  projectPath: apps/openipc-station
-                  tagName: ${{ github.ref_name }}
-                  releaseName: OpenIPC Station ${{ github.ref_name }}
-                  releaseBody: Desktop installers and application bundles for OpenIPC Station.
-                  releaseDraft: false
+                  tag_name: ${{ github.ref_name }}
+                  files: release-assets/*
+                  fail_on_unmatched_files: true
+                  overwrite_files: true
                   prerelease: ${{ contains(github.ref_name, '-') }}

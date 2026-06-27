@@ -10,6 +10,7 @@
 /docs/.docusaurus/
 /docs/.wrangler/
 /docs/bun.lock
+/release-assets/
 .env
 .env.*
 .DS_Store

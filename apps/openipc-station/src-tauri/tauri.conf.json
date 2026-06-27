@@ -1,31 +1,30 @@
 {
-  "$schema": "https://schema.tauri.app/config/2",
-  "productName": "OpenIPC RS",
-  "version": "0.1.1",
-  "identifier": "dev.openipc.openipc-rs",
-  "build": {
-    "beforeDevCommand": "npm run dev:desktop",
-    "devUrl": "http://127.0.0.1:5173",
-    "beforeBuildCommand": "npm run build:desktop",
-    "frontendDist": "../dist"
-  },
-  "app": {
-    "windows": [
-      {
-        "title": "OpenIPC RS",
-        "width": 1280,
-        "height": 720,
-        "minWidth": 1024,
-        "minHeight": 640
-      }
-    ],
-    "security": {
-      "csp": null
+    "$schema": "https://schema.tauri.app/config/2",
+    "productName": "OpenIPC Station",
+    "identifier": "dev.openipc.openipc-rs",
+    "build": {
+        "beforeDevCommand": "npm run dev:desktop",
+        "devUrl": "http://127.0.0.1:5173",
+        "beforeBuildCommand": "npm run build:desktop",
+        "frontendDist": "../dist"
+    },
+    "app": {
+        "windows": [
+            {
+                "title": "OpenIPC Station",
+                "width": 1280,
+                "height": 720,
+                "minWidth": 1024,
+                "minHeight": 640
+            }
+        ],
+        "security": {
+            "csp": null
+        }
+    },
+    "bundle": {
+        "active": true,
+        "targets": "all",
+        "icon": []
     }
-  },
-  "bundle": {
-    "active": true,
-    "targets": "all",
-    "icon": []
-  }
 }

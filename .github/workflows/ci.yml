@@ -119,7 +119,7 @@ jobs:
         runs-on: ubuntu-latest
         needs:
             - wasm-package
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        if: github.event_name == 'push'
         permissions:
             contents: read
             deployments: write
@@ -206,7 +206,7 @@ jobs:
         runs-on: ubuntu-latest
         needs:
             - docs
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        if: github.event_name == 'push'
         permissions:
             contents: read
             deployments: write
@@ -540,7 +540,7 @@ jobs:
               with:
                   projectPath: apps/openipc-station
                   tagName: ${{ github.ref_name }}
-                  releaseName: OpenIPC RS ${{ github.ref_name }}
-                  releaseBody: Desktop installers and application bundles for OpenIPC RS.
+                  releaseName: OpenIPC Station ${{ github.ref_name }}
+                  releaseBody: Desktop installers and application bundles for OpenIPC Station.
                   releaseDraft: false
                   prerelease: ${{ contains(github.ref_name, '-') }}

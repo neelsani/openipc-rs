@@ -323,43 +323,37 @@ a long-lived npm automation token.
 ## Versioning and Release Tags
 
 This repo currently uses one lockstep SemVer version for the Rust crates, WASM
-npm metadata, station app, Tauri shell, and docs site. Use the release script to
-update all version files together, create the release commit, and create the
-annotated Git tag:
+npm metadata, station app, Tauri shell, and docs site. Use `cargo release` with
+the workspace `release.toml` to update the shared version, create the release
+commit, and create the annotated Git tag:
 
 ```sh
-scripts/release-version.sh 0.2.0 --dry-run
-scripts/release-version.sh 0.2.0
+cargo install cargo-release
 ```
 
-The script updates:
+```sh
+cargo release patch --workspace
+cargo release patch --workspace --execute --no-publish
+```
+
+The cargo-release configuration updates:
 
 - `crates/*/Cargo.toml`
-- `Cargo.lock`
 - `crates/openipc-web/package.json`
 - `apps/openipc-station/package.json`
-- `apps/openipc-station/package-lock.json`
 - `apps/openipc-station/src-tauri/Cargo.toml`
-- `apps/openipc-station/src-tauri/tauri.conf.json`
 - `docs/package.json`
-- `docs/package-lock.json`
 
-To update files without committing, or to commit without tagging:
-
-```sh
-scripts/release-version.sh 0.2.0 --no-commit
-scripts/release-version.sh 0.2.0 --no-tag
-```
-
-To push both the current branch and tag:
+To preview without applying changes, or to push the tag after the release:
 
 ```sh
-scripts/release-version.sh 0.2.0 --push
+cargo release patch --workspace
+cargo release patch --workspace --execute --no-publish --push
 ```
 
 Tags are named with a leading `v`, such as `v0.2.0`. CI/CD publishing should be
 triggered from these tags, not from every `master` push. Tag builds publish
-crates.io packages, publish `@openipc-rs/web` to npm, and upload Tauri desktop
+crates.io packages, publish `openipc-web` to npm, and upload Tauri desktop
 bundles to the GitHub Release for Linux x64/arm64, macOS Apple Silicon/Intel,
 and Windows x64/arm64 when release auth is configured:
 

@@ -366,7 +366,7 @@ pub fn run() {
             openipc_stop_rx,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running OpenIPC RS desktop app");
+        .expect("error while running OpenIPC Station desktop app");
 }
 
 fn run_rx_worker(

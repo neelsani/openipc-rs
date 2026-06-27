@@ -7,22 +7,31 @@ sidebar_position: 11
 The repository uses one lockstep SemVer version for the Rust crates, WASM npm
 metadata, station app, Tauri shell, and docs site.
 
+Use `cargo release` with the workspace `release.toml` to update the shared
+version and create the annotated Git tag.
+
+Install it once on your machine:
+
+```sh
+cargo install cargo-release
+```
+
 Preview a release:
 
 ```sh
-scripts/release-version.sh 0.2.0 --dry-run
+cargo release patch --workspace
 ```
 
 Create the version bump commit and annotated Git tag:
 
 ```sh
-scripts/release-version.sh 0.2.0
+cargo release patch --workspace --execute --no-publish
 ```
 
 Push the branch and tag:
 
 ```sh
-scripts/release-version.sh 0.2.0 --push
+cargo release patch --workspace --execute --no-publish --push
 ```
 
 Pushing the `v0.2.0` tag triggers GitHub Actions release jobs. After the normal
@@ -33,15 +42,15 @@ Required release secret:
 
 - `CARGO_REGISTRY_TOKEN`
 
-Configure npm trusted publishing for `@openipc-rs/web` on npmjs.com:
+Configure npm trusted publishing for `openipc-web` on npmjs.com:
 
-| Field | Value |
-| --- | --- |
-| Publisher | GitHub Actions |
-| Organization or user | `neelsani` |
-| Repository | `openipc-rs` |
-| Workflow filename | `ci.yml` |
-| Allowed action | `npm publish` |
+| Field                | Value          |
+| -------------------- | -------------- |
+| Publisher            | GitHub Actions |
+| Organization or user | `neelsani`     |
+| Repository           | `openipc-rs`   |
+| Workflow filename    | `ci.yml`       |
+| Allowed action       | `npm publish`  |
 
 The existing Cloudflare secrets are still required for `master` deploys:
 
@@ -122,14 +131,14 @@ is released as bundled applications, not as a crates.io package.
 
 Tauri desktop bundles are uploaded to the GitHub Release for each `v*` tag for:
 
-| Release label | GitHub runner | Rust target |
-| --- | --- | --- |
-| `linux-x64` | `ubuntu-24.04` | `x86_64-unknown-linux-gnu` |
-| `linux-arm64` | `ubuntu-24.04-arm` | `aarch64-unknown-linux-gnu` |
-| `macos-apple-silicon` | `macos-15` | `aarch64-apple-darwin` |
-| `macos-intel` | `macos-15-intel` | `x86_64-apple-darwin` |
-| `windows-x64` | `windows-2025` | `x86_64-pc-windows-msvc` |
-| `windows-arm64` | `windows-11-arm` | `aarch64-pc-windows-msvc` |
+| Release label         | GitHub runner      | Rust target                 |
+| --------------------- | ------------------ | --------------------------- |
+| `linux-x64`           | `ubuntu-24.04`     | `x86_64-unknown-linux-gnu`  |
+| `linux-arm64`         | `ubuntu-24.04-arm` | `aarch64-unknown-linux-gnu` |
+| `macos-apple-silicon` | `macos-15`         | `aarch64-apple-darwin`      |
+| `macos-intel`         | `macos-15-intel`   | `x86_64-apple-darwin`       |
+| `windows-x64`         | `windows-2025`     | `x86_64-pc-windows-msvc`    |
+| `windows-arm64`       | `windows-11-arm`   | `aarch64-pc-windows-msvc`   |
 
 Linux releases are built on Ubuntu runners and emit the Linux bundle formats
 enabled by Tauri, such as AppImage, `.deb`, and `.rpm`; they are not separate

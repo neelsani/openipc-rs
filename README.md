@@ -284,7 +284,7 @@ cargo build -p openipc-web --target wasm32-unknown-unknown --release
 ```
 
 It then writes publishable npm metadata from
-`crates/openipc-web/package.json`, `crates/openipc-web/README`, and the root
+`crates/openipc-web/package.json`, `crates/openipc-web/README.md`, and the root
 `LICENSE` into `crates/openipc-web/pkg`. That generated `pkg` directory is the
 publishable npm package for `@openipc-rs/web`.
 

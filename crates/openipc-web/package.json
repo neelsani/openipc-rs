@@ -1,6 +1,6 @@
 {
   "name": "@openipc-rs/web",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "WebAssembly and WebUSB bindings for the openipc-rs receiver stack.",
   "license": "MIT",
   "type": "module",

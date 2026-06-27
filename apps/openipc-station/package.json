@@ -1,7 +1,7 @@
 {
   "name": "openipc-station",
   "private": true,
-  "version": "0.1.7",
+  "version": "0.1.8",
   "type": "module",
   "scripts": {
     "build:wasm": "npm --prefix ../../crates/openipc-web run build",

@@ -1,14 +1,14 @@
 [package]
 name = "openipc-native"
-version = "0.1.7"
+version = "0.1.8"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Native desktop adapter for openipc-rs"
 
 [dependencies]
-openipc-core = { version = "0.1.7", path = "../openipc-core" }
-openipc-rtl88xx = { version = "0.1.7", path = "../openipc-rtl88xx" }
+openipc-core = { version = "0.1.8", path = "../openipc-core" }
+openipc-rtl88xx = { version = "0.1.8", path = "../openipc-rtl88xx" }
 nusb.workspace = true
 
 [lib]

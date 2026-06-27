@@ -62,12 +62,23 @@ else
   changelog_range="HEAD"
 fi
 
-git-cliff \
-  --config "$WORKSPACE_ROOT/cliff.toml" \
-  --repository "$WORKSPACE_ROOT" \
-  --tag "v$NEW_VERSION" \
-  --prepend "$WORKSPACE_ROOT/CHANGELOG.md" \
-  "$changelog_range"
+
+if git -C "$WORKSPACE_ROOT" rev-parse "v$PREV_VERSION" >/dev/null 2>&1; then
+  git-cliff \
+    --config "$WORKSPACE_ROOT/cliff.toml" \
+    --repository "$WORKSPACE_ROOT" \
+    --tag "v$NEW_VERSION" \
+    --prepend "$WORKSPACE_ROOT/CHANGELOG.md" \
+    "v$PREV_VERSION..HEAD"
+else
+  git-cliff \
+    --config "$WORKSPACE_ROOT/cliff.toml" \
+    --repository "$WORKSPACE_ROOT" \
+    --tag "v$NEW_VERSION" \
+    --prepend "$WORKSPACE_ROOT/CHANGELOG.md" \
+    --unreleased
+fi
+
 ''',
 ]
 publish = false

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.10 - 2026-06-27
+
+### Changes
+- Update ci (e6cd4ff)
+
+
 ## 0.1.9 - 2026-06-27
 
 ### Changes

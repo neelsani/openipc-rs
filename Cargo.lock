@@ -2252,7 +2252,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "openipc-core"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "chacha20",
  "crypto_box",
@@ -2264,7 +2264,7 @@ dependencies = [
 
 [[package]]
 name = "openipc-native"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "nusb-webusb",
  "openipc-core",
@@ -2273,7 +2273,7 @@ dependencies = [
 
 [[package]]
 name = "openipc-rs-desktop"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "base64 0.22.1",
  "nusb-webusb",
@@ -2286,7 +2286,7 @@ dependencies = [
 
 [[package]]
 name = "openipc-rtl88xx"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "js-sys",
  "nusb-webusb",
@@ -2298,7 +2298,7 @@ dependencies = [
 
 [[package]]
 name = "openipc-web"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "js-sys",
  "nusb-webusb",

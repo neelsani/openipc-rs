@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "WebAssembly bindings for openipc-rs"
+readme = "README.md"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

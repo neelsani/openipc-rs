@@ -1,9 +1,13 @@
-# @openipc-rs/web
+# openipc-web
 
-WebAssembly and WebUSB bindings for the `openipc-rs` receiver stack.
+Rust crate and generated npm package for browser/WASM OpenIPC applications.
 
-This package is the browser SDK layer. It exposes the Rust OpenIPC transport
-pipeline to JavaScript:
+The Rust crate is published as `openipc-web` on crates.io. Its build script
+generates the npm package `@openipc-rs/web`, which contains the `.wasm`,
+JavaScript glue, and TypeScript definitions used by browser apps.
+
+This is the browser SDK layer. It exposes the Rust OpenIPC transport pipeline to
+JavaScript:
 
 - Realtek USB RX transfer parsing
 - WFB session/decryption/FEC handling
@@ -17,8 +21,18 @@ the encoded frames into WebCodecs, MSE, a worker pipeline, or another renderer.
 
 ## Install
 
+For browser applications, install the generated npm package:
+
 ```sh
-npm install @openipc-rs/web
+bun add @openipc-rs/web
+```
+
+Rust workspace users can depend on the crate directly when building the WASM
+package from source:
+
+```toml
+[dependencies]
+openipc-web = "0.1"
 ```
 
 ## Basic Shape
@@ -178,7 +192,7 @@ while (running) {
 From the repository root:
 
 ```sh
-npm --prefix crates/openipc-web run build
+bun run --cwd crates/openipc-web build
 ```
 
 The build generates the publishable package in:

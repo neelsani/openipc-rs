@@ -8,7 +8,8 @@ The repository uses one lockstep SemVer version for the Rust crates, WASM npm
 metadata, station app, Tauri shell, and docs site.
 
 Use `cargo release` with the workspace `release.toml` to update the shared
-version and create the annotated Git tag.
+version, update Bun lockfiles, update the changelog, create the release commit,
+and create the annotated Git tag.
 
 Install it once on your machine:
 
@@ -36,13 +37,14 @@ cargo release patch --workspace --execute --no-push
 
 `release.toml` has `publish = false`, so local release commands do not publish
 to crates.io. CI publishes from the pushed tag. The release hook also updates the
-npm `package.json` versions and regenerates app/docs lockfiles with
-`npm install --package-lock-only --ignore-scripts`. It also prepends the release
+Bun-managed `package.json` versions and regenerates app/docs `bun.lock` files
+with `bun install --lockfile-only`. It also prepends the release
 notes to `CHANGELOG.md` with `git-cliff`.
 
 Pushing the `v0.2.0` tag triggers GitHub Actions release jobs. After the normal
 checks pass, CI publishes crates.io packages, publishes `@openipc-rs/web` to npm
-with trusted publishing, and uploads Tauri desktop bundles to the GitHub Release.
+with npm trusted publishing, and uploads Tauri desktop bundles to the GitHub
+Release.
 
 Required release secret:
 
@@ -56,7 +58,7 @@ Configure npm trusted publishing for `@openipc-rs/web` on npmjs.com:
 | Organization or user | `neelsani`     |
 | Repository           | `openipc-rs`   |
 | Workflow filename    | `ci.yml`       |
-| Allowed action       | `npm publish`  |
+| Allowed action       | package publish from `ci.yml` |
 
 The existing Cloudflare secrets are still required for `master` and release-tag
 deploys:
@@ -69,10 +71,37 @@ CI deploys the public sites:
 - Station: [station.openipc-rs.neels.dev](https://station.openipc-rs.neels.dev)
 - Docs: [openipc-rs.neels.dev](https://openipc-rs.neels.dev)
 
-Release commits on `master` run the normal branch CI/deploy jobs, so the commit
-status in GitHub stays meaningful. The tag workflow for the same commit runs the
-release path: validation, station/docs deploy, crates.io publish, npm publish,
-and desktop artifact upload.
+Release commits on `master` run the normal branch CI/deploy jobs. The tag
+workflow for the same commit runs the release path: validation, station/docs
+deploy, crates.io publish, npm package publish, and desktop artifact upload.
+
+## Release Checklist
+
+1. Make normal source commits.
+2. Run a dry run:
+
+   ```sh
+   cargo release patch --workspace
+   ```
+
+3. Review the planned version bump, changelog, and files touched by the hook.
+4. Execute the release:
+
+   ```sh
+   cargo release patch --workspace --execute
+   ```
+
+5. Watch the GitHub Actions run for the `v*` tag.
+
+Use `minor` or `major` instead of `patch` when the public API or package
+contract changes enough to require it.
+
+The release hook syncs JavaScript package versions with Bun. If you ever need to
+manually align one package, use the same shape:
+
+```sh
+bun pm version 0.2.0 --cwd docs --no-git-tag-version --allow-same-version
+```
 
 ## Generated Artifacts
 
@@ -83,7 +112,8 @@ Generated artifacts are ignored by git:
 - `crates/openipc-web/pkg/`,
 - app `node_modules/` and `dist/`,
 - docs `node_modules/`, `.docusaurus/`, and `build/`,
-- root-level npm package tarballs.
+- stray `package-lock.json` files,
+- root-level package tarballs.
 
 Clean them with:
 
@@ -96,20 +126,19 @@ sh scripts/clean-generated.sh
 Build before packing or publishing:
 
 ```sh
-npm --prefix crates/openipc-web run build
-npm pack --dry-run crates/openipc-web/pkg
+bun run --cwd crates/openipc-web build
+bun pm pack --cwd crates/openipc-web/pkg --dry-run
 ```
 
 Publish when ready:
 
 ```sh
-npm publish crates/openipc-web/pkg --access public
+npm publish crates/openipc-web/pkg --access public --provenance
 ```
 
-CI performs this automatically for `v*` tags with npm trusted publishing. The
-workflow grants `id-token: write`, uses Node 24, and does not need `NPM_TOKEN`.
-npm generates provenance automatically for public packages published from
-GitHub Actions trusted publishing.
+CI performs this automatically for `v*` tags. The workflow builds the package
+with Bun, installs npm only for the publish step, and runs `npm publish` so npm
+trusted publishing can issue the release token.
 
 ## Cargo Crates
 
@@ -146,9 +175,11 @@ is released as bundled applications, not as a crates.io package.
 ## Desktop Releases
 
 Tauri desktop bundles are uploaded to the GitHub Release for each `v*` tag.
-Release assets are renamed before upload so the platform is visible in the file
-name, for example `OpenIPC-Station-v0.2.0-macos-apple-silicon.dmg` or
-`OpenIPC-Station-v0.2.0-windows-x64.msi`.
+The workflow uses Tauri's asset naming pattern:
+
+```text
+openipc-rs-station-[platform]-[arch]-[version].[ext]
+```
 
 Build targets:
 
@@ -175,7 +206,7 @@ Its production build includes the generated Rust/WASM package:
 
 ```sh
 cd apps/openipc-station
-npm run build
+bun run build
 ```
 
 The deployable output is `apps/openipc-station/dist`. GitHub Actions deploys it

@@ -4,6 +4,9 @@ sidebar_position: 14
 
 # Roadmap
 
+This is a practical validation list, not a promise that every item will land in
+the next release.
+
 ## Core Protocol
 
 - Done: Realtek RX aggregate parsing.
@@ -42,3 +45,13 @@ sidebar_position: 14
 - Done: WebCodecs playback, recording, persisted settings, and link HUD.
 - Still useful: fallback playback path for browsers without WebCodecs support
   for the active codec.
+
+## Release And Distribution
+
+- Done: crates.io metadata and crate READMEs.
+- Done: generated npm package metadata for `@openipc-rs/web`.
+- Done: GitHub Actions validation, Cloudflare Pages deploys, Bun-based npm
+  package publishing, crates.io publishing, and Tauri desktop release jobs.
+- Still useful: signed and notarized desktop releases.
+- Still useful: a hardware test matrix that records adapter model, chip family,
+  OS, browser, cold-start result, RX result, and adaptive-link TX result.

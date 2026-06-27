@@ -12,13 +12,13 @@ and the WebUSB Realtek device wrapper to JavaScript.
 When published:
 
 ```sh
-npm install @openipc-rs/web
+bun add @openipc-rs/web
 ```
 
 From this repository:
 
 ```sh
-npm --prefix crates/openipc-web run build
+bun run --cwd crates/openipc-web build
 ```
 
 The generated package is written to `crates/openipc-web/pkg`.
@@ -79,6 +79,10 @@ while (true) {
   }
 }
 ```
+
+`pushRxTransferProfiled` is usually the best entry point for applications. It
+returns frames and counters from the same call, so the UI can update metrics
+without replaying the transfer through another parser.
 
 ## WebCodecs Rendering
 
@@ -159,6 +163,10 @@ async function decodeFrame(frame: OpenIpcVideoFrame) {
 }
 ```
 
+The timestamp should be monotonic and in microseconds. The station app maps RTP
+timestamps to a local microsecond clock so WebCodecs sees stable timing even
+when frames arrive in bursts.
+
 ## Adaptive Link In Browser
 
 ```ts
@@ -178,9 +186,12 @@ while (running) {
     await decodeFrame(frame);
   }
 
-  await adaptive.tickAndSend(radio, performance.now(), 36);
+await adaptive.tickAndSend(radio, performance.now(), 36);
 }
 ```
+
+`tickAndSend` only sends when the adaptive-link interval says a feedback packet
+is due. Call it from the receive loop after updating counters.
 
 ## Browser Requirements
 

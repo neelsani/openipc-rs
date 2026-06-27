@@ -7,8 +7,8 @@ const sidebars: SidebarsConfig = {
     'architecture',
     {
       type: 'category',
-      label: 'Application Targets',
-      items: ['native', 'rust-library', 'web-wasm', 'wasm-sdk', 'desktop-tauri'],
+      label: 'Libraries And Apps',
+      items: ['crates', 'rust-library', 'native', 'web-wasm', 'wasm-sdk', 'desktop-tauri'],
     },
     {
       type: 'category',

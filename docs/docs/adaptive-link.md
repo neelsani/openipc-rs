@@ -6,6 +6,7 @@ sidebar_position: 8
 
 Adaptive link is the feedback loop from the ground station to the air unit. It
 lets the transmitter react to link quality by changing video and radio behavior.
+The ground station reports what it is seeing; the air side decides how to react.
 
 ```mermaid
 sequenceDiagram
@@ -30,6 +31,11 @@ sequenceDiagram
 - WFB FEC recovered and lost counters,
 - packet-loss events that should request an IDR/keyframe burst.
 
+The scoring logic is intentionally close to aviateur and the standalone
+`adaptive-link` receiver tools: keep a short window of signal/FEC state, turn it
+into a quality score, and periodically send that score back over the uplink
+radio port.
+
 ## Feedback Format
 
 The feedback text follows the aviateur and standalone `adaptive-link` ground
@@ -49,9 +55,36 @@ The text is prefixed with a 32-bit big-endian length and then wrapped into a
 That payload is encrypted, FEC-wrapped, converted to radiotap plus 802.11, and
 sent through the Realtek bulk-OUT endpoint on WFB radio port 160.
 
-## Power Control
+## What Adaptive Link Does Not Mean
+
+Adaptive link is not the same thing as "the ground station automatically picks
+TX power." In OpenIPC setups, the feedback packet gives the air unit enough
+information to adjust behavior such as bitrate, FEC, and keyframe requests. Any
+actual policy on the transmitter side belongs to the air unit.
+
+## Ground-Side TX Power Override
 
 Manual uplink TX-power override is implemented through Realtek TXAGC
 programming for RTL8812/RTL8821 register tables and RTL8814 command writes. It
 is exposed in native and browser paths, but still needs live on-air validation
 across chip families.
+
+In the station UI this is the "Uplink TX power" slider shown when adaptive link
+is enabled. In the CLI it is `--alink-tx-power POWER`, where `POWER` is a TXAGC
+index accepted by the driver.
+
+## Browser And Native Flow
+
+Native:
+
+```text
+RX bulk transfers -> adaptive counters -> WFB uplink packet -> nusb bulk OUT
+```
+
+Browser:
+
+```text
+WebUSB RX transfers -> Rust/WASM counters -> WFB uplink packet -> WebUSB bulk OUT
+```
+
+The feedback construction is shared Rust. Only the USB transport is different.

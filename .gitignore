@@ -9,8 +9,8 @@
 /docs/build/
 /docs/.docusaurus/
 /docs/.wrangler/
-/docs/bun.lock
 /release-assets/
+package-lock.json
 .env
 .env.*
 .DS_Store

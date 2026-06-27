@@ -3,4 +3,3 @@ build
 .docusaurus
 .cache
 .wrangler
-bun.lock

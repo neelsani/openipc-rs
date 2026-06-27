@@ -8,7 +8,7 @@ The WASM SDK lives in `crates/openipc-web` and is built with
 `wasm-bindgen`.
 
 ```sh
-npm --prefix crates/openipc-web run build
+bun run --cwd crates/openipc-web build
 ```
 
 The generated package is written to:
@@ -20,6 +20,12 @@ crates/openipc-web/pkg
 That package contains the compiled `.wasm`, JavaScript glue, TypeScript
 definitions, npm package metadata, README, and MIT license. The generated output
 is ignored by git. CI recreates it when publishing.
+
+For applications outside this repository, install the generated npm package:
+
+```sh
+bun add @openipc-rs/web
+```
 
 ## Browser Flow
 
@@ -45,6 +51,21 @@ flowchart TD
 7. Rust/WASM returns structured video frames, link metrics, and debug metrics.
 8. React sends frames to WebCodecs and renders the decoded output.
 
+## What Crosses The JS/WASM Boundary
+
+The browser path keeps high-volume protocol work in Rust:
+
+1. JavaScript passes one USB transfer buffer to `OpenIpcReceiver`.
+2. Rust parses Realtek descriptors, filters packets, decrypts WFB, performs FEC
+   recovery, parses RTP, and emits encoded video frames.
+3. JavaScript receives only frame objects and metrics, then feeds compressed
+   bytes to WebCodecs.
+
+The app does not pass every RTP packet back and forth. It does pass each USB
+transfer into WASM and each completed encoded frame back out. That is the right
+boundary for the current browser design because WebCodecs owns the decoded
+`VideoFrame` lifecycle.
+
 ## WebCodecs Boundary
 
 Rust extracts H.264/H.265 Annex-B frames and returns frame metadata. JavaScript
@@ -53,6 +74,15 @@ owns WebCodecs because the browser API is naturally tied to rendering,
 
 This keeps the heavy packet/protocol path in Rust while avoiding unnecessary
 copies of decoded video surfaces back into WASM.
+
+## Browser Constraints
+
+- WebUSB requires HTTPS or `localhost`.
+- `navigator.usb.requestDevice` must be called from a user gesture.
+- WebUSB device access can vary by browser and operating system.
+- WebCodecs H.264 support is common. H.265 support depends heavily on the
+  browser, OS, and hardware decoder availability.
+- The station preloads `/gs.key` only when there is no key in local storage.
 
 See [WASM SDK Usage](./wasm-sdk.md) for a complete WebUSB and WebCodecs code
 example.

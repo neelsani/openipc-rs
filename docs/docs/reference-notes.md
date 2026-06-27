@@ -45,6 +45,12 @@ Packet flow:
 `openipc-rs` mirrors the protocol behavior in shared Rust, while keeping UI,
 USB permissions, and rendering at platform edges.
 
+Aviateur uses native concurrency and UDP-style boundaries because it is a native
+application composed from native receiver/playback pieces. The browser station
+does not need to mirror that exact shape. In `openipc-rs`, JavaScript drives an
+async receive loop, Rust/WASM processes each transfer, and WebCodecs owns
+decode/render scheduling.
+
 ## openipc-zig
 
 `openipc-zig` proves that browser/WebUSB OpenIPC receive is possible, even if
@@ -64,3 +70,7 @@ PixelPilot is useful as an Android reference for packaging a full ground-station
 experience around an H.264/H.265 WFB feed. It helps validate expectations for
 codec handling, latency, and UI-level receiver metrics, but it is not the
 source of the Realtek USB driver path used here.
+
+PixelPilot is also a useful reminder that playback is a product feature, not
+just a parser feature. Resolution, decoder status, render FPS, bitrate, and
+error counters need to be visible when debugging field behavior.

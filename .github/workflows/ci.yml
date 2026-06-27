@@ -93,9 +93,9 @@ jobs:
                       "apps/openipc-station/package.json",
                       "docs/package.json",
                   ]
-                  lock_files = [
-                      "apps/openipc-station/package-lock.json",
-                      "docs/package-lock.json",
+                  bun_lock_files = [
+                      "apps/openipc-station/bun.lock",
+                      "docs/bun.lock",
                   ]
 
                   errors = []
@@ -109,14 +109,18 @@ jobs:
                       if version != expected:
                           errors.append(f"{rel}: {version} != {expected}")
 
-                  for rel in lock_files:
-                      data = json.loads((root / rel).read_text())
-                      for label, version in [
-                          ("root", data.get("version")),
-                          ("packages[\"\"]", data.get("packages", {}).get("", {}).get("version")),
-                      ]:
-                          if version != expected:
-                              errors.append(f"{rel} {label}: {version} != {expected}")
+                  for rel in bun_lock_files:
+                      path = root / rel
+                      if not path.is_file():
+                          errors.append(f"{rel} is missing")
+                          continue
+                      text = path.read_text()
+                      if "/api/npm/" in text or "artifacthub" in text or "oraclecorp" in text:
+                          errors.append(f"{rel} contains a non-public registry URL")
+
+                  npm_locks = sorted(str(path) for path in root.rglob("package-lock.json"))
+                  if npm_locks:
+                      errors.append("package-lock.json files are not used; found: " + ", ".join(npm_locks))
 
                   changelog = (root / "CHANGELOG.md").read_text()
                   if f"## {expected} " not in changelog and f"## {expected}\n" not in changelog:
@@ -161,23 +165,21 @@ jobs:
                   restore-keys: |
                       wasm-cargo-${{ runner.os }}-
 
-            - name: Install Node
-              uses: actions/setup-node@v4
+            - name: Install Bun
+              uses: oven-sh/setup-bun@v2
               with:
-                  node-version: 22
-                  cache: npm
-                  cache-dependency-path: apps/openipc-station/package-lock.json
+                  bun-version: 1.3.14
 
             - name: Install app dependencies
               working-directory: apps/openipc-station
-              run: npm ci
+              run: bun install --frozen-lockfile
 
             - name: Build station web app
               working-directory: apps/openipc-station
-              run: npm run build
+              run: bun run build
 
             - name: Verify WASM npm package
-              run: npm pack --dry-run crates/openipc-web/pkg
+              run: bun pm pack --cwd crates/openipc-web/pkg --dry-run
 
     deploy-station:
         name: Deploy Station Site
@@ -215,20 +217,18 @@ jobs:
                   restore-keys: |
                       station-cargo-${{ runner.os }}-
 
-            - name: Install Node
-              uses: actions/setup-node@v4
+            - name: Install Bun
+              uses: oven-sh/setup-bun@v2
               with:
-                  node-version: 22
-                  cache: npm
-                  cache-dependency-path: apps/openipc-station/package-lock.json
+                  bun-version: 1.3.14
 
             - name: Install app dependencies
               working-directory: apps/openipc-station
-              run: npm ci
+              run: bun install --frozen-lockfile
 
             - name: Build station web app
               working-directory: apps/openipc-station
-              run: npm run build
+              run: bun run build
 
             - name: Deploy station to Cloudflare Pages
               if: env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != ''
@@ -251,20 +251,18 @@ jobs:
             - name: Checkout
               uses: actions/checkout@v4
 
-            - name: Install Node
-              uses: actions/setup-node@v4
+            - name: Install Bun
+              uses: oven-sh/setup-bun@v2
               with:
-                  node-version: 22
-                  cache: npm
-                  cache-dependency-path: docs/package-lock.json
+                  bun-version: 1.3.14
 
             - name: Install docs dependencies
               working-directory: docs
-              run: npm ci
+              run: bun install --frozen-lockfile
 
             - name: Build docs
               working-directory: docs
-              run: npm run build
+              run: bun run build
 
     deploy-docs:
         name: Deploy Docs Site
@@ -283,20 +281,18 @@ jobs:
             - name: Checkout
               uses: actions/checkout@v4
 
-            - name: Install Node
-              uses: actions/setup-node@v4
+            - name: Install Bun
+              uses: oven-sh/setup-bun@v2
               with:
-                  node-version: 22
-                  cache: npm
-                  cache-dependency-path: docs/package-lock.json
+                  bun-version: 1.3.14
 
             - name: Install docs dependencies
               working-directory: docs
-              run: npm ci
+              run: bun install --frozen-lockfile
 
             - name: Build docs
               working-directory: docs
-              run: npm run build
+              run: bun run build
 
             - name: Deploy docs to Cloudflare Pages
               if: env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != ''
@@ -376,20 +372,18 @@ jobs:
                   restore-keys: |
                       desktop-cargo-${{ matrix.label }}-
 
-            - name: Install Node
-              uses: actions/setup-node@v4
+            - name: Install Bun
+              uses: oven-sh/setup-bun@v2
               with:
-                  node-version: 22
-                  cache: npm
-                  cache-dependency-path: apps/openipc-station/package-lock.json
+                  bun-version: 1.3.14
 
             - name: Install app dependencies
               working-directory: apps/openipc-station
-              run: npm ci
+              run: bun install --frozen-lockfile
 
             - name: Check desktop build
               working-directory: apps/openipc-station
-              run: npm run desktop:check
+              run: bun run desktop:check
 
     publish-crates:
         name: Publish Crates.io Packages
@@ -488,17 +482,25 @@ jobs:
                   restore-keys: |
                       publish-wasm-cargo-${{ runner.os }}-
 
-            - name: Install Node
+            - name: Install Bun
+              uses: oven-sh/setup-bun@v2
+              with:
+                  bun-version: 1.3.14
+
+            - name: Check Bun
+              run: bun --version
+
+            - name: Build WASM SDK package
+              run: bun run --cwd crates/openipc-web build
+
+            - name: Install npm for trusted publishing
               uses: actions/setup-node@v4
               with:
                   node-version: 24
                   registry-url: https://registry.npmjs.org
 
-            - name: Check npm trusted publishing support
+            - name: Check npm
               run: npm --version
-
-            - name: Build WASM SDK package
-              run: npm --prefix crates/openipc-web run build
 
             - name: Publish npm package
               run: |
@@ -512,7 +514,7 @@ jobs:
                     echo "@openipc-rs/web@$VERSION is already on npm; skipping"
                     exit 0
                   fi
-                  npm publish crates/openipc-web/pkg --access public
+                  npm publish crates/openipc-web/pkg --access public --provenance
 
     desktop-release:
         name: Desktop Release (${{ matrix.label }})
@@ -587,16 +589,14 @@ jobs:
                   restore-keys: |
                       release-desktop-cargo-${{ matrix.label }}-
 
-            - name: Install Node
-              uses: actions/setup-node@v4
+            - name: Install Bun
+              uses: oven-sh/setup-bun@v2
               with:
-                  node-version: 22
-                  cache: npm
-                  cache-dependency-path: apps/openipc-station/package-lock.json
+                  bun-version: 1.3.14
 
             - name: Install app dependencies
               working-directory: apps/openipc-station
-              run: npm ci
+              run: bun install --frozen-lockfile
 
             - name: Build and upload desktop bundles
               uses: tauri-apps/tauri-action@v0

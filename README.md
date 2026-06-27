@@ -45,16 +45,16 @@ Run the browser/WebUSB station:
 
 ```sh
 cd apps/openipc-station
-npm install
-npm run dev
+bun install
+bun run dev
 ```
 
 Run the desktop station:
 
 ```sh
 cd apps/openipc-station
-npm install
-npm run desktop:dev
+bun install
+bun run desktop:dev
 ```
 
 Use the native CLI:
@@ -68,7 +68,7 @@ cargo run -p openipc-native -- recv --key gs.key --rf-channel 36 --adaptive-link
 Build the WASM SDK:
 
 ```sh
-npm --prefix crates/openipc-web run build
+bun run --cwd crates/openipc-web build
 ```
 
 Clean generated files:
@@ -94,8 +94,8 @@ Run them locally:
 
 ```sh
 cd docs
-npm install
-npm run start
+bun install
+bun run start
 ```
 
 - [Getting Started](docs/docs/getting-started.md)
@@ -117,7 +117,7 @@ cargo release patch --workspace --execute
 ```
 
 Local release commands only bump, commit, tag, and push. GitHub Actions
-publishes crates, npm package, desktop bundles, and web/docs deploys.
+publishes crates, the npm package, desktop bundles, and web/docs deploys.
 `git-cliff` updates [CHANGELOG.md](CHANGELOG.md) during release.
 
 ## CI/CD

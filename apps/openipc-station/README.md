@@ -8,16 +8,16 @@ Hosted app: [station.openipc-rs.neels.dev](https://station.openipc-rs.neels.dev)
 ## Browser Development
 
 ```sh
-npm install
-npm run dev
+bun install
+bun run dev
 ```
 
-`npm run dev` builds the Rust/WASM package first, then starts Vite.
+`bun run dev` builds the Rust/WASM package first, then starts Vite.
 
 ## Production Web Build
 
 ```sh
-npm run build
+bun run build
 ```
 
 The static build is written to `dist`. It includes the generated
@@ -30,7 +30,7 @@ Local development only needs the build and preview commands above.
 ## Desktop Development
 
 ```sh
-npm run desktop:dev
+bun run desktop:dev
 ```
 
 Desktop mode opens a Tauri window and uses the native Rust/nusb backend instead

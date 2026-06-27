@@ -1,6 +1,6 @@
-# openipc-rs Docs Site
+# openipc-rs Docs
 
-This directory is the Docusaurus documentation site for `openipc-rs`.
+This directory contains the Docusaurus site for `openipc-rs`.
 
 Hosted docs: [openipc-rs.neels.dev](https://openipc-rs.neels.dev)
 
@@ -8,15 +8,15 @@ Hosted docs: [openipc-rs.neels.dev](https://openipc-rs.neels.dev)
 
 ```sh
 cd docs
-npm install
-npm run start
+bun install
+bun run start
 ```
 
 ## Build
 
 ```sh
 cd docs
-npm run build
+bun run build
 ```
 
 The static site is written to `docs/build`.
@@ -30,7 +30,7 @@ are ready.
 ## Deploy
 
 GitHub Actions builds and deploys the docs to Cloudflare on normal pushes to
-`master`. Local docs work only needs Docusaurus.
+`master` and on `v*` release tags. Local docs work only needs Docusaurus.
 
 Repository secrets used by CI:
 

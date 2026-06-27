@@ -8,10 +8,9 @@ Use `openipc-rs` as Rust crates when you want to build your own receiver,
 diagnostic tool, desktop app, recorder, streamer, or hardware validation
 utility.
 
-## Dependency Shape
+## Dependencies
 
-After the crates are published, downstream applications can depend on them from
-crates.io:
+From crates.io:
 
 ```toml
 [dependencies]
@@ -19,12 +18,12 @@ openipc-core = "0.1"
 openipc-rtl88xx = "0.1"
 ```
 
-During development before a crates.io release, use a Git dependency or local
-path dependency on this repository:
+From git:
 
 ```toml
 [dependencies]
 openipc-core = { git = "https://github.com/neelsani/openipc-rs", package = "openipc-core" }
+openipc-rtl88xx = { git = "https://github.com/neelsani/openipc-rs", package = "openipc-rtl88xx" }
 ```
 
 The hardware and WASM crates use the published WebUSB-capable `nusb-webusb`
@@ -34,10 +33,20 @@ package while importing it as `nusb`:
 nusb = { package = "nusb-webusb", version = "0.2.3" }
 ```
 
+## Library Boundaries
+
+- `openipc-core` is pure protocol logic. It can process bytes from files, USB,
+  tests, or another transport.
+- `openipc-rtl88xx` owns Realtek USB device access and monitor-mode setup.
+- `openipc-native` is a CLI and thin re-export crate.
+- `openipc-web` is for building the WASM/npm package. Browser apps normally use
+  `@openipc-rs/web` from npm instead.
+
 ## Parse A Realtek RX Transfer
 
 ```rust
-use openipc_core::{parse_rx_aggregate, RxPacketType};
+use openipc_core::parse_rx_aggregate;
+use openipc_core::realtek::RxPacketType;
 
 fn inspect_transfer(transfer: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
     for packet in parse_rx_aggregate(transfer)? {
@@ -66,8 +75,9 @@ fn inspect_transfer(transfer: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
 ```rust
 use openipc_core::{
     parse_rx_aggregate, ChannelId, FrameLayout, PipelineEvent, ReceiverPipeline,
-    RxPacketType, WfbKeypair,
+    WfbKeypair,
 };
+use openipc_core::realtek::RxPacketType;
 
 fn build_pipeline(keypair_bytes: &[u8]) -> Result<ReceiverPipeline, Box<dyn std::error::Error>> {
     let keypair = WfbKeypair::from_bytes(keypair_bytes)?;
@@ -115,8 +125,9 @@ player.
 use std::time::Duration;
 
 use openipc_core::{
-    ChannelId, FrameLayout, PipelineEvent, ReceiverPipeline, RxPacketType, WfbKeypair,
+    ChannelId, FrameLayout, PipelineEvent, ReceiverPipeline, WfbKeypair,
 };
+use openipc_core::realtek::RxPacketType;
 use openipc_rtl88xx::{
     ChannelWidth, DriverOptions, RadioConfig, RealtekDevice, DEFAULT_RX_TRANSFER_SIZE,
 };
@@ -160,3 +171,27 @@ fn receive_once(keypair_bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> 
 
 For a full receive loop with adaptive link, use `openipc-rs recv` as the
 reference implementation and then extract the pieces you need.
+
+## Build Adaptive-Link Feedback
+
+The adaptive-link pieces live in `openipc-core`; the actual send operation comes
+from the driver.
+
+```rust
+use openipc_core::{AdaptiveLinkSender, WfbTxKeypair};
+
+fn make_sender(key_bytes: &[u8]) -> Result<AdaptiveLinkSender, Box<dyn std::error::Error>> {
+    let keypair = WfbTxKeypair::from_bytes(key_bytes)?;
+    Ok(AdaptiveLinkSender::new(
+        openipc_core::channel::DEFAULT_LINK_ID,
+        keypair,
+        0,
+        1,
+        5,
+    )?)
+}
+```
+
+The receiver loop records RSSI/SNR and FEC counters, then periodically asks the
+sender for an encrypted WFB uplink packet. Native and browser code use the same
+packet builder.

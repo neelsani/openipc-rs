@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Shared OpenIPC FPV packet, RTP, and Realtek RX parsing logic"
+readme = "README.md"
 
 [lib]
 name = "openipc_core"

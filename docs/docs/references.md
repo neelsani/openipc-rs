@@ -33,3 +33,11 @@ designing `openipc-rs`.
 - [kevinmehall/nusb](https://github.com/kevinmehall/nusb)
 - [WebUSB API](https://developer.mozilla.org/en-US/docs/Web/API/USB)
 - [WebCodecs API](https://developer.mozilla.org/en-US/docs/Web/API/WebCodecs_API)
+
+## Published Packages
+
+- [openipc-core on crates.io](https://crates.io/crates/openipc-core)
+- [openipc-rtl88xx on crates.io](https://crates.io/crates/openipc-rtl88xx)
+- [openipc-native on crates.io](https://crates.io/crates/openipc-native)
+- [openipc-web on crates.io](https://crates.io/crates/openipc-web)
+- [@openipc-rs/web on npm](https://www.npmjs.com/package/@openipc-rs/web)

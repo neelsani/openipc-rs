@@ -8,15 +8,18 @@ target
 .cargo-tools
 crates/openipc-web/pkg
 apps/openipc-station/node_modules
+apps/openipc-station/package-lock.json
 apps/openipc-station/dist
 apps/openipc-station/.wrangler
 apps/openipc-station/src-tauri/gen
 apps/openipc-station/src-tauri/target
 docs/node_modules
+docs/package-lock.json
 docs/build
 docs/.docusaurus
 docs/.wrangler
-docs/bun.lock
+crates/openipc-web/package-lock.json
+package-lock.json
 release-assets
 "
 
@@ -32,8 +35,8 @@ case "${1:-}" in
     cat <<'EOF'
 Usage: scripts/clean-generated.sh [--dry-run]
 
-Removes generated build artifacts, dependency installs, and local tool caches.
-Does not remove source files, lockfiles, or the default demo key at
+Removes generated build artifacts, dependency installs, local tool caches, and
+stray npm lockfiles. Does not remove source files, Bun lockfiles, or the default demo key at
 apps/openipc-station/public/gs.key.
 EOF
     exit 0

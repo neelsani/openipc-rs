@@ -5,13 +5,11 @@ slug: /
 
 # openipc-rs
 
-`openipc-rs` is a Rust receiver stack for OpenIPC FPV ground-station
-applications. The repo ships four pieces:
+`openipc-rs` is a Rust receiver stack for OpenIPC FPV ground stations. It is
+meant to be useful in two ways:
 
-- shared Rust crates for native applications,
-- a native CLI and Tauri desktop station,
-- a browser/WebAssembly SDK using WebUSB,
-- a React-based OpenIPC Station application.
+- as reusable crates for people building their own OpenIPC tools, and
+- as a working station app for browser/WebUSB and Tauri desktop builds.
 
 The project was built after studying `devourer`, `aviateur`, `openipc-zig`, the
 standalone `adaptive-link` tools, and PixelPilot. Those projects are reference
@@ -30,9 +28,26 @@ openipc-rs/
   scripts/                    build, clean, release helpers
 ```
 
-## Current Boundary
+## What Runs Where
 
-The implementation includes the full receive pipeline in Rust, browser and
-desktop station apps, adaptive-link feedback generation, and shared Realtek
-bring-up paths for native and WebUSB. Hardware support still needs live adapter
-validation per chip family before the support matrix can be treated as final.
+The receive path is intentionally Rust-heavy. Native and browser builds share
+Realtek descriptor parsing, WFB session handling, packet decryption, FEC
+recovery, RTP depacketization, Annex-B video framing, and adaptive-link packet
+construction.
+
+The platform boundary is kept at the edges:
+
+- native apps open USB devices through `nusb`,
+- browser apps ask JavaScript for WebUSB permission and then pass the granted
+  `UsbDevice` into Rust/WASM,
+- playback is handled by WebCodecs in the React app,
+- desktop builds use Tauri only as the application shell around the same React
+  UI and native Rust backend.
+
+## Current Status
+
+The protocol pipeline, browser SDK, station UI, native CLI, adaptive-link
+feedback path, and Realtek driver scaffolding are implemented. The remaining
+work is mostly hardware validation: comparing traces against known-good
+receivers, testing more adapters, and proving cold-start behavior across chip
+families and operating systems.

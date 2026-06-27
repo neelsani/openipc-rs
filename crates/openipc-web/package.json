@@ -4,10 +4,11 @@
   "description": "WebAssembly and WebUSB bindings for the openipc-rs receiver stack.",
   "license": "MIT",
   "type": "module",
+  "packageManager": "bun@1.3.14",
   "scripts": {
-    "build": "node build.mjs",
-    "pack:dry-run": "npm run build && npm pack --dry-run pkg",
-    "publish:package": "npm run build && npm publish pkg --access public"
+    "build": "bun build.mjs",
+    "pack:dry-run": "bun run build && bun pm pack --cwd pkg --dry-run",
+    "publish:package": "bun run build && npm publish pkg --access public --provenance"
   },
   "module": "./openipc_web.js",
   "types": "./openipc_web.d.ts",
@@ -31,7 +32,7 @@
     "url": "git+https://github.com/neelsani/openipc-rs.git",
     "directory": "crates/openipc-web"
   },
-  "homepage": "https://github.com/neelsani/openipc-rs#readme",
+  "homepage": "https://openipc-rs.neels.dev/docs/wasm-sdk",
   "bugs": {
     "url": "https://github.com/neelsani/openipc-rs/issues"
   },

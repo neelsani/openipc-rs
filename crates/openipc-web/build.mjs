@@ -11,11 +11,11 @@ const pkgDir = join(crateDir, "pkg");
 
 function usage() {
   console.error(`Usage:
-  npm --prefix crates/openipc-web run build
+  bun run --cwd crates/openipc-web build
 
 Builds openipc-web for wasm32-unknown-unknown, generates wasm-bindgen
 JavaScript/TypeScript glue into crates/openipc-web/pkg, and copies publishable
-npm metadata plus the MIT license into that generated package directory.
+npm package metadata plus the MIT license into that generated package directory.
 
 Set OPENIPC_RS_USE_WASM_PACK=1 to use wasm-pack when it is installed.`);
 }

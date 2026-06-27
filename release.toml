@@ -5,13 +5,6 @@ shared-version = true
 tag-name = "v{{version}}"
 pre-release-commit-message = "chore: release v{{version}}"
 tag-message = "v{{version}}"
-pre-release-replacements = [
-  {file = "crates/openipc-web/package.json", search = '"version": ".*"', replace = '"version": "{{version}}"'},
-  {file = "apps/openipc-station/package.json", search = '"version": ".*"', replace = '"version": "{{version}}"'},
-  {file = "apps/openipc-station/package-lock.json", search = '"version": ".*"', replace = '"version": "{{version}}"'},
-  {file = "docs/package-lock.json", search = '"version": ".*"', replace = '"version": "{{version}}"'},
-  {file = "docs/package.json", search = '"version": ".*"', replace = '"version": "{{version}}"'},
-  ]
+pre-release-hook = ["bash", "scripts/pre-release.sh"]
 publish = false
 push = false
-tag = true

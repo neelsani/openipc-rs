@@ -26,14 +26,13 @@ grants the device in JavaScript.
 
 ## Validation Boundary
 
-The driver is intended to be standalone and does not build against devourer.
-However, hardware bring-up still needs register-trace comparison and live
-adapter tests before each supported chip should be marked final.
+The driver does not build against devourer. Hardware bring-up still needs
+register-trace comparison and live adapter tests before each supported chip can
+be marked final.
 
 Current status:
 
 - RTL8812/RTL8821 cold initialization is implemented and needs live validation.
 - RTL8814 reserved-page/DDMA firmware download is implemented and needs live
   validation.
-- EFUSE/RFE parsing is still conservative and should be expanded with hardware
-  fixtures.
+- EFUSE/RFE parsing is still conservative and needs hardware fixtures.

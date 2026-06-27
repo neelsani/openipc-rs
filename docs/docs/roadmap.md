@@ -18,7 +18,7 @@ sidebar_position: 14
 
 - Done: register helpers around vendor request `0x05`.
 - Done: endpoint discovery and OUT endpoint selection.
-- Done: firmware/table data vendored into Rust.
+- Done: firmware/table data checked into the Rust driver crate.
 - Done: RTL8812/RTL8821 bring-up paths.
 - Done: RTL8814 reserved-page/DDMA firmware path.
 - Done: TX descriptor support for adaptive-link feedback.

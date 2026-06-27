@@ -4,6 +4,11 @@ sidebar_position: 2
 
 # Getting Started
 
+Hosted builds:
+
+- Docs: [openipc-rs.neels.dev](https://openipc-rs.neels.dev)
+- Station: [station.openipc-rs.neels.dev](https://station.openipc-rs.neels.dev)
+
 Clone the repository normally:
 
 ```sh
@@ -40,11 +45,8 @@ Build the deployable browser/WebUSB version:
 npm run build
 ```
 
-Deploy that build to Cloudflare Workers:
-
-```sh
-npm run deploy:worker
-```
+The output goes to `apps/openipc-station/dist`. CI deploys that build from
+`master`.
 
 ## Run OpenIPC Station As A Desktop App
 

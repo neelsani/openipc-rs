@@ -4,26 +4,26 @@ import Link from '@docusaurus/Link';
 
 const paths = [
   {
-    title: 'Run The Station',
-    body: 'Build the browser/WebUSB app or the Tauri desktop shell from the same React UI.',
+    title: 'Run the station',
+    body: 'Start the browser app, build the Tauri desktop app, or open the hosted build.',
     to: '/docs/getting-started',
     action: 'Start Here',
   },
   {
-    title: 'Use The Rust Crates',
-    body: 'Embed the receiver pipeline, Realtek parser, WFB/FEC logic, and adaptive-link helpers.',
+    title: 'Use the Rust crates',
+    body: 'Pull in the packet pipeline, Realtek helpers, WFB/FEC logic, and adaptive-link code.',
     to: '/docs/rust-library',
     action: 'Rust Examples',
   },
   {
-    title: 'Use The WASM SDK',
-    body: 'Request a WebUSB adapter, initialize monitor mode, receive Annex-B frames, and feed WebCodecs.',
+    title: 'Use the WASM SDK',
+    body: 'Request a WebUSB adapter, receive Annex-B frames, and feed WebCodecs from a web app.',
     to: '/docs/wasm-sdk',
     action: 'WASM Examples',
   },
   {
-    title: 'Understand The Driver',
-    body: 'Follow the Realtek USB bring-up boundary, shared HAL, and hardware validation status.',
+    title: 'Check the driver',
+    body: 'See what is implemented, what came from the reference projects, and what still needs hardware testing.',
     to: '/docs/realtek-driver',
     action: 'Driver Notes',
   },
@@ -62,7 +62,7 @@ export default function Home(): JSX.Element {
   return (
     <Layout
       title="Rust OpenIPC ground-station stack"
-      description="Rust receiver building blocks for OpenIPC FPV ground-station applications"
+      description="Rust crates, WebUSB SDK, and station app for OpenIPC video"
     >
       <main className="homePage">
         <section className="heroShell">
@@ -77,14 +77,17 @@ export default function Home(): JSX.Element {
                 openipc-rs
               </Heading>
               <p className="homeSubtitle">
-                A clean Rust implementation of the OpenIPC receive path, built
-                for native ground stations, browser WebUSB apps, and reusable
-                protocol libraries.
+                Rust code for receiving OpenIPC video through Realtek USB WiFi
+                adapters, with a browser/WebUSB app, a Tauri desktop app, and
+                reusable crates for custom ground stations.
               </p>
               <div className="heroActions">
                 <Link className="button button--primary button--lg" to="/docs/getting-started">
                   Build And Run
                 </Link>
+                <a className="button button--secondary button--lg" href="https://station.openipc-rs.neels.dev">
+                  Open Station
+                </a>
                 <Link className="button button--secondary button--lg" to="/docs/architecture">
                   Architecture
                 </Link>
@@ -112,7 +115,7 @@ export default function Home(): JSX.Element {
 
         <section className="container pathSection">
           <div className="sectionKicker">Choose A Path</div>
-          <Heading as="h2">Build an app, inspect the protocol, or work on hardware.</Heading>
+          <Heading as="h2">Run the app, use the libraries, or inspect the radio path.</Heading>
           <div className="pathGrid">
             {paths.map((path) => (
               <article className="pathCard" key={path.title}>

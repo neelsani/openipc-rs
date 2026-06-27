@@ -3,10 +3,10 @@ import type * as Preset from '@docusaurus/preset-classic';
 
 const config: Config = {
   title: 'openipc-rs',
-  tagline: 'Rust receiver building blocks for OpenIPC ground stations',
+  tagline: 'Rust crates, WebUSB SDK, and station app for OpenIPC video',
   favicon: 'img/logo.svg',
 
-  url: process.env.DOCUSAURUS_URL ?? 'https://openipc-rs-docs.workers.dev',
+  url: process.env.DOCUSAURUS_URL ?? 'https://openipc-rs.neels.dev',
   baseUrl: process.env.DOCUSAURUS_BASE_URL ?? '/',
 
   organizationName: 'neelsani',
@@ -72,6 +72,11 @@ const config: Config = {
           position: 'right',
         },
         {
+          href: 'https://station.openipc-rs.neels.dev',
+          label: 'Station',
+          position: 'right',
+        },
+        {
           type: 'localeDropdown',
           position: 'right',
         },
@@ -124,6 +129,10 @@ const config: Config = {
             {
               label: 'Roadmap',
               to: '/docs/roadmap',
+            },
+            {
+              label: 'Station',
+              href: 'https://station.openipc-rs.neels.dev',
             },
           ],
         },

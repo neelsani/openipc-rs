@@ -19,7 +19,7 @@ crates/openipc-web/pkg
 
 That package contains the compiled `.wasm`, JavaScript glue, TypeScript
 definitions, npm package metadata, README, and MIT license. The generated output
-is ignored by git and should be recreated in CI when publishing.
+is ignored by git. CI recreates it when publishing.
 
 ## Browser Flow
 

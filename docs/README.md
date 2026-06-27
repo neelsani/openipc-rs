@@ -2,6 +2,8 @@
 
 This directory is the Docusaurus documentation site for `openipc-rs`.
 
+Hosted docs: [openipc-rs.neels.dev](https://openipc-rs.neels.dev)
+
 ## Develop
 
 ```sh
@@ -25,17 +27,12 @@ The language selector is also enabled. English is the only configured locale for
 now; add translated content under Docusaurus `i18n/` folders when more locales
 are ready.
 
-## Deploy To Cloudflare Workers
+## Deploy
 
-The site is configured as a Cloudflare Worker with static assets. Configure
-these GitHub repository secrets before relying on CI/CD deployment:
+GitHub Actions builds and deploys the docs to Cloudflare on normal pushes to
+`master`. Local docs work only needs Docusaurus.
+
+Repository secrets used by CI:
 
 - `CLOUDFLARE_API_TOKEN`
 - `CLOUDFLARE_ACCOUNT_ID`
-
-Local deploys use the same Wrangler config:
-
-```sh
-cd docs
-npm run deploy:worker
-```

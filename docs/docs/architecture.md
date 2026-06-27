@@ -44,8 +44,8 @@ flowchart LR
 
 - JavaScript owns the WebUSB permission prompt because browsers require a user
   gesture.
-- The granted `UsbDevice` is passed into Rust/WASM through the vendored
-  WebUSB-capable `nusb` backend.
+- The granted `UsbDevice` is passed into Rust/WASM through `nusb-webusb`,
+  imported as `nusb`.
 - Rust/WASM initializes the Realtek adapter, performs bulk IN/OUT, and returns
   typed video frames and metrics to React.
 - React uses WebCodecs for playback and canvas capture for recording.

@@ -6,7 +6,7 @@ slug: /
 # openipc-rs
 
 `openipc-rs` is a Rust receiver stack for OpenIPC FPV ground-station
-applications. It is designed to be usable as:
+applications. The repo ships four pieces:
 
 - shared Rust crates for native applications,
 - a native CLI and Tauri desktop station,
@@ -35,5 +35,4 @@ openipc-rs/
 The implementation includes the full receive pipeline in Rust, browser and
 desktop station apps, adaptive-link feedback generation, and shared Realtek
 bring-up paths for native and WebUSB. Hardware support still needs live adapter
-validation across each chip family before the support matrix should be treated
-as final.
+validation per chip family before the support matrix can be treated as final.

@@ -13,7 +13,7 @@ version and create the annotated Git tag.
 Install it once on your machine:
 
 ```sh
-cargo install cargo-release
+cargo install cargo-release git-cliff
 ```
 
 Preview a release:
@@ -22,17 +22,23 @@ Preview a release:
 cargo release patch --workspace
 ```
 
-Create the version bump commit and annotated Git tag:
+Create the version bump commit, annotated Git tag, and push both:
 
 ```sh
-cargo release patch --workspace --execute --no-publish
+cargo release patch --workspace --execute
 ```
 
-Push the branch and tag:
+Create the release commit and tag locally without pushing:
 
 ```sh
-cargo release patch --workspace --execute --no-publish --push
+cargo release patch --workspace --execute --no-push
 ```
+
+`release.toml` has `publish = false`, so local release commands do not publish
+to crates.io. CI publishes from the pushed tag. The release hook also updates the
+npm `package.json` versions and regenerates app/docs lockfiles with
+`npm install --package-lock-only --ignore-scripts`. It also prepends the release
+notes to `CHANGELOG.md` with `git-cliff`.
 
 Pushing the `v0.2.0` tag triggers GitHub Actions release jobs. After the normal
 checks pass, CI publishes crates.io packages, publishes `@openipc-rs/web` to npm
@@ -42,7 +48,7 @@ Required release secret:
 
 - `CARGO_REGISTRY_TOKEN`
 
-Configure npm trusted publishing for `openipc-web` on npmjs.com:
+Configure npm trusted publishing for `@openipc-rs/web` on npmjs.com:
 
 | Field                | Value          |
 | -------------------- | -------------- |
@@ -57,6 +63,15 @@ The existing Cloudflare secrets are still required for `master` deploys:
 - `CLOUDFLARE_API_TOKEN`
 - `CLOUDFLARE_ACCOUNT_ID`
 
+CI deploys the public sites:
+
+- Station: [station.openipc-rs.neels.dev](https://station.openipc-rs.neels.dev)
+- Docs: [openipc-rs.neels.dev](https://openipc-rs.neels.dev)
+
+Release commits on `master` skip the normal branch CI/deploy jobs. The tag
+workflow for the same commit is the one that validates and publishes the
+release.
+
 ## Generated Artifacts
 
 Generated artifacts are ignored by git:
@@ -65,7 +80,6 @@ Generated artifacts are ignored by git:
 - `.cargo-tools/`,
 - `crates/openipc-web/pkg/`,
 - app `node_modules/` and `dist/`,
-- app `.wrangler/`,
 - docs `node_modules/`, `.docusaurus/`, and `build/`,
 - root-level npm package tarballs.
 
@@ -157,8 +171,5 @@ cd apps/openipc-station
 npm run build
 ```
 
-Deploy it to Cloudflare Workers:
-
-```sh
-npm run deploy:worker
-```
+The deployable output is `apps/openipc-station/dist`. GitHub Actions deploys it
+to Cloudflare from `master`; there is no local deploy script.

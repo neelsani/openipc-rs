@@ -51,8 +51,8 @@ while (running) {
 
 ## WebCodecs Rendering
 
-The Rust/WASM side outputs compressed H.264/H.265 frames. Your app should pass
-those frames to WebCodecs and render the decoded `VideoFrame` objects.
+The Rust/WASM side outputs compressed H.264/H.265 frames. Pass those frames to
+WebCodecs and render the decoded `VideoFrame` objects.
 
 ```html
 <canvas id="video"></canvas>

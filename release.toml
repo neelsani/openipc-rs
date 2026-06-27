@@ -5,7 +5,71 @@ shared-version = true
 tag-name = "v{{version}}"
 pre-release-commit-message = "chore: release v{{version}}"
 tag-message = "v{{version}}"
-pre-release-hook = ["bash", "-c", "$WORKSPACE_ROOT/scripts/pre-release.sh"]
+pre-release-hook = [
+  "bash",
+  "-c",
+  '''
+set -euo pipefail
+
+if [ "${CRATE_NAME:-}" != "openipc-rs-desktop" ]; then
+  exit 0
+fi
+
+if [ "${DRY_RUN:-false}" = "true" ]; then
+  echo "dry run: would sync npm package versions and lockfiles"
+  exit 0
+fi
+
+node -e '
+const fs = require("fs");
+const path = require("path");
+
+const root = process.env.WORKSPACE_ROOT;
+const version = process.env.NEW_VERSION;
+const files = [
+  "crates/openipc-web/package.json",
+  "apps/openipc-station/package.json",
+  "docs/package.json",
+];
+
+for (const rel of files) {
+  const file = path.join(root, rel);
+  const text = fs.readFileSync(file, "utf8");
+  const indent = text.match(/\n( +)"[^"]+":/)?.[1] ?? "  ";
+  const pkg = JSON.parse(text);
+
+  if (pkg.version === version) {
+    continue;
+  }
+
+  pkg.version = version;
+  fs.writeFileSync(file, `${JSON.stringify(pkg, null, indent.length)}\n`);
+  console.log(`updated ${rel} to ${version}`);
+}
+'
+
+npm --prefix "$WORKSPACE_ROOT/apps/openipc-station" install --package-lock-only --ignore-scripts
+npm --prefix "$WORKSPACE_ROOT/docs" install --package-lock-only --ignore-scripts
+
+if ! command -v git-cliff >/dev/null 2>&1; then
+  echo "git-cliff is required for changelog generation. Install it with: cargo install git-cliff" >&2
+  exit 1
+fi
+
+if git -C "$WORKSPACE_ROOT" rev-parse "v$PREV_VERSION" >/dev/null 2>&1; then
+  changelog_range="v$PREV_VERSION..HEAD"
+else
+  changelog_range="HEAD"
+fi
+
+git-cliff \
+  --config "$WORKSPACE_ROOT/cliff.toml" \
+  --repository "$WORKSPACE_ROOT" \
+  --tag "v$NEW_VERSION" \
+  --prepend "$WORKSPACE_ROOT/CHANGELOG.md" \
+  "$changelog_range"
+''',
+]
 publish = false
 push = true
 tag = true

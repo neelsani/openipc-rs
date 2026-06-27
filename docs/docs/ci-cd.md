@@ -8,10 +8,12 @@ The GitHub Actions workflow validates:
 
 - Rust format, clippy, tests, and WASM target checks,
 - the station web build and generated WASM npm package,
+- shared Cargo/npm/package-lock version metadata,
+- changelog metadata for the current shared version,
 - desktop build checks for Linux x64/arm64, macOS Apple Silicon/Intel, and
   Windows x64/arm64,
 - the Docusaurus documentation build,
-- station and docs Cloudflare Worker deploys on `master`,
+- station and docs Cloudflare deploys on `master`,
 - crates.io, npm, and desktop GitHub Release publishing on `v*` tags.
 
 ## Release Publishing
@@ -22,6 +24,11 @@ Pushes to tags like `v0.2.0` run the release publishing jobs after validation:
 - `@openipc-rs/web` publishes to npm with trusted publishing,
 - Tauri builds desktop bundles and uploads them to the GitHub Release for that
   tag.
+
+`cargo release` creates a release commit on `master` and a `v*` tag. GitHub sees
+those as separate push events. The workflow intentionally skips the normal
+branch CI/deploy jobs for release commits on `master`; the tag workflow for the
+same commit does the validation and publishing.
 
 Desktop release targets:
 
@@ -51,33 +58,24 @@ The desktop release job uses the built-in `GITHUB_TOKEN`. The generated desktop
 bundles are unsigned unless platform-specific signing and notarization are added
 later.
 
-## Cloudflare Workers Deployments
+## Cloudflare Deployments
 
-The station web/WASM app and docs site both deploy to Cloudflare Workers on
-pushes to `master` using `cloudflare/wrangler-action`.
+The station web/WASM app and docs site deploy on normal pushes to `master` using
+`cloudflare/wrangler-action`. The action uploads the built directories to
+Cloudflare Pages, so the repo does not need local Cloudflare config files or
+npm deployment dependencies.
+
+Public URLs:
+
+- Station: [station.openipc-rs.neels.dev](https://station.openipc-rs.neels.dev)
+- Docs: [openipc-rs.neels.dev](https://openipc-rs.neels.dev)
+
+Tag pushes and `chore: release v*` commits do not deploy the Cloudflare sites.
 
 Required repository secrets:
 
 - `CLOUDFLARE_API_TOKEN`
 - `CLOUDFLARE_ACCOUNT_ID`
 
-The station Worker config lives in `apps/openipc-station/wrangler.toml`. The
-Vite build output is `apps/openipc-station/dist`, and Wrangler uploads it as
-Worker static assets with single-page-app fallback.
-
-The docs Worker config lives in `docs/wrangler.toml`. The Docusaurus build
-output is `docs/build`, and Wrangler uploads it as Worker static assets.
-
-Local station deploy:
-
-```sh
-cd apps/openipc-station
-npm run deploy:worker
-```
-
-Local docs deploy:
-
-```sh
-cd docs
-npm run deploy:worker
-```
+The station build output is `apps/openipc-station/dist`. The docs build output
+is `docs/build`.

@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/openipc-core",
+    "crates/openipc-native",
+    "crates/openipc-rtl88xx",
+    "crates/openipc-web",
+    "apps/openipc-station/src-tauri",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/neelsani/openipc-rs"
+
+[workspace.dependencies]
+nusb = { package = "nusb-webusb", version = "0.2.3" }

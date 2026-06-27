@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title">
+  <title id="title">openipc-rs</title>
+  <rect width="128" height="128" rx="22" fill="#123036"/>
+  <path d="M23 64 45 42l9 9-13 13 13 13-9 9L23 64Z" fill="#f7fbfc"/>
+  <path d="m105 64-22 22-9-9 13-13-13-13 9-9 22 22Z" fill="#f7fbfc"/>
+  <circle cx="64" cy="64" r="19" fill="#69c7d1"/>
+  <path d="M42 30a40 40 0 0 1 44 0l-8 11a26 26 0 0 0-28 0l-8-11Zm44 68a40 40 0 0 1-44 0l8-11a26 26 0 0 0 28 0l8 11Z" fill="#f7fbfc"/>
+</svg>

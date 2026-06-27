@@ -1,0 +1,48 @@
+{
+  "name": "@openipc-rs/web",
+  "version": "0.1.0",
+  "description": "WebAssembly and WebUSB bindings for the openipc-rs receiver stack.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "pack:dry-run": "npm run build && npm pack --dry-run pkg",
+    "publish:package": "npm run build && npm publish pkg --access public"
+  },
+  "module": "./openipc_web.js",
+  "types": "./openipc_web.d.ts",
+  "exports": {
+    ".": {
+      "types": "./openipc_web.d.ts",
+      "default": "./openipc_web.js"
+    },
+    "./openipc_web_bg.wasm": "./openipc_web_bg.wasm"
+  },
+  "files": [
+    "openipc_web.js",
+    "openipc_web_bg.wasm",
+    "openipc_web.d.ts",
+    "openipc_web_bg.wasm.d.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/neelsani/openipc-rs.git",
+    "directory": "crates/openipc-web"
+  },
+  "homepage": "https://github.com/neelsani/openipc-rs#readme",
+  "bugs": {
+    "url": "https://github.com/neelsani/openipc-rs/issues"
+  },
+  "keywords": [
+    "openipc",
+    "fpv",
+    "webusb",
+    "wasm",
+    "h264",
+    "h265",
+    "realtek",
+    "wfb-ng"
+  ]
+}

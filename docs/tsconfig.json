@@ -1,0 +1,7 @@
+{
+  "extends": "@docusaurus/tsconfig",
+  "compilerOptions": {
+    "types": ["node", "@cloudflare/workers-types"]
+  },
+  "include": ["src", "docusaurus.config.ts", "sidebars.ts"]
+}

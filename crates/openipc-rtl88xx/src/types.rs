@@ -1,0 +1,319 @@
+use std::fmt;
+
+#[cfg(not(target_arch = "wasm32"))]
+use nusb::MaybeFuture;
+
+use crate::regs::{CHIP_VER_RTL_MASK, CHIP_VER_RTL_SHIFT, RF_TYPE_ID};
+
+pub const SUPPORTED_DEVICES: &[SupportedDevice] = &[
+    SupportedDevice::new(
+        0x0bda,
+        0x8812,
+        ChipFamily::Rtl8812,
+        "RTL8812AU / RTL8811AU reference PID",
+    ),
+    SupportedDevice::new(0x0bda, 0x0811, ChipFamily::Rtl8812, "RTL8811AU"),
+    SupportedDevice::new(0x0bda, 0xa811, ChipFamily::Rtl8812, "RTL8811AU"),
+    SupportedDevice::new(
+        0x0bda,
+        0xb811,
+        ChipFamily::Rtl8812,
+        "RTL8811AU / RTL8821AU variant",
+    ),
+    SupportedDevice::new(0x0bda, 0x8813, ChipFamily::Rtl8814, "RTL8814AU"),
+    SupportedDevice::new(
+        0x2357,
+        0x0120,
+        ChipFamily::Rtl8821,
+        "TP-Link Archer T2U Plus / RTL8821AU",
+    ),
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SupportedDevice {
+    pub vendor_id: u16,
+    pub product_id: u16,
+    pub family_hint: ChipFamily,
+    pub label: &'static str,
+}
+
+impl SupportedDevice {
+    pub const fn new(
+        vendor_id: u16,
+        product_id: u16,
+        family_hint: ChipFamily,
+        label: &'static str,
+    ) -> Self {
+        Self {
+            vendor_id,
+            product_id,
+            family_hint,
+            label,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChipFamily {
+    Rtl8812,
+    Rtl8814,
+    Rtl8821,
+}
+
+impl ChipFamily {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Rtl8812 => "RTL8812/RTL8811",
+            Self::Rtl8814 => "RTL8814",
+            Self::Rtl8821 => "RTL8821",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RfType {
+    OneTOneR,
+    TwoTTwoR,
+    FourTFourR,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChipInfo {
+    pub family: ChipFamily,
+    pub rf_type: RfType,
+    pub cut_version: u8,
+    pub sys_cfg: u32,
+}
+
+impl ChipInfo {
+    pub(crate) fn from_probe(vendor_id: u16, product_id: u16, sys_cfg: u32) -> Self {
+        let family = if product_id == 0x8813 {
+            ChipFamily::Rtl8814
+        } else if is_rtl8821a_pid(vendor_id, product_id) {
+            ChipFamily::Rtl8821
+        } else {
+            ChipFamily::Rtl8812
+        };
+        let rf_type = match family {
+            ChipFamily::Rtl8814 => RfType::FourTFourR,
+            ChipFamily::Rtl8821 => RfType::OneTOneR,
+            ChipFamily::Rtl8812 => {
+                if sys_cfg & RF_TYPE_ID != 0 {
+                    RfType::OneTOneR
+                } else {
+                    RfType::TwoTTwoR
+                }
+            }
+        };
+        let raw_cut = ((sys_cfg & CHIP_VER_RTL_MASK) >> CHIP_VER_RTL_SHIFT) as u8;
+        let cut_version = if family == ChipFamily::Rtl8814 {
+            raw_cut
+        } else {
+            raw_cut.saturating_add(1)
+        };
+        Self {
+            family,
+            rf_type,
+            cut_version,
+            sys_cfg,
+        }
+    }
+
+    pub const fn total_rf_paths(self) -> usize {
+        match self.rf_type {
+            RfType::OneTOneR => 1,
+            RfType::TwoTTwoR => 2,
+            RfType::FourTFourR => 4,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelWidth {
+    Mhz20,
+    Mhz40,
+    Mhz80,
+}
+
+impl ChannelWidth {
+    pub(crate) const fn rf_bw_bits(self) -> u32 {
+        match self {
+            Self::Mhz20 => 3,
+            Self::Mhz40 => 1,
+            Self::Mhz80 => 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RadioConfig {
+    pub channel: u8,
+    pub channel_offset: u8,
+    pub channel_width: ChannelWidth,
+}
+
+impl Default for RadioConfig {
+    fn default() -> Self {
+        Self {
+            channel: 36,
+            channel_offset: 0,
+            channel_width: ChannelWidth::Mhz20,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DriverOptions {
+    pub skip_reset: bool,
+    pub initialize_hardware: bool,
+}
+
+impl Default for DriverOptions {
+    fn default() -> Self {
+        Self {
+            skip_reset: false,
+            initialize_hardware: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InitStatus {
+    AlreadyRunning,
+    Initialized,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitReport {
+    pub chip: ChipInfo,
+    pub status: InitStatus,
+    pub firmware_downloaded: bool,
+}
+
+#[derive(Debug)]
+pub enum DriverError {
+    Nusb(String),
+    DeviceNotFound,
+    EndpointNotFound(&'static str),
+    RegisterReadSize { expected: usize, actual: usize },
+    FirmwareChecksumTimeout,
+    FirmwareReadyTimeout,
+    UnsupportedFirmwarePath(ChipFamily),
+    InvalidTxPower(u8),
+    InvalidTransfer(openipc_core::realtek::AggregateError),
+    TxBuild(openipc_core::realtek_tx::RealtekTxError),
+}
+
+impl fmt::Display for DriverError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Nusb(message) => write!(f, "{message}"),
+            Self::DeviceNotFound => write!(f, "no supported Realtek rtl88xx adapter found"),
+            Self::EndpointNotFound(kind) => write!(f, "no {kind} endpoint found on interface 0"),
+            Self::RegisterReadSize { expected, actual } => {
+                write!(
+                    f,
+                    "register read returned {actual} bytes, expected {expected}"
+                )
+            }
+            Self::FirmwareChecksumTimeout => write!(f, "firmware checksum report did not arrive"),
+            Self::FirmwareReadyTimeout => write!(f, "firmware did not report ready"),
+            Self::UnsupportedFirmwarePath(chip) => {
+                write!(f, "{} firmware download path is unsupported", chip.name())
+            }
+            Self::InvalidTxPower(power) => {
+                write!(
+                    f,
+                    "TX power override {power} is outside the 0..63 TXAGC range"
+                )
+            }
+            Self::InvalidTransfer(err) => write!(f, "{err}"),
+            Self::TxBuild(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for DriverError {}
+
+pub fn is_supported_id(vendor_id: u16, product_id: u16) -> bool {
+    SUPPORTED_DEVICES
+        .iter()
+        .any(|dev| dev.vendor_id == vendor_id && dev.product_id == product_id)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn list_devices() -> Result<Vec<UsbDeviceSummary>, DriverError> {
+    let devices = nusb::list_devices()
+        .wait()
+        .map_err(|err| DriverError::Nusb(format!("list_devices failed: {err}")))?;
+
+    Ok(devices
+        .map(|dev| UsbDeviceSummary {
+            vendor_id: dev.vendor_id(),
+            product_id: dev.product_id(),
+            product: dev.product_string().map(str::to_owned),
+            manufacturer: dev.manufacturer_string().map(str::to_owned),
+            bus_id: dev.bus_id().to_owned(),
+            device_address: dev.device_address(),
+            port_chain: dev.port_chain().to_vec(),
+            supported: is_supported_id(dev.vendor_id(), dev.product_id()),
+        })
+        .collect())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn list_devices() -> Result<Vec<UsbDeviceSummary>, DriverError> {
+    Err(DriverError::Nusb(
+        "blocking USB enumeration is unavailable on wasm; use nusb/WebUSB async enumeration"
+            .to_owned(),
+    ))
+}
+
+pub fn list_supported_devices() -> Result<Vec<UsbDeviceSummary>, DriverError> {
+    Ok(list_devices()?
+        .into_iter()
+        .filter(|dev| dev.supported)
+        .collect())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsbDeviceSummary {
+    pub vendor_id: u16,
+    pub product_id: u16,
+    pub product: Option<String>,
+    pub manufacturer: Option<String>,
+    pub bus_id: String,
+    pub device_address: u8,
+    pub port_chain: Vec<u8>,
+    pub supported: bool,
+}
+
+pub(crate) fn is_rtl8821a_pid(vid: u16, pid: u16) -> bool {
+    matches!(
+        ((vid as u32) << 16) | pid as u32,
+        0x0BDA0820
+            | 0x0BDA0821
+            | 0x0BDA0823
+            | 0x0BDA8822
+            | 0x04110242
+            | 0x0411029B
+            | 0x04BB0953
+            | 0x056E4007
+            | 0x056E400E
+            | 0x056E400F
+            | 0x08469052
+            | 0x0E660023
+            | 0x20013314
+            | 0x20013318
+            | 0x2019AB32
+            | 0x20F4804B
+            | 0x2357011E
+            | 0x23570120
+            | 0x23570122
+            | 0x38236249
+            | 0x7392A811
+            | 0x7392A812
+            | 0x7392A813
+            | 0x7392B611
+    )
+}

@@ -1,0 +1,8 @@
+name = "openipc-rs-docs"
+main = "src/worker.ts"
+compatibility_date = "2026-06-26"
+
+[assets]
+binding = "ASSETS"
+directory = "./build"
+not_found_handling = "404-page"

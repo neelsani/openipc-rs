@@ -1,0 +1,22 @@
+[package]
+name = "openipc-rs-desktop"
+version = "0.1.0"
+description = "Native desktop shell for openipc-rs"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+name = "openipc_rs_desktop"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64 = "0.22"
+nusb = { workspace = true }
+openipc-core = { path = "../../../crates/openipc-core" }
+openipc-rtl88xx = { path = "../../../crates/openipc-rtl88xx" }
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2", features = [] }

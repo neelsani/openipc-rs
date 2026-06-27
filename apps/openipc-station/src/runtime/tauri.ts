@@ -1,0 +1,144 @@
+import type { OpenIpcRxTransferProfile } from "@openipc/wasm";
+import type {
+  AuthorizedUsbDevice,
+  FecCounters,
+  InitReport,
+  LinkQualityReport,
+  LogLevel,
+  UsbInfo,
+} from "@/lib/types";
+
+const TAURI_INTERNALS_KEY = "__TAURI_INTERNALS__";
+
+export const TAURI_RX_BATCH_EVENT = "openipc://rx-batch";
+export const TAURI_LOG_EVENT = "openipc://log";
+export const TAURI_STOPPED_EVENT = "openipc://stopped";
+
+type TauriApi = {
+  invoke: <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
+  listen: <T>(
+    event: string,
+    handler: (event: { payload: T }) => void,
+  ) => Promise<() => void>;
+};
+
+let tauriApiPromise: Promise<TauriApi> | null = null;
+let tauriWindowPromise: Promise<import("@tauri-apps/api/window").Window> | null = null;
+
+export function isTauriRuntime(): boolean {
+  return typeof window !== "undefined" && TAURI_INTERNALS_KEY in window;
+}
+
+async function tauriApi(): Promise<TauriApi> {
+  if (!tauriApiPromise) {
+    tauriApiPromise = Promise.all([
+      import("@tauri-apps/api/core"),
+      import("@tauri-apps/api/event"),
+    ]).then(([core, event]) => ({
+      invoke: core.invoke,
+      listen: event.listen,
+    }));
+  }
+  return tauriApiPromise;
+}
+
+async function tauriWindow(): Promise<import("@tauri-apps/api/window").Window> {
+  if (!tauriWindowPromise) {
+    tauriWindowPromise = import("@tauri-apps/api/window").then(({ getCurrentWindow }) =>
+      getCurrentWindow(),
+    );
+  }
+  return tauriWindowPromise;
+}
+
+export type TauriConnectRequest = {
+  channel: number;
+  channelWidthMhz: number;
+  channelOffset: number;
+  skipReset?: boolean;
+};
+
+export type TauriConnectReport = {
+  deviceId: string;
+  usbInfo: UsbInfo;
+  initReport: InitReport;
+};
+
+export type TauriStartRxRequest = {
+  keypairBase64: string;
+  channelId: number;
+  minimumEpoch: string;
+  transferSize: number;
+  adaptiveEnabled: boolean;
+  rfChannel: number;
+  alinkTxPower: number;
+};
+
+export type TauriVideoFramePayload = {
+  dataBase64: string;
+  codec: "h264" | "h265";
+  codecString: string;
+  isKeyFrame: boolean;
+  timestamp: number;
+};
+
+export type TauriRxBatchPayload = Omit<OpenIpcRxTransferProfile, "frames"> & {
+  frames: TauriVideoFramePayload[];
+  fecCounters: FecCounters;
+  linkQuality: LinkQualityReport | null;
+  adaptiveTxFrames: number;
+  adaptiveTxErrors: number;
+  usbReadMs: number;
+  adaptiveRxMs: number;
+  adaptiveQualityMs: number;
+  txPowerMs: number;
+  adaptiveTxMs: number;
+};
+
+export type TauriLogPayload = {
+  level: LogLevel;
+  message: string;
+};
+
+export type TauriStoppedPayload = {
+  reason: "stopped" | "error";
+  message: string;
+};
+
+export async function tauriListDevices(): Promise<AuthorizedUsbDevice[]> {
+  const { invoke } = await tauriApi();
+  return invoke("openipc_list_devices");
+}
+
+export async function tauriConnect(request: TauriConnectRequest): Promise<TauriConnectReport> {
+  const { invoke } = await tauriApi();
+  return invoke("openipc_connect", { request });
+}
+
+export async function tauriStartRx(request: TauriStartRxRequest): Promise<void> {
+  const { invoke } = await tauriApi();
+  await invoke("openipc_start_rx", { request });
+}
+
+export async function tauriStopRx(): Promise<void> {
+  const { invoke } = await tauriApi();
+  await invoke("openipc_stop_rx");
+}
+
+export async function tauriIsFullscreen(): Promise<boolean> {
+  return (await tauriWindow()).isFullscreen();
+}
+
+export async function tauriSetFullscreen(enabled: boolean): Promise<boolean> {
+  const window = await tauriWindow();
+  await window.setFullscreen(enabled);
+  return window.isFullscreen();
+}
+
+export async function listenTauriEvent<T>(
+  event: string,
+  handler: (payload: T) => void,
+): Promise<() => void> {
+  const { listen } = await tauriApi();
+  return listen<T>(event, ({ payload }) => handler(payload));
+}

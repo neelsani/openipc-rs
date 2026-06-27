@@ -1,0 +1,363 @@
+use nusb::transfer::{Buffer, Bulk, ControlIn, ControlOut, ControlType, In, Out, Recipient};
+#[cfg(not(target_arch = "wasm32"))]
+use nusb::MaybeFuture;
+use openipc_core::realtek_tx::{build_usb_tx_frame, RealtekTxOptions};
+
+#[cfg(target_arch = "wasm32")]
+use crate::device::discover_bulk_endpoints;
+use crate::device::RealtekDevice;
+use crate::regs::*;
+#[cfg(target_arch = "wasm32")]
+use crate::types::is_supported_id;
+use crate::types::{ChipFamily, ChipInfo, DriverError, InitReport, InitStatus, RadioConfig};
+
+impl RealtekDevice {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn open_first_async(
+        options: crate::types::DriverOptions,
+    ) -> Result<Self, DriverError> {
+        Self::open_first(options)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn from_web_usb_device(device: web_sys::UsbDevice) -> Result<Self, DriverError> {
+        let device = nusb::Device::from_js(device)
+            .await
+            .map_err(|err| DriverError::Nusb(format!("nusb from_js failed: {err}")))?;
+        let descriptor = device.device_descriptor();
+        let vendor_id = descriptor.vendor_id();
+        let product_id = descriptor.product_id();
+        if !is_supported_id(vendor_id, product_id) {
+            return Err(DriverError::Nusb(format!(
+                "unsupported Realtek adapter {vendor_id:04x}:{product_id:04x}"
+            )));
+        }
+        let interface = device
+            .claim_interface(0)
+            .await
+            .map_err(|err| DriverError::Nusb(format!("claim interface 0 failed: {err}")))?;
+        let (bulk_in_ep, bulk_out_ep, bulk_out_ep_count) = discover_bulk_endpoints(&interface)?;
+        Ok(Self {
+            device,
+            interface,
+            vendor_id,
+            product_id,
+            bulk_in_ep,
+            bulk_out_ep,
+            bulk_out_ep_count,
+        })
+    }
+
+    pub async fn probe_chip_async(&self) -> Result<ChipInfo, DriverError> {
+        let sys_cfg = self.read_u32_async(REG_SYS_CFG).await?;
+        Ok(ChipInfo::from_probe(
+            self.vendor_id,
+            self.product_id,
+            sys_cfg,
+        ))
+    }
+
+    pub async fn initialize_monitor_async(
+        &self,
+        radio: RadioConfig,
+        accept_bad_fcs: bool,
+    ) -> Result<InitReport, DriverError> {
+        let chip = self.probe_chip_async().await?;
+        let mut firmware_downloaded = false;
+        let mut status = InitStatus::Initialized;
+
+        let fw_state = self.read_u32_async(REG_MCUFWDL).await.unwrap_or(0);
+        let fw_already_running = match chip.family {
+            ChipFamily::Rtl8814 => (fw_state & 0xff) == 0x78 || (fw_state & BIT15) != 0,
+            _ => (fw_state & WINTINI_RDY) != 0,
+        };
+
+        if fw_already_running {
+            status = InitStatus::AlreadyRunning;
+        } else {
+            match chip.family {
+                ChipFamily::Rtl8812 | ChipFamily::Rtl8821 => {
+                    self.power_on_jaguar_async(chip).await?;
+                    self.init_llt_table_async(chip).await?;
+                    self.init_hardware_drop_incorrect_bulk_out_async().await?;
+                    self.download_firmware_8812_family_async(chip).await?;
+                    firmware_downloaded = true;
+                }
+                ChipFamily::Rtl8814 => {
+                    self.download_firmware_8814_async().await?;
+                    firmware_downloaded = true;
+                }
+            }
+        }
+
+        self.load_mac_tables_async(chip).await?;
+        self.init_queue_fifo_async(chip).await?;
+        self.init_mac_rx_async(chip).await?;
+        self.enable_bb_rf_domain_8814_async(chip).await?;
+        self.load_phy_tables_async(chip).await?;
+        self.load_rf_tables_async(chip).await?;
+        self.finalize_mac_rx_async(chip).await?;
+        self.set_monitor_mode_async(accept_bad_fcs).await?;
+        self.set_channel_async(chip, radio).await?;
+
+        Ok(InitReport {
+            chip,
+            status,
+            firmware_downloaded,
+        })
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn read_rx_transfer_async(&self, length: usize) -> Result<Vec<u8>, DriverError> {
+        let mut endpoint = self
+            .interface
+            .endpoint::<Bulk, In>(self.bulk_in_ep)
+            .map_err(|err| DriverError::Nusb(format!("open bulk IN endpoint failed: {err}")))?;
+        endpoint
+            .clear_halt()
+            .await
+            .map_err(|err| DriverError::Nusb(format!("clear halt on bulk IN failed: {err}")))?;
+        let buffer = endpoint.allocate(length);
+        endpoint.submit(buffer);
+        let completion = endpoint.next_complete().await;
+        completion
+            .status
+            .map_err(|err| DriverError::Nusb(format!("bulk IN transfer failed: {err}")))?;
+        Ok(completion.buffer[..completion.actual_len].to_vec())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn read_rx_transfer_async(&self, length: usize) -> Result<Vec<u8>, DriverError> {
+        let mut endpoint = self
+            .interface
+            .endpoint::<Bulk, In>(self.bulk_in_ep)
+            .map_err(|err| DriverError::Nusb(format!("open bulk IN endpoint failed: {err}")))?;
+        endpoint
+            .clear_halt()
+            .wait()
+            .map_err(|err| DriverError::Nusb(format!("clear halt on bulk IN failed: {err}")))?;
+        let completion = endpoint.transfer_blocking(endpoint.allocate(length), USB_TIMEOUT);
+        completion
+            .status
+            .map_err(|err| DriverError::Nusb(format!("bulk IN transfer failed: {err}")))?;
+        Ok(completion.buffer[..completion.actual_len].to_vec())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn write_tx_transfer_async(&self, transfer: &[u8]) -> Result<usize, DriverError> {
+        let mut endpoint = self
+            .interface
+            .endpoint::<Bulk, Out>(self.bulk_out_ep)
+            .map_err(|err| DriverError::Nusb(format!("open bulk OUT endpoint failed: {err}")))?;
+        endpoint
+            .clear_halt()
+            .await
+            .map_err(|err| DriverError::Nusb(format!("clear halt on bulk OUT failed: {err}")))?;
+        endpoint.submit(Buffer::from(transfer));
+        let completion = endpoint.next_complete().await;
+        completion
+            .status
+            .map_err(|err| DriverError::Nusb(format!("bulk OUT transfer failed: {err}")))?;
+        Ok(completion.actual_len)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn write_tx_transfer_raw_async(
+        &self,
+        transfer: &[u8],
+    ) -> Result<usize, DriverError> {
+        let mut endpoint = self
+            .interface
+            .endpoint::<Bulk, Out>(self.bulk_out_ep)
+            .map_err(|err| DriverError::Nusb(format!("open bulk OUT endpoint failed: {err}")))?;
+        endpoint.submit(Buffer::from(transfer));
+        let completion = endpoint.next_complete().await;
+        completion
+            .status
+            .map_err(|err| DriverError::Nusb(format!("raw bulk OUT transfer failed: {err}")))?;
+        Ok(completion.actual_len)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn write_tx_transfer_async(&self, transfer: &[u8]) -> Result<usize, DriverError> {
+        let mut endpoint = self
+            .interface
+            .endpoint::<Bulk, Out>(self.bulk_out_ep)
+            .map_err(|err| DriverError::Nusb(format!("open bulk OUT endpoint failed: {err}")))?;
+        endpoint
+            .clear_halt()
+            .wait()
+            .map_err(|err| DriverError::Nusb(format!("clear halt on bulk OUT failed: {err}")))?;
+        let completion = endpoint.transfer_blocking(Buffer::from(transfer), USB_TIMEOUT);
+        completion
+            .status
+            .map_err(|err| DriverError::Nusb(format!("bulk OUT transfer failed: {err}")))?;
+        Ok(completion.actual_len)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) async fn write_tx_transfer_raw_async(
+        &self,
+        transfer: &[u8],
+    ) -> Result<usize, DriverError> {
+        let mut endpoint = self
+            .interface
+            .endpoint::<Bulk, Out>(self.bulk_out_ep)
+            .map_err(|err| DriverError::Nusb(format!("open bulk OUT endpoint failed: {err}")))?;
+        let completion = endpoint.transfer_blocking(Buffer::from(transfer), USB_FIRMWARE_TIMEOUT);
+        completion
+            .status
+            .map_err(|err| DriverError::Nusb(format!("raw bulk OUT transfer failed: {err}")))?;
+        Ok(completion.actual_len)
+    }
+
+    pub async fn send_packet_async(
+        &self,
+        radiotap_packet: &[u8],
+        options: RealtekTxOptions,
+    ) -> Result<usize, DriverError> {
+        let usb_frame =
+            build_usb_tx_frame(radiotap_packet, options).map_err(DriverError::TxBuild)?;
+        self.write_tx_transfer_async(&usb_frame).await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn read_register_async(
+        &self,
+        register: u16,
+        len: u16,
+    ) -> Result<Vec<u8>, DriverError> {
+        self.interface
+            .control_in(
+                ControlIn {
+                    control_type: ControlType::Vendor,
+                    recipient: Recipient::Device,
+                    request: REALTEK_VENDOR_READ_REQUEST,
+                    value: register,
+                    index: 0,
+                    length: len,
+                },
+                USB_TIMEOUT,
+            )
+            .await
+            .map_err(|err| DriverError::Nusb(format!("vendor read 0x{register:04x} failed: {err}")))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn read_register_async(
+        &self,
+        register: u16,
+        len: u16,
+    ) -> Result<Vec<u8>, DriverError> {
+        self.interface
+            .control_in(
+                ControlIn {
+                    control_type: ControlType::Vendor,
+                    recipient: Recipient::Device,
+                    request: REALTEK_VENDOR_READ_REQUEST,
+                    value: register,
+                    index: 0,
+                    length: len,
+                },
+                USB_TIMEOUT,
+            )
+            .wait()
+            .map_err(|err| DriverError::Nusb(format!("vendor read 0x{register:04x} failed: {err}")))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn write_register_async(
+        &self,
+        register: u16,
+        bytes: &[u8],
+    ) -> Result<(), DriverError> {
+        self.interface
+            .control_out(
+                ControlOut {
+                    control_type: ControlType::Vendor,
+                    recipient: Recipient::Device,
+                    request: REALTEK_VENDOR_WRITE_REQUEST,
+                    value: register,
+                    index: 0,
+                    data: bytes,
+                },
+                USB_TIMEOUT,
+            )
+            .await
+            .map_err(|err| {
+                DriverError::Nusb(format!("vendor write 0x{register:04x} failed: {err}"))
+            })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn write_register_async(
+        &self,
+        register: u16,
+        bytes: &[u8],
+    ) -> Result<(), DriverError> {
+        self.interface
+            .control_out(
+                ControlOut {
+                    control_type: ControlType::Vendor,
+                    recipient: Recipient::Device,
+                    request: REALTEK_VENDOR_WRITE_REQUEST,
+                    value: register,
+                    index: 0,
+                    data: bytes,
+                },
+                USB_TIMEOUT,
+            )
+            .wait()
+            .map_err(|err| {
+                DriverError::Nusb(format!("vendor write 0x{register:04x} failed: {err}"))
+            })
+    }
+
+    pub async fn read_u8_async(&self, register: u16) -> Result<u8, DriverError> {
+        let bytes = self.read_register_async(register, 1).await?;
+        bytes.first().copied().ok_or(DriverError::RegisterReadSize {
+            expected: 1,
+            actual: bytes.len(),
+        })
+    }
+
+    pub async fn read_u16_async(&self, register: u16) -> Result<u16, DriverError> {
+        let bytes = self.read_register_async(register, 2).await?;
+        let array: [u8; 2] =
+            bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| DriverError::RegisterReadSize {
+                    expected: 2,
+                    actual: bytes.len(),
+                })?;
+        Ok(u16::from_le_bytes(array))
+    }
+
+    pub async fn read_u32_async(&self, register: u16) -> Result<u32, DriverError> {
+        let bytes = self.read_register_async(register, 4).await?;
+        let array: [u8; 4] =
+            bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| DriverError::RegisterReadSize {
+                    expected: 4,
+                    actual: bytes.len(),
+                })?;
+        Ok(u32::from_le_bytes(array))
+    }
+
+    pub async fn write_u8_async(&self, register: u16, value: u8) -> Result<(), DriverError> {
+        self.write_register_async(register, &[value]).await
+    }
+
+    pub async fn write_u16_async(&self, register: u16, value: u16) -> Result<(), DriverError> {
+        self.write_register_async(register, &value.to_le_bytes())
+            .await
+    }
+
+    pub async fn write_u32_async(&self, register: u16, value: u32) -> Result<(), DriverError> {
+        self.write_register_async(register, &value.to_le_bytes())
+            .await
+    }
+}

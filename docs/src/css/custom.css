@@ -1,0 +1,305 @@
+:root {
+  --ifm-color-primary: #1a6f7a;
+  --ifm-color-primary-dark: #17636d;
+  --ifm-color-primary-darker: #155d66;
+  --ifm-color-primary-darkest: #104d55;
+  --ifm-color-primary-light: #1d7b87;
+  --ifm-color-primary-lighter: #1f838f;
+  --ifm-color-primary-lightest: #2595a2;
+  --ifm-code-font-size: 94%;
+  --ifm-font-family-base: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --ifm-heading-font-weight: 720;
+  --ifm-navbar-height: 4rem;
+}
+
+[data-theme='dark'] {
+  --ifm-color-primary: #69c7d1;
+  --ifm-color-primary-dark: #4fbdc8;
+  --ifm-color-primary-darker: #43b8c4;
+  --ifm-color-primary-darkest: #3299a3;
+  --ifm-color-primary-light: #83d1d9;
+  --ifm-color-primary-lighter: #8fd5dc;
+  --ifm-color-primary-lightest: #b4e3e8;
+  --ifm-background-color: #111315;
+  --ifm-background-surface-color: #171a1d;
+}
+
+.homePage {
+  background: var(--ifm-background-color);
+}
+
+.heroShell {
+  border-bottom: 1px solid var(--ifm-color-emphasis-200);
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    #122126;
+  background-size: 38px 38px;
+  color: #f7fbfc;
+}
+
+.heroGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(360px, 0.82fr);
+  gap: 3rem;
+  align-items: center;
+  min-height: calc(100vh - var(--ifm-navbar-height) - 7rem);
+  padding: 5rem 1rem;
+}
+
+.heroCopy {
+  max-width: 760px;
+}
+
+.statusLine {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.statusLine span {
+  border: 1px solid rgba(247, 251, 252, 0.22);
+  border-radius: 999px;
+  padding: 0.35rem 0.65rem;
+  color: rgba(247, 251, 252, 0.82);
+  background: rgba(17, 19, 21, 0.52);
+  font-size: 0.82rem;
+}
+
+.homeTitle {
+  margin: 0;
+  color: #ffffff;
+  font-size: clamp(3rem, 8vw, 6.8rem);
+  line-height: 0.95;
+  letter-spacing: 0;
+}
+
+.homeSubtitle {
+  max-width: 690px;
+  margin: 1.35rem 0 0;
+  color: rgba(247, 251, 252, 0.84);
+  font-size: clamp(1.08rem, 2vw, 1.34rem);
+  line-height: 1.55;
+}
+
+.heroActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 2rem;
+}
+
+.heroPanel {
+  border: 1px solid rgba(247, 251, 252, 0.16);
+  border-radius: 8px;
+  background: rgba(13, 17, 19, 0.74);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.28);
+  overflow: hidden;
+}
+
+.panelHeader {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  border-bottom: 1px solid rgba(247, 251, 252, 0.12);
+  padding: 0.85rem 1rem;
+  color: rgba(247, 251, 252, 0.68);
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.78rem;
+}
+
+.pipelineGraphic {
+  display: grid;
+  gap: 0.65rem;
+  padding: 1rem;
+}
+
+.pipelineStep {
+  display: grid;
+  grid-template-columns: 3.4rem 1fr;
+  align-items: center;
+  min-height: 3.1rem;
+  border: 1px solid rgba(247, 251, 252, 0.14);
+  border-radius: 6px;
+  padding: 0.7rem 0.85rem;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.pipelineIndex {
+  color: #f0b95b;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.9rem;
+}
+
+.signalReadout {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border-top: 1px solid rgba(247, 251, 252, 0.12);
+}
+
+.signalReadout div {
+  display: grid;
+  gap: 0.2rem;
+  padding: 1rem;
+}
+
+.signalReadout div + div {
+  border-left: 1px solid rgba(247, 251, 252, 0.12);
+}
+
+.signalReadout strong {
+  color: #ffffff;
+}
+
+.signalReadout span {
+  color: rgba(247, 251, 252, 0.68);
+  font-size: 0.9rem;
+}
+
+.pathSection,
+.referenceStrip {
+  padding: 4rem 1rem;
+}
+
+.sectionKicker {
+  margin-bottom: 0.65rem;
+  color: var(--ifm-color-primary);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-size: 0.78rem;
+}
+
+.pathSection h2,
+.referenceStrip h2,
+.homeBand h2 {
+  max-width: 780px;
+  margin-bottom: 1.25rem;
+  letter-spacing: 0;
+}
+
+.pathGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1rem;
+  margin-top: 1.5rem;
+}
+
+.pathCard {
+  display: flex;
+  flex-direction: column;
+  min-height: 225px;
+  border: 1px solid var(--ifm-color-emphasis-200);
+  border-radius: 8px;
+  padding: 1.25rem;
+  background: var(--ifm-background-surface-color);
+}
+
+.pathCard h3 {
+  margin-bottom: 0.65rem;
+  font-size: 1.12rem;
+}
+
+.pathCard p {
+  flex: 1;
+  margin-bottom: 1rem;
+}
+
+.pathCard a {
+  font-weight: 700;
+}
+
+.homeBand {
+  border-block: 1px solid var(--ifm-color-emphasis-200);
+  background: color-mix(in srgb, var(--ifm-background-surface-color) 82%, var(--ifm-color-primary) 18%);
+}
+
+.bandGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(360px, 1.1fr);
+  gap: 2rem;
+  align-items: center;
+  padding: 4rem 1rem;
+}
+
+.bandGrid p {
+  max-width: 640px;
+  margin-bottom: 0;
+}
+
+.codePreview {
+  margin: 0;
+  border: 1px solid var(--ifm-color-emphasis-300);
+  border-radius: 8px;
+  padding: 1.1rem;
+  background: #101417;
+  color: #dceff2;
+  overflow: auto;
+}
+
+.referenceStrip {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.8fr);
+  gap: 2rem;
+  align-items: start;
+}
+
+.referenceLinks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+  justify-content: flex-end;
+}
+
+.referenceLinks a {
+  border: 1px solid var(--ifm-color-emphasis-300);
+  border-radius: 999px;
+  padding: 0.5rem 0.8rem;
+  background: var(--ifm-background-surface-color);
+  font-weight: 700;
+}
+
+@media (max-width: 996px) {
+  .heroGrid,
+  .bandGrid,
+  .referenceStrip {
+    grid-template-columns: 1fr;
+  }
+
+  .heroGrid {
+    min-height: auto;
+    padding: 3.5rem 1rem;
+  }
+
+  .pathGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .referenceLinks {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 640px) {
+  .heroGrid {
+    gap: 2rem;
+  }
+
+  .heroPanel {
+    margin-inline: -0.25rem;
+  }
+
+  .pathGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .signalReadout {
+    grid-template-columns: 1fr;
+  }
+
+  .signalReadout div + div {
+    border-left: 0;
+    border-top: 1px solid rgba(247, 251, 252, 0.12);
+  }
+}

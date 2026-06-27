@@ -1,0 +1,20 @@
+[package]
+name = "openipc-native"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native desktop adapter for openipc-rs"
+
+[dependencies]
+openipc-core = { version = "0.1.0", path = "../openipc-core" }
+openipc-rtl88xx = { version = "0.1.0", path = "../openipc-rtl88xx" }
+nusb.workspace = true
+
+[lib]
+name = "openipc_native"
+path = "src/lib.rs"
+
+[[bin]]
+name = "openipc-rs"
+path = "src/main.rs"

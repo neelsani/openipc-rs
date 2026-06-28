@@ -21,6 +21,12 @@ Probe the first supported Realtek adapter:
 cargo run -p openipc-native -- probe
 ```
 
+Target a specific adapter:
+
+```sh
+cargo run -p openipc-native -- probe --vid 0x0bda --pid 0x8813
+```
+
 Decode a captured Realtek USB transfer:
 
 ```sh
@@ -37,6 +43,18 @@ cargo run -p openipc-native -- recv \
   --rf-channel 36 \
   --adaptive-link \
   --out video.annexb
+```
+
+Useful bring-up flags:
+
+```text
+--vid / --pid                  target a USB adapter
+--tx-ep                        force a bulk-OUT endpoint
+--skip-txpwr                   skip TX-power programming
+--force-iqk / --disable-iqk    override IQK policy
+--fwdl-8814 kernel|rtw88       select RTL8814 firmware path
+--fwdl-8814-chunk <n>          override RTL8814 firmware chunk size
+--tx-legacy-8812-desc          use legacy TX descriptor shape on RTL8814
 ```
 
 Mirror RTP while receiving:

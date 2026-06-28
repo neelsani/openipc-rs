@@ -14,7 +14,8 @@ OpenIPC video without taking a dependency on a specific USB frontend.
 - Handle WFB session packets, data decryption, and FEC recovery.
 - Parse RTP and depacketize H.264/H.265 into Annex-B access units.
 - Build adaptive-link feedback payloads and WFB uplink packets.
-- Build Realtek USB TX descriptors for monitor-injection frames.
+- Parse legacy/HT/VHT radiotap TX modes and build Realtek USB TX descriptors
+  for monitor-injection frames.
 
 ## Basic Receive Shape
 

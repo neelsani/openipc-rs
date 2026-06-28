@@ -68,6 +68,7 @@ const RTP_TIMESTAMP_WRAP = 0x1_0000_0000;
 const RTP_TIMESTAMP_HALF_WRAP = 0x8000_0000;
 const KEYPAIR_STORAGE_KEY = "openipc-rs.station.keypair.v1";
 const DEFAULT_KEYPAIR_URL = "/gs.key";
+const WEBUSB_RX_TRANSFERS_IN_FLIGHT = 4;
 
 const EMPTY_METRICS: Metrics = {
   transfers: 0,
@@ -1061,6 +1062,7 @@ export function useOpenIpcRuntime() {
         channel: currentSettings.rfChannel,
         channelWidthMhz: currentSettings.channelWidthMhz,
         channelOffset: currentSettings.channelOffset,
+        deviceId: currentSettings.wifiDevice || undefined,
       });
       usbRef.current = null;
       appliedTxPowerRef.current = null;
@@ -1254,95 +1256,106 @@ export function useOpenIpcRuntime() {
     runningRef.current = true;
     setRunning(true);
     setRuntime("running");
-    appendLog("info", "RX loop started");
+    appendLog("info", `RX loop started (${WEBUSB_RX_TRANSFERS_IN_FLIGHT} bulk-IN transfers in flight)`);
 
     while (runningRef.current) {
-      const loopStart = performance.now();
+      const batchLoopStart = performance.now();
       try {
         const currentSettings = settingsRef.current;
         const readStart = performance.now();
-        const transfer = await device.readRxTransfer(currentSettings.transferSize);
+        const transfers = await device.readRxTransfers(
+          currentSettings.transferSize,
+          WEBUSB_RX_TRANSFERS_IN_FLIGHT,
+        );
         recordDiagnosticStage("usbRead", performance.now() - readStart);
-        const nowMs = Date.now();
-        const adaptiveTracker = adaptiveRef.current;
-        if (adaptiveTracker) {
-          const adaptiveRxStart = performance.now();
-          adaptiveTracker.recordRxTransfer(transfer, nowMs);
-          recordDiagnosticStage("adaptiveRx", performance.now() - adaptiveRxStart);
-        }
-        const profile = receiver.pushRxTransferProfiled(transfer);
-        recordDiagnosticStage("realtekParse", profile.parseMs);
-        recordDiagnosticStage("openipcPipeline", profile.pipelineMs);
-        recordTransferProfile(profile);
-        const frames = profile.frames;
-        const fecStart = performance.now();
-        const counters = parseCounters(receiver.fecCounters());
-        recordDiagnosticStage("fecCounters", performance.now() - fecStart);
-        if (adaptiveTracker) {
-          const qualityStart = performance.now();
-          adaptiveTracker.recordReceiverCounters(receiver, nowMs);
-          setLinkQuality(parseQuality(adaptiveTracker.quality(nowMs)));
-          recordDiagnosticStage("adaptiveQuality", performance.now() - qualityStart);
-        }
-        if (currentSettings.adaptiveEnabled && adaptiveTracker) {
-          try {
-            const txPower = Math.max(1, Math.min(40, Math.trunc(currentSettings.alinkTxPower)));
-            const txPowerKey = `${currentSettings.rfChannel}:${txPower}`;
-            if (appliedTxPowerRef.current !== txPowerKey) {
-              const txPowerStart = performance.now();
-              await device.setTxPowerOverride(currentSettings.rfChannel, txPower);
-              recordDiagnosticStage("txPower", performance.now() - txPowerStart);
-              appliedTxPowerRef.current = txPowerKey;
-              appendLog("info", `Adaptive uplink TX power set to ${txPower}`);
-            }
-            const adaptiveTxStart = performance.now();
-            const sent = await adaptiveTracker.tickAndSend(
-              device,
-              nowMs,
-              currentSettings.rfChannel,
-            );
-            recordDiagnosticStage("adaptiveTx", performance.now() - adaptiveTxStart);
-            if (sent > 0) {
+
+        for (const transfer of transfers) {
+          if (!runningRef.current) {
+            break;
+          }
+
+          const loopStart = performance.now();
+          const nowMs = Date.now();
+          const adaptiveTracker = adaptiveRef.current;
+          if (adaptiveTracker) {
+            const adaptiveRxStart = performance.now();
+            adaptiveTracker.recordRxTransfer(transfer, nowMs);
+            recordDiagnosticStage("adaptiveRx", performance.now() - adaptiveRxStart);
+          }
+          const profile = receiver.pushRxTransferProfiled(transfer);
+          recordDiagnosticStage("realtekParse", profile.parseMs);
+          recordDiagnosticStage("openipcPipeline", profile.pipelineMs);
+          recordTransferProfile(profile);
+          const frames = profile.frames;
+          const fecStart = performance.now();
+          const counters = parseCounters(receiver.fecCounters());
+          recordDiagnosticStage("fecCounters", performance.now() - fecStart);
+          if (adaptiveTracker) {
+            const qualityStart = performance.now();
+            adaptiveTracker.recordReceiverCounters(receiver, nowMs);
+            setLinkQuality(parseQuality(adaptiveTracker.quality(nowMs)));
+            recordDiagnosticStage("adaptiveQuality", performance.now() - qualityStart);
+          }
+          if (currentSettings.adaptiveEnabled && adaptiveTracker) {
+            try {
+              const txPower = Math.max(1, Math.min(40, Math.trunc(currentSettings.alinkTxPower)));
+              const txPowerKey = `${currentSettings.rfChannel}:${txPower}`;
+              if (appliedTxPowerRef.current !== txPowerKey) {
+                const txPowerStart = performance.now();
+                await device.setTxPowerOverride(currentSettings.rfChannel, txPower);
+                recordDiagnosticStage("txPower", performance.now() - txPowerStart);
+                appliedTxPowerRef.current = txPowerKey;
+                appendLog("info", `Adaptive uplink TX power set to ${txPower}`);
+              }
+              const adaptiveTxStart = performance.now();
+              const sent = await adaptiveTracker.tickAndSend(
+                device,
+                nowMs,
+                currentSettings.rfChannel,
+              );
+              recordDiagnosticStage("adaptiveTx", performance.now() - adaptiveTxStart);
+              if (sent > 0) {
+                setMetrics((current) => ({
+                  ...current,
+                  adaptiveTxFrames: current.adaptiveTxFrames + sent,
+                }));
+              }
+            } catch (error) {
               setMetrics((current) => ({
                 ...current,
-                adaptiveTxFrames: current.adaptiveTxFrames + sent,
+                adaptiveTxErrors: current.adaptiveTxErrors + 1,
               }));
+              appendLog("warn", `Adaptive TX failed: ${messageFrom(error)}`);
             }
-          } catch (error) {
-            setMetrics((current) => ({
-              ...current,
-              adaptiveTxErrors: current.adaptiveTxErrors + 1,
-            }));
-            appendLog("warn", `Adaptive TX failed: ${messageFrom(error)}`);
           }
-        }
-        setMetrics((current) => ({
-          ...current,
-          transfers: current.transfers + 1,
-          bytes: current.bytes + profile.transferBytes,
-          lastTransferBytes: profile.transferBytes,
-          fecRecovered: counters.recoveredPackets,
-          fecLost: counters.lostPackets,
-        }));
-
-        if (frames.length > 0) {
-          let lastFrameBytes = 0;
-          for (const frame of frames) {
-            lastFrameBytes = frame.data.byteLength;
-            await decodeVideoFrame(frame, { loopStartMs: loopStart });
-          }
-          frameCountRef.current += frames.length;
           setMetrics((current) => ({
             ...current,
-            frames: frameCountRef.current,
-            lastFrameBytes,
+            transfers: current.transfers + 1,
+            bytes: current.bytes + profile.transferBytes,
+            lastTransferBytes: profile.transferBytes,
+            fecRecovered: counters.recoveredPackets,
+            fecLost: counters.lostPackets,
           }));
-          appendLog("rx", `${frames.length} frame(s) from ${formatBytes(profile.transferBytes)}`);
+
+          if (frames.length > 0) {
+            let lastFrameBytes = 0;
+            for (const frame of frames) {
+              lastFrameBytes = frame.data.byteLength;
+              await decodeVideoFrame(frame, { loopStartMs: loopStart });
+            }
+            frameCountRef.current += frames.length;
+            setMetrics((current) => ({
+              ...current,
+              frames: frameCountRef.current,
+              lastFrameBytes,
+            }));
+            appendLog("rx", `${frames.length} frame(s) from ${formatBytes(profile.transferBytes)}`);
+          }
+          recordDiagnosticStage("rxLoop", performance.now() - loopStart);
+          publishDiagnostics();
         }
-        recordDiagnosticStage("rxLoop", performance.now() - loopStart);
-        publishDiagnostics();
       } catch (error) {
-        recordDiagnosticStage("rxLoop", performance.now() - loopStart);
+        recordDiagnosticStage("rxLoop", performance.now() - batchLoopStart);
         publishDiagnostics(true);
         setMetrics((current) => ({ ...current, errors: current.errors + 1 }));
         appendLog("error", messageFrom(error));

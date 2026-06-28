@@ -14,6 +14,9 @@ impl RealtekDevice {
             self.write_u8_async(REG_RF_B_CTRL_8812, 5).await?;
             self.write_u8_async(REG_RF_B_CTRL_8812, 7).await?;
         }
+        if chip.family == ChipFamily::Rtl8812 {
+            self.reset_after_previous_firmware_8812_async().await?;
+        }
 
         let flow = match chip.family {
             ChipFamily::Rtl8821 => RTL8821_POWER_ON_FLOW,
@@ -21,6 +24,9 @@ impl RealtekDevice {
         };
         self.run_power_sequence_async(flow).await?;
 
+        if chip.family == ChipFamily::Rtl8812 {
+            self.write_u16_async(REG_CR, 0).await?;
+        }
         let mut cr = self.read_u16_async(REG_CR).await.unwrap_or(0);
         cr |= HCI_TXDMA_EN
             | HCI_RXDMA_EN
@@ -45,19 +51,19 @@ impl RealtekDevice {
                     self.write_u8_async(step.offset, next).await?;
                 }
                 PowerCommand::Polling => {
-                    let deadline = DateNow::deadline_ms(50.0);
-                    loop {
+                    for _ in 0..5000 {
                         let current = self.read_u8_async(step.offset).await?;
                         if current & step.mask == step.value & step.mask {
                             break;
                         }
-                        if DateNow::expired(deadline) {
-                            return Err(DriverError::Nusb(format!(
-                                "power sequence poll 0x{:04x} mask=0x{:02x} value=0x{:02x} timed out",
-                                step.offset, step.mask, step.value
-                            )));
-                        }
-                        sleep_micros(10).await;
+                        sleep_ms(10).await;
+                    }
+                    let current = self.read_u8_async(step.offset).await?;
+                    if current & step.mask != step.value & step.mask {
+                        return Err(DriverError::Nusb(format!(
+                            "power sequence poll 0x{:04x} mask=0x{:02x} value=0x{:02x} timed out",
+                            step.offset, step.mask, step.value
+                        )));
                     }
                 }
                 PowerCommand::DelayMs => sleep_ms(step.offset as u32).await,
@@ -129,7 +135,9 @@ impl RealtekDevice {
         self.firmware_download_enable_8812_async(true).await?;
         let mut ok = false;
         let start = DateNow::now();
-        for attempt in 0..3 {
+        let mut attempts = 0u32;
+        while attempts < 3 || DateNow::now() - start < 500.0 {
+            attempts += 1;
             let state = self.read_u8_async(REG_MCUFWDL).await?;
             self.write_u8_async(REG_MCUFWDL, state | FWDL_CHKSUM_RPT as u8)
                 .await?;
@@ -138,9 +146,6 @@ impl RealtekDevice {
                 ok = true;
                 break;
             }
-            if attempt == 2 && DateNow::now() - start < 500.0 {
-                continue;
-            }
         }
         self.firmware_download_enable_8812_async(false).await?;
         if !ok {
@@ -148,6 +153,45 @@ impl RealtekDevice {
         }
         self.firmware_free_to_go_8812_async().await?;
         self.write_u8_async(REG_HMETFR, 0x0f).await
+    }
+
+    async fn reset_after_previous_firmware_8812_async(&self) -> Result<(), DriverError> {
+        if self.read_u8_async(REG_MCUFWDL).await? & BIT7 as u8 == 0 {
+            return Ok(());
+        }
+
+        self.reset_8051_async().await?;
+        self.write_u8_async(REG_MCUFWDL, 0).await?;
+
+        let rf_para = self.read_u32_async(R_FPGA0_XCD_RF_PARA).await.unwrap_or(0);
+        self.write_u32_async(R_FPGA0_XCD_RF_PARA, rf_para | BIT6)
+            .await?;
+
+        let sys_func = self.read_u8_async(REG_SYS_FUNC_EN).await.unwrap_or(0);
+        self.write_u8_async(REG_SYS_FUNC_EN, sys_func & !((BIT0 | BIT1) as u8))
+            .await?;
+        self.write_u8_async(REG_RF_CTRL, 0).await?;
+        self.write_u16_async(REG_CR, 0).await?;
+
+        let aps = self.read_u8_async(REG_APS_FSMCO + 1).await.unwrap_or(0) | BIT1 as u8;
+        self.write_u8_async(REG_APS_FSMCO + 1, aps).await?;
+        for _ in 0..1000 {
+            let aps = self.read_u8_async(REG_APS_FSMCO + 1).await.unwrap_or(0);
+            if aps & BIT1 as u8 == 0 {
+                break;
+            }
+            sleep_ms(1).await;
+        }
+
+        let aps = self.read_u8_async(REG_APS_FSMCO + 1).await.unwrap_or(0) | BIT0 as u8;
+        self.write_u8_async(REG_APS_FSMCO + 1, aps).await?;
+
+        let sys_func_hi = self.read_u8_async(REG_SYS_FUNC_EN + 1).await.unwrap_or(0);
+        self.write_u8_async(REG_SYS_FUNC_EN + 1, sys_func_hi & !((BIT4 | BIT7) as u8))
+            .await?;
+        let sys_func_hi = self.read_u8_async(REG_SYS_FUNC_EN + 1).await.unwrap_or(0);
+        self.write_u8_async(REG_SYS_FUNC_EN + 1, sys_func_hi | (BIT4 | BIT7) as u8)
+            .await
     }
 
     async fn firmware_download_enable_8812_async(&self, enable: bool) -> Result<(), DriverError> {
@@ -239,8 +283,7 @@ impl RealtekDevice {
         }
     }
 
-    async fn reset_8051_async(&self) -> Result<(), DriverError> {
-        const REG_RSV_CTRL: u16 = 0x001c;
+    pub(crate) async fn reset_8051_async(&self) -> Result<(), DriverError> {
         let tmp = self.read_u8_async(REG_RSV_CTRL).await?;
         self.write_u8_async(REG_RSV_CTRL, tmp & !(BIT1 as u8))
             .await?;

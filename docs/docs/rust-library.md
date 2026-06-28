@@ -129,7 +129,8 @@ use openipc_core::{
 };
 use openipc_core::realtek::RxPacketType;
 use openipc_rtl88xx::{
-    ChannelWidth, DriverOptions, RadioConfig, RealtekDevice, DEFAULT_RX_TRANSFER_SIZE,
+    ChannelWidth, DriverOptions, MonitorOptions, RadioConfig, RealtekDevice,
+    DEFAULT_RX_TRANSFER_SIZE,
 };
 
 fn receive_once(keypair_bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
@@ -171,6 +172,51 @@ fn receive_once(keypair_bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> 
 
 For a full receive loop with adaptive link, use `openipc-rs recv` as the
 reference implementation and then extract the pieces you need.
+
+## Configure Hardware Bring-Up
+
+Most apps can use `RealtekDevice::open_first(DriverOptions::default())` and
+`initialize_monitor(...)`. When you need more control, use the option structs
+directly:
+
+```rust
+use openipc_rtl88xx::{
+    ChannelWidth, DriverOptions, Firmware8814Mode, MonitorOptions, RadioConfig,
+    RealtekDevice,
+};
+
+fn open_specific_adapter() -> Result<(), Box<dyn std::error::Error>> {
+    let device = RealtekDevice::open_first(DriverOptions {
+        target_vendor_id: Some(0x0bda),
+        target_product_id: Some(0x8813),
+        tx_endpoint_override: None,
+        skip_reset: false,
+        initialize_hardware: true,
+    })?;
+
+    device.initialize_monitor_with_options(
+        RadioConfig {
+            channel: 161,
+            channel_width: ChannelWidth::Mhz20,
+            channel_offset: 0,
+        },
+        MonitorOptions {
+            accept_bad_fcs: false,
+            skip_tx_power: false,
+            force_iqk: false,
+            disable_iqk: false,
+            firmware_8814_mode: Firmware8814Mode::Kernel,
+            firmware_8814_chunk: None,
+        },
+    )?;
+
+    Ok(())
+}
+```
+
+Diagnostics such as thermal status, false-alarm counters, PHYDM watchdog ticks,
+IQK, and power tracking are explicit APIs. The driver does not spawn its own
+polling threads; schedule those reads from your app loop when you need them.
 
 ## Build Adaptive-Link Feedback
 

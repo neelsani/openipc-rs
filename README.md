@@ -79,10 +79,16 @@ sh scripts/clean-generated.sh
 
 ## Status
 
-The Rust protocol pipeline, native driver path, WebUSB/WASM bindings, WebCodecs
-station UI, adaptive-link feedback, and CI/release automation are implemented.
-More live adapter testing is still needed, especially RTL8814AU cold starts and
-browser WebUSB behavior across platforms.
+The Rust protocol pipeline, Realtek driver path, WebUSB/WASM bindings,
+WebCodecs station UI, adaptive-link feedback, and CI/release automation are
+implemented. The driver tracks newer devourer behavior for TX modes,
+multi-transfer RX, RTL8814 firmware bring-up, EFUSE/per-rate TX power, PHYDM,
+power tracking, IQK, C2H/TX-status packets, and hardware diagnostics. Driver
+diagnostics are explicit APIs that apps schedule themselves; the library does
+not create hidden polling threads.
+
+More live adapter testing is still needed: cold-plug runs, register-trace
+comparison, and browser WebUSB behavior across platforms.
 
 ## Docs
 

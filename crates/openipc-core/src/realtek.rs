@@ -74,6 +74,26 @@ pub struct RealtekRxPacket<'a> {
     pub data: &'a [u8],
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct C2hPacket<'a> {
+    pub cmd_id: u8,
+    pub seq: Option<u8>,
+    pub payload: &'a [u8],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TxStatusReport8814 {
+    pub header_offset: usize,
+    pub queue_select: u8,
+    pub packet_broadcast: bool,
+    pub lifetime_over: bool,
+    pub retry_over: bool,
+    pub mac_id: u8,
+    pub data_retry_count: u8,
+    pub queue_time_us: u32,
+    pub final_data_rate: u8,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AggregateError {
     DescriptorTooShort,
@@ -193,6 +213,43 @@ pub fn parse_rx_aggregate(buf: &[u8]) -> Result<Vec<RealtekRxPacket<'_>>, Aggreg
     Ok(packets)
 }
 
+pub fn parse_c2h_packet(data: &[u8]) -> Option<C2hPacket<'_>> {
+    let (&cmd_id, rest) = data.split_first()?;
+    let seq = rest.first().copied();
+    let payload = if rest.len() > 1 { &rest[1..] } else { rest };
+    Some(C2hPacket {
+        cmd_id,
+        seq,
+        payload,
+    })
+}
+
+pub fn parse_8814_tx_status_reports(data: &[u8]) -> Vec<TxStatusReport8814> {
+    [1usize, 2usize]
+        .into_iter()
+        .filter_map(|offset| parse_8814_tx_status_report_at(data, offset))
+        .collect()
+}
+
+pub fn parse_8814_tx_status_report_at(
+    data: &[u8],
+    header_offset: usize,
+) -> Option<TxStatusReport8814> {
+    let h = data.get(header_offset..header_offset + 6)?;
+    let queue_time_raw = u16::from_le_bytes([h[3], h[4]]);
+    Some(TxStatusReport8814 {
+        header_offset,
+        queue_select: h[0] & 0x1f,
+        packet_broadcast: h[0] & (1 << 5) != 0,
+        lifetime_over: h[0] & (1 << 6) != 0,
+        retry_over: h[0] & (1 << 7) != 0,
+        mac_id: h[1],
+        data_retry_count: h[2] & 0x3f,
+        queue_time_us: u32::from(queue_time_raw) * 256,
+        final_data_rate: h[5],
+    })
+}
+
 const fn round_up_8(value: usize) -> usize {
     (value + 7) & !7
 }
@@ -270,6 +327,28 @@ mod tests {
         assert_eq!(packets[0].attrib.pkt_len, 4);
         assert_eq!(packets[0].attrib.seq_num, 77);
         assert_eq!(packets[0].data, &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn parses_c2h_packet_header() {
+        let packet = parse_c2h_packet(&[0x42, 0x7f, 1, 2]).unwrap();
+        assert_eq!(packet.cmd_id, 0x42);
+        assert_eq!(packet.seq, Some(0x7f));
+        assert_eq!(packet.payload, &[1, 2]);
+    }
+
+    #[test]
+    fn parses_8814_tx_status_at_devourer_offsets() {
+        let bytes = [0xaa, 0x83, 0x09, 0x25, 0x34, 0x12, 0x6c, 0xbb];
+        let reports = parse_8814_tx_status_reports(&bytes);
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[0].header_offset, 1);
+        assert_eq!(reports[0].queue_select, 3);
+        assert!(reports[0].retry_over);
+        assert_eq!(reports[0].mac_id, 9);
+        assert_eq!(reports[0].data_retry_count, 0x25);
+        assert_eq!(reports[0].queue_time_us, 0x1234 * 256);
+        assert_eq!(reports[0].final_data_rate, 0x6c);
     }
 
     #[test]

@@ -65,7 +65,7 @@ const radio = await WebUsbRealtekDevice.fromWebUsbDevice(usbDevice);
 
 const channelId = 7669206 << 8;
 const keypairBytes = new Uint8Array(await (await fetch("/gs.key")).arrayBuffer());
-const receiver = OpenIpcReceiver.withKeypair(channelId, keypairBytes, 0);
+const receiver = OpenIpcReceiver.withKeypair(channelId, keypairBytes, 0n);
 
 await radio.initializeMonitor(36, 20, 0);
 
@@ -173,20 +173,21 @@ when frames arrive in bursts.
 import { OpenIpcAdaptiveLink } from "@openipc-rs/web";
 
 const linkId = 7669206;
-const adaptive = new OpenIpcAdaptiveLink(linkId, keypairBytes, 0, 1, 5);
+const adaptive = new OpenIpcAdaptiveLink(linkId, keypairBytes, 0n, 1, 5);
 
 while (running) {
+  const nowMs = Date.now();
   const transfer = await radio.readRxTransfer(32768);
-  adaptive.recordRxTransfer(transfer, performance.now());
+  adaptive.recordRxTransfer(transfer, nowMs);
 
   const batch = receiver.pushRxTransferProfiled(transfer);
-  adaptive.recordReceiverCounters(receiver, performance.now());
+  adaptive.recordReceiverCounters(receiver, nowMs);
 
   for (const frame of batch.frames) {
     await decodeFrame(frame);
   }
 
-await adaptive.tickAndSend(radio, performance.now(), 36);
+  await adaptive.tickAndSend(radio, nowMs, 36);
 }
 ```
 

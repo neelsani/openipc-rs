@@ -15,8 +15,8 @@ use openipc_core::{
     ReceiverPipeline, WfbKeypair, WfbTxKeypair,
 };
 use openipc_native::{
-    list_devices, list_supported_devices, ChannelWidth, ChipFamily, DriverOptions, RadioConfig,
-    RealtekDevice,
+    list_devices, list_supported_devices, ChannelWidth, ChipFamily, DriverOptions,
+    Firmware8814Mode, MonitorOptions, RadioConfig, RealtekDevice,
 };
 
 fn main() {
@@ -62,11 +62,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Some("probe") => {
-            let skip_reset = env::var_os("OPENIPC_RS_SKIP_RESET").is_some();
-            let dev = RealtekDevice::open_first(DriverOptions {
-                skip_reset,
-                initialize_hardware: false,
-            })?;
+            let mut options = DriverOptions::from_env();
+            options.initialize_hardware = false;
+            parse_driver_options(args, &mut options)?;
+            let dev = RealtekDevice::open_first(options)?;
             let chip = dev.probe_chip()?;
             println!(
                 "claimed Realtek interface; chip={} rf_paths={} cut={} speed={:?} bulk_in=0x{:02x} bulk_out=0x{:02x}",
@@ -111,7 +110,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let mut pipeline = config.pipeline()?;
             let mut sinks = config.sinks()?;
             let mut stats = StreamStats::default();
-            process_rx_transfer(&bytes, &mut pipeline, &mut sinks, &mut stats, None, 0)?;
+            process_rx_transfer(
+                &bytes,
+                &mut pipeline,
+                &mut sinks,
+                &mut stats,
+                None,
+                0,
+                config.monitor_options.accept_bad_fcs,
+            )?;
             eprintln!("{}", stats.summary());
         }
         Some("recv") => {
@@ -127,7 +134,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 fn print_help() {
     println!(
-        "openipc-rs\n\ncommands:\n  list                         list USB devices visible to nusb\n  list-supported               list recognized Realtek rtl88xx adapters\n  probe                        open, claim, and identify the first supported adapter\n  parse-aggregate <file>       parse a binary Realtek RX bulk transfer\n  decode-aggregate <file> ...  decrypt/decode one captured RX transfer\n  recv ...                     initialize monitor mode and receive from an adapter\n\nrecv/decode options:\n  --key <gs.key>               WFB keypair file: rx secret key + tx public key\n  --out <file|->               write Annex-B H.264/H.265 frames; '-' means stdout\n  --rtp-udp <host:port>        mirror recovered RTP packets to UDP\n  --channel-id <id>            channel id as decimal or 0x-prefixed hex\n  --epoch <n>                  minimum accepted WFB session epoch\n  --max-transfers <n>          stop after n USB transfers\n  --rx-urbs <n>                number of pending bulk IN reads, default 4\n  --skip-reset                 do not USB-reset the adapter before claiming it\n  --no-init                    skip Realtek monitor-mode initialization\n  --rf-channel <n>             WiFi channel for monitor mode, default 36\n  --rf-width <20|40|80>        channel width, default 20\n  --rf-offset <n>              secondary-channel offset, default 0\n  --adaptive-link              send adaptive-link feedback on WFB port 160\n  --alink-key <tx.key>         uplink keypair; defaults to --key\n  --alink-epoch <n>            uplink WFB session epoch, default 0\n  --alink-fec <k:n>            uplink FEC parameters, default 1:5\n  --alink-tx-power <0..63>     force adaptive-link uplink TXAGC index"
+        "openipc-rs\n\ncommands:\n  list                         list USB devices visible to nusb\n  list-supported               list recognized Realtek rtl88xx adapters\n  probe [usb options]          open, claim, and identify an adapter\n  parse-aggregate <file>       parse a binary Realtek RX bulk transfer\n  decode-aggregate <file> ...  decrypt/decode one captured RX transfer\n  recv ...                     initialize monitor mode and receive from an adapter\n\nusb options:\n  --vid <hex|dec>              target USB vendor id\n  --pid <hex|dec>              target USB product id\n  --tx-ep <hex|dec>            override selected bulk-OUT endpoint\n  --skip-reset                 do not USB-reset the adapter before claiming it\n\nrecv/decode options:\n  --key <gs.key>               WFB keypair file: rx secret key + tx public key\n  --out <file|->               write Annex-B H.264/H.265 frames; '-' means stdout\n  --rtp-udp <host:port>        mirror recovered RTP packets to UDP\n  --channel-id <id>            channel id as decimal or 0x-prefixed hex\n  --epoch <n>                  minimum accepted WFB session epoch\n  --max-transfers <n>          stop after n USB transfers\n  --rx-urbs <n>                number of pending bulk IN reads, default 4\n  --no-init                    skip Realtek monitor-mode initialization\n  --rf-channel <n>             WiFi channel for monitor mode, default 36\n  --rf-width <20|40|80>        channel width, default 20\n  --rf-offset <n>              secondary-channel offset, default 0\n  --accept-bad-fcs             ask the chip to pass CRC/ICV-bad frames\n  --skip-txpwr                 skip TX-power table writes during channel set\n  --force-iqk                  run IQK on RTL8814 as well as RTL8812\n  --disable-iqk                skip IQK even where normally armed\n  --fwdl-8814 <kernel|rtw88>   RTL8814 firmware download path\n  --fwdl-8814-chunk <n>        RTL8814 kernel firmware chunk size, 64..4096\n  --tx-legacy-8812-desc        use legacy 8812 TX descriptor shape on RTL8814\n  --adaptive-link              send adaptive-link feedback on WFB port 160\n  --alink-key <tx.key>         uplink keypair; defaults to --key\n  --alink-epoch <n>            uplink WFB session epoch, default 0\n  --alink-fec <k:n>            uplink FEC parameters, default 1:5\n  --alink-tx-power <0..63>     force adaptive-link uplink TXAGC index\n\ndevourer-compatible env:\n  DEVOURER_VID DEVOURER_PID DEVOURER_SKIP_RESET DEVOURER_TX_EP\n  DEVOURER_SKIP_TXPWR DEVOURER_FORCE_IQK DEVOURER_DISABLE_IQK\n  DEVOURER_8814_FWDL DEVOURER_8814_FWDL_CHUNK\n  DEVOURER_TX_LEGACY_8812_DESC"
     );
 }
 
@@ -141,8 +148,10 @@ struct RecvConfig {
     minimum_epoch: u64,
     max_transfers: Option<u64>,
     rx_urbs: usize,
-    skip_reset: bool,
     initialize_hardware: bool,
+    driver_options: DriverOptions,
+    monitor_options: MonitorOptions,
+    tx_legacy_8812_descriptor: bool,
     radio: RadioConfig,
     adaptive_link: bool,
     alink_key_path: Option<PathBuf>,
@@ -163,8 +172,10 @@ impl RecvConfig {
         let mut minimum_epoch = 0u64;
         let mut max_transfers = None;
         let mut rx_urbs = 4usize;
-        let mut skip_reset = env::var_os("OPENIPC_RS_SKIP_RESET").is_some();
         let mut initialize_hardware = true;
+        let mut driver_options = DriverOptions::from_env();
+        let mut monitor_options = MonitorOptions::from_env();
+        let mut tx_legacy_8812_descriptor = env::var_os("DEVOURER_TX_LEGACY_8812_DESC").is_some();
         let mut radio = RadioConfig::default();
         let mut adaptive_link = false;
         let mut alink_key_path = None;
@@ -203,8 +214,38 @@ impl RecvConfig {
                         return Err("--rx-urbs must be greater than zero".into());
                     }
                 }
-                "--skip-reset" => skip_reset = true,
+                "--skip-reset" => driver_options.skip_reset = true,
+                "--vid" => {
+                    driver_options.target_vendor_id =
+                        Some(parse_u16(&next_arg(&mut args, "--vid")?)?);
+                }
+                "--pid" => {
+                    driver_options.target_product_id =
+                        Some(parse_u16(&next_arg(&mut args, "--pid")?)?);
+                }
+                "--tx-ep" => {
+                    driver_options.tx_endpoint_override =
+                        Some(parse_u8(&next_arg(&mut args, "--tx-ep")?)?);
+                }
                 "--no-init" => initialize_hardware = false,
+                "--accept-bad-fcs" => monitor_options.accept_bad_fcs = true,
+                "--skip-txpwr" => monitor_options.skip_tx_power = true,
+                "--force-iqk" => monitor_options.force_iqk = true,
+                "--disable-iqk" => monitor_options.disable_iqk = true,
+                "--fwdl-8814" => {
+                    let mode = next_arg(&mut args, "--fwdl-8814")?;
+                    monitor_options.firmware_8814_mode = Firmware8814Mode::from_env_value(&mode)
+                        .ok_or_else(|| {
+                            format!(
+                                "unsupported --fwdl-8814 value {mode}; expected kernel or rtw88"
+                            )
+                        })?;
+                }
+                "--fwdl-8814-chunk" => {
+                    monitor_options.firmware_8814_chunk =
+                        Some(parse_u64(&next_arg(&mut args, "--fwdl-8814-chunk")?)? as usize);
+                }
+                "--tx-legacy-8812-desc" => tx_legacy_8812_descriptor = true,
                 "--rf-channel" => {
                     radio.channel = parse_u8(&next_arg(&mut args, "--rf-channel")?)?;
                 }
@@ -243,8 +284,10 @@ impl RecvConfig {
             minimum_epoch,
             max_transfers,
             rx_urbs,
-            skip_reset,
             initialize_hardware,
+            driver_options,
+            monitor_options,
+            tx_legacy_8812_descriptor,
             radio,
             adaptive_link,
             alink_key_path,
@@ -384,16 +427,17 @@ impl RecvConfig {
             tx_options: RealtekTxOptions {
                 current_channel: self.radio.channel,
                 is_8814a: chip_family == ChipFamily::Rtl8814,
+                legacy_8812_descriptor: self.tx_legacy_8812_descriptor,
+                ..RealtekTxOptions::default()
             },
         })
     }
 }
 
 fn run_recv(config: RecvConfig) -> Result<(), Box<dyn std::error::Error>> {
-    let device = RealtekDevice::open_first(DriverOptions {
-        skip_reset: config.skip_reset,
-        initialize_hardware: config.initialize_hardware,
-    })?;
+    let mut driver_options = config.driver_options;
+    driver_options.initialize_hardware = config.initialize_hardware;
+    let device = RealtekDevice::open_first(driver_options)?;
     let chip = device.probe_chip()?;
     eprintln!(
         "claimed Realtek adapter speed={:?} bulk_in=0x{:02x} bulk_out=0x{:02x}",
@@ -403,7 +447,8 @@ fn run_recv(config: RecvConfig) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     if config.initialize_hardware {
-        let report = device.initialize_monitor(config.radio)?;
+        let report =
+            device.initialize_monitor_with_options(config.radio, config.monitor_options)?;
         eprintln!(
             "Realtek init: chip={} rf_paths={} cut={} status={:?} firmware_downloaded={}",
             report.chip.family.name(),
@@ -477,6 +522,7 @@ fn run_recv(config: RecvConfig) -> Result<(), Box<dyn std::error::Error>> {
                 &mut stats,
                 adaptive.as_mut(),
                 now_ms,
+                config.monitor_options.accept_bad_fcs,
             )?;
             if let Some(runtime) = adaptive.as_mut() {
                 runtime.record_pipeline(now_ms, pipeline.fec_counters());
@@ -498,6 +544,7 @@ fn process_rx_transfer(
     stats: &mut StreamStats,
     mut adaptive: Option<&mut AdaptiveRuntime>,
     now_ms: u64,
+    accept_bad_fcs: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     stats.transfers += 1;
     let packets = match parse_rx_aggregate(bytes) {
@@ -511,9 +558,8 @@ fn process_rx_transfer(
     stats.rx_packets += packets.len() as u64;
 
     for packet in packets {
-        if packet.attrib.crc_err
-            || packet.attrib.icv_err
-            || packet.attrib.pkt_rpt_type != RxPacketType::NormalRx
+        if packet.attrib.pkt_rpt_type != RxPacketType::NormalRx
+            || (!accept_bad_fcs && (packet.attrib.crc_err || packet.attrib.icv_err))
         {
             continue;
         }
@@ -584,6 +630,25 @@ fn next_arg(
         .ok_or_else(|| format!("{option} requires a value").into())
 }
 
+fn parse_driver_options(
+    args: impl Iterator<Item = String>,
+    options: &mut DriverOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut args = args.peekable();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--skip-reset" => options.skip_reset = true,
+            "--vid" => options.target_vendor_id = Some(parse_u16(&next_arg(&mut args, "--vid")?)?),
+            "--pid" => options.target_product_id = Some(parse_u16(&next_arg(&mut args, "--pid")?)?),
+            "--tx-ep" => {
+                options.tx_endpoint_override = Some(parse_u8(&next_arg(&mut args, "--tx-ep")?)?)
+            }
+            other => return Err(format!("unknown probe option: {other}").into()),
+        }
+    }
+    Ok(())
+}
+
 fn parse_u32(value: &str) -> Result<u32, Box<dyn std::error::Error>> {
     Ok(
         if let Some(hex) = value
@@ -608,6 +673,11 @@ fn parse_u64(value: &str) -> Result<u64, Box<dyn std::error::Error>> {
             value.parse()?
         },
     )
+}
+
+fn parse_u16(value: &str) -> Result<u16, Box<dyn std::error::Error>> {
+    let parsed = parse_u32(value)?;
+    Ok(u16::try_from(parsed).map_err(|_| format!("{value} is outside u16 range"))?)
 }
 
 fn parse_u8(value: &str) -> Result<u8, Box<dyn std::error::Error>> {

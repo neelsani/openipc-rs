@@ -40,7 +40,15 @@ export type OpenIpcRxTransferProfile = {
     pushRtpPacketDetailed(data: Uint8Array): OpenIpcVideoFrame | null;
     pushRxTransfer(data: Uint8Array): Uint8Array[];
     pushRxTransferDetailed(data: Uint8Array): OpenIpcVideoFrame[];
+    pushRxTransferDetailedWithOptions(
+      data: Uint8Array,
+      keepCorrupted: boolean,
+    ): OpenIpcVideoFrame[];
     pushRxTransferProfiled(data: Uint8Array): OpenIpcRxTransferProfile;
+    pushRxTransferProfiledWithOptions(
+      data: Uint8Array,
+      keepCorrupted: boolean,
+    ): OpenIpcRxTransferProfile;
     fecCounters(): string;
   }
 
@@ -77,6 +85,16 @@ export type OpenIpcRxTransferProfile = {
 
   export class WebUsbRealtekDevice {
     static fromWebUsbDevice(device: USBDevice): Promise<WebUsbRealtekDevice>;
+    static fromWebUsbDeviceWithOptions(
+      device: USBDevice,
+      txEndpointOverride: number,
+    ): Promise<WebUsbRealtekDevice>;
+    static fromWebUsbDeviceAdvanced(
+      device: USBDevice,
+      txEndpointOverride: number,
+      targetVendorId: number,
+      targetProductId: number,
+    ): Promise<WebUsbRealtekDevice>;
     bulkInEndpoint(): number;
     bulkOutEndpoint(): number;
     initializeMonitor(
@@ -84,13 +102,60 @@ export type OpenIpcRxTransferProfile = {
       channelWidthMhz: number,
       channelOffset: number,
     ): Promise<string>;
+    initializeMonitorWithOptions(
+      channel: number,
+      channelWidthMhz: number,
+      channelOffset: number,
+      acceptBadFcs: boolean,
+    ): Promise<string>;
+    initializeMonitorAdvanced(
+      channel: number,
+      channelWidthMhz: number,
+      channelOffset: number,
+      acceptBadFcs: boolean,
+      skipTxPower: boolean,
+      forceIqk: boolean,
+      disableIqk: boolean,
+      firmware8814Mode: string,
+      firmware8814Chunk: number,
+    ): Promise<string>;
     readRxTransfer(length: number): Promise<Uint8Array>;
+    readRxTransfers(length: number, inFlight: number): Promise<Uint8Array[]>;
     writeTxTransfer(data: Uint8Array): Promise<number>;
     sendPacket(
       radiotapPacket: Uint8Array,
       currentChannel: number,
     ): Promise<number>;
+    sendPacketWithOptions(
+      radiotapPacket: Uint8Array,
+      currentChannel: number,
+      legacy8812Descriptor: boolean,
+    ): Promise<number>;
     setTxPowerOverride(currentChannel: number, power: number): Promise<void>;
+    readThermalStatus(): Promise<string>;
+    readQueueDepth8814(): Promise<string>;
+    readBbReg(register: number, mask: number): Promise<number>;
+    readBbDbgport(selector: number): Promise<string>;
+    readFalseAlarmCounters(): Promise<string>;
+    runIqk(channel: number): Promise<string>;
+    readRegisterU8(register: number): Promise<number>;
+    readRegisterU32(register: number): Promise<number>;
+  }
+
+  export class WebUsbPhydmWatchdog {
+    constructor();
+    tick(device: WebUsbRealtekDevice): Promise<string>;
+  }
+
+  export class WebUsbPowerTracking8812 {
+    constructor();
+    init(device: WebUsbRealtekDevice): Promise<void>;
+    clear(device: WebUsbRealtekDevice): Promise<void>;
+    tick(
+      device: WebUsbRealtekDevice,
+      channel: number,
+      channelWidthMhz: number,
+    ): Promise<string>;
   }
 
   export function listAuthorizedUsbDevices(): Promise<unknown[]>;

@@ -17,7 +17,7 @@ use openipc_core::{
 };
 use openipc_rtl88xx::{
     list_supported_devices, ChannelWidth, ChipFamily, DriverOptions, InitReport, InitStatus,
-    RadioConfig, RealtekDevice,
+    MonitorOptions, RadioConfig, RealtekDevice,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
@@ -25,6 +25,7 @@ use tauri::{AppHandle, Emitter, State};
 const RX_BATCH_EVENT: &str = "openipc://rx-batch";
 const LOG_EVENT: &str = "openipc://log";
 const STOPPED_EVENT: &str = "openipc://stopped";
+const RX_TRANSFERS_IN_FLIGHT: usize = 4;
 
 #[derive(Default)]
 struct DesktopState {
@@ -54,6 +55,7 @@ struct ConnectRequest {
     channel_width_mhz: u16,
     channel_offset: u8,
     skip_reset: Option<bool>,
+    device_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -255,21 +257,41 @@ fn openipc_connect(
         return Err("receiver is already running".to_owned());
     }
 
+    let mut driver_options = DriverOptions {
+        skip_reset: request.skip_reset.unwrap_or(false),
+        initialize_hardware: true,
+        ..DriverOptions::default()
+    };
+    if let Some(device_id) = request
+        .device_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        let (vendor_id, product_id) = parse_usb_id(device_id)?;
+        driver_options.target_vendor_id = Some(vendor_id);
+        driver_options.target_product_id = Some(product_id);
+    }
     let summary = list_supported_devices()
         .map_err(|err| err.to_string())?
         .into_iter()
-        .next();
-    let device = RealtekDevice::open_first(DriverOptions {
-        skip_reset: request.skip_reset.unwrap_or(false),
-        initialize_hardware: true,
-    })
-    .map_err(|err| err.to_string())?;
+        .find(|device| {
+            driver_options
+                .target_vendor_id
+                .is_none_or(|vendor_id| device.vendor_id == vendor_id)
+                && driver_options
+                    .target_product_id
+                    .is_none_or(|product_id| device.product_id == product_id)
+        });
+    let device = RealtekDevice::open_first(driver_options).map_err(|err| err.to_string())?;
     let report = device
-        .initialize_monitor(radio_config(
-            request.channel,
-            request.channel_width_mhz,
-            request.channel_offset,
-        )?)
+        .initialize_monitor_with_options(
+            radio_config(
+                request.channel,
+                request.channel_width_mhz,
+                request.channel_offset,
+            )?,
+            MonitorOptions::from_env(),
+        )
         .map_err(|err| err.to_string())?;
     let device_id = summary
         .as_ref()
@@ -420,46 +442,79 @@ fn run_rx_worker(
             tx_options: RealtekTxOptions {
                 current_channel: request.rf_channel,
                 is_8814a: chip_family == ChipFamily::Rtl8814,
+                legacy_8812_descriptor: std::env::var_os("DEVOURER_TX_LEGACY_8812_DESC").is_some(),
+                ..RealtekTxOptions::default()
             },
         })
     } else {
         None
     };
 
-    emit_log(&app, "info", "Native RX loop started".to_owned());
+    while ep_in.pending() < RX_TRANSFERS_IN_FLIGHT {
+        ep_in.submit(ep_in.allocate(request.transfer_size));
+    }
+
+    emit_log(
+        &app,
+        "info",
+        format!("Native RX loop started ({RX_TRANSFERS_IN_FLIGHT} bulk-IN transfers in flight)"),
+    );
 
     while !stop.load(Ordering::Relaxed) {
         let loop_start = Instant::now();
         let read_start = Instant::now();
-        let buffer = ep_in.allocate(request.transfer_size);
-        let completion = ep_in.transfer_blocking(buffer, Duration::from_millis(1000));
+        let Some(completion) = ep_in.wait_next_complete(Duration::from_millis(1000)) else {
+            let now_ms = unix_time_ms();
+            tick_adaptive_idle(&mut adaptive, ep_out.as_mut(), now_ms);
+            continue;
+        };
         let usb_read_ms = elapsed_ms(read_start);
+        let actual_len = completion.actual_len;
         if let Err(err) = completion.status {
             emit_log(&app, "warn", format!("bulk IN transfer failed: {err}"));
+            ep_in.submit(completion.buffer);
             continue;
         }
-        let bytes = &completion.buffer[..completion.actual_len];
-        let now_ms = unix_time_ms();
-        match build_rx_batch(
-            bytes,
-            &mut pipeline,
-            adaptive.as_mut(),
-            ep_out.as_mut(),
-            now_ms,
-            usb_read_ms,
-            loop_start,
-        ) {
-            Ok(batch) => {
-                let _ = app.emit(RX_BATCH_EVENT, batch);
-            }
-            Err(err) => {
-                emit_log(&app, "error", err);
+
+        {
+            let bytes = &completion.buffer[..actual_len];
+            let now_ms = unix_time_ms();
+            match build_rx_batch(
+                bytes,
+                &mut pipeline,
+                adaptive.as_mut(),
+                ep_out.as_mut(),
+                now_ms,
+                usb_read_ms,
+                loop_start,
+            ) {
+                Ok(batch) => {
+                    let _ = app.emit(RX_BATCH_EVENT, batch);
+                }
+                Err(err) => {
+                    emit_log(&app, "error", err);
+                }
             }
         }
+        ep_in.submit(completion.buffer);
     }
 
     emit_stopped(&app, "stopped", "Native RX loop stopped".to_owned());
     Ok(())
+}
+
+fn tick_adaptive_idle(
+    adaptive: &mut Option<AdaptiveRuntime>,
+    ep_out: Option<&mut nusb::Endpoint<Bulk, Out>>,
+    now_ms: u64,
+) {
+    let Some(runtime) = adaptive.as_mut() else {
+        return;
+    };
+    let Some(ep_out) = ep_out else {
+        return;
+    };
+    let _ = runtime.tick(now_ms, ep_out);
 }
 
 fn build_rx_batch(
@@ -724,6 +779,17 @@ fn hex_byte(byte: u8) -> String {
 
 fn usb_id(vendor_id: u16, product_id: u16) -> String {
     format!("{vendor_id:04x}:{product_id:04x}")
+}
+
+fn parse_usb_id(value: &str) -> Result<(u16, u16), String> {
+    let (vendor, product) = value
+        .split_once(':')
+        .ok_or_else(|| format!("invalid USB device id {value}; expected vvvv:pppp"))?;
+    let vendor_id =
+        u16::from_str_radix(vendor, 16).map_err(|_| format!("invalid USB vendor id {vendor}"))?;
+    let product_id = u16::from_str_radix(product, 16)
+        .map_err(|_| format!("invalid USB product id {product}"))?;
+    Ok((vendor_id, product_id))
 }
 
 fn device_label(manufacturer: Option<&str>, product: Option<&str>, device_id: &str) -> String {

@@ -11,7 +11,14 @@ use openipc_core::realtek_tx::{build_usb_tx_frame, RealtekTxOptions};
 use crate::regs::*;
 use crate::types::DriverError;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::types::{is_supported_id, ChipFamily, ChipInfo, DriverOptions, InitReport, RadioConfig};
+use crate::types::{
+    is_supported_id, ChipFamily, ChipInfo, DriverOptions, InitReport, MonitorOptions, RadioConfig,
+};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::{
+    BbDbgportRead, FalseAlarmCounters, IqkReport, PhydmDigState, PhydmWatchdogReport,
+    PowerTrackingReport, PowerTrackingState, ThermalStatus,
+};
 
 pub struct RealtekDevice {
     pub(crate) device: nusb::Device,
@@ -29,7 +36,7 @@ impl RealtekDevice {
         let info = nusb::list_devices()
             .wait()
             .map_err(|err| DriverError::Nusb(format!("list_devices failed: {err}")))?
-            .find(|dev| is_supported_id(dev.vendor_id(), dev.product_id()))
+            .find(|dev| device_matches_options(dev.vendor_id(), dev.product_id(), options))
             .ok_or(DriverError::DeviceNotFound)?;
 
         let vendor_id = info.vendor_id();
@@ -51,7 +58,8 @@ impl RealtekDevice {
             .detach_and_claim_interface(0)
             .wait()
             .map_err(|err| DriverError::Nusb(format!("claim interface 0 failed: {err}")))?;
-        let (bulk_in_ep, bulk_out_ep, bulk_out_ep_count) = discover_bulk_endpoints(&interface)?;
+        let (bulk_in_ep, bulk_out_ep, bulk_out_ep_count) =
+            discover_bulk_endpoints_with_override(&interface, options.tx_endpoint_override)?;
 
         Ok(Self {
             device,
@@ -81,6 +89,24 @@ impl RealtekDevice {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn initialize_monitor(&self, radio: RadioConfig) -> Result<InitReport, DriverError> {
         block_on_ready(self.initialize_monitor_async(radio, false))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn initialize_monitor_with_options(
+        &self,
+        radio: RadioConfig,
+        options: MonitorOptions,
+    ) -> Result<InitReport, DriverError> {
+        block_on_ready(self.initialize_monitor_with_options_async(radio, options))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn initialize_monitor_accept_bad_fcs(
+        &self,
+        radio: RadioConfig,
+        accept_bad_fcs: bool,
+    ) -> Result<InitReport, DriverError> {
+        block_on_ready(self.initialize_monitor_async(radio, accept_bad_fcs))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -119,6 +145,8 @@ impl RealtekDevice {
             RealtekTxOptions {
                 current_channel,
                 is_8814a: chip.family == ChipFamily::Rtl8814,
+                legacy_8812_descriptor: std::env::var_os("DEVOURER_TX_LEGACY_8812_DESC").is_some(),
+                ..RealtekTxOptions::default()
             },
         )
         .map_err(DriverError::TxBuild)?;
@@ -129,6 +157,79 @@ impl RealtekDevice {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn set_tx_power_override(&self, current_channel: u8, power: u8) -> Result<(), DriverError> {
         block_on_ready(self.set_tx_power_override_async(current_channel, power))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn read_thermal_status(&self) -> Result<ThermalStatus, DriverError> {
+        block_on_ready(self.read_thermal_status_async())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn read_queue_depth_8814(&self) -> Result<[u32; 5], DriverError> {
+        block_on_ready(self.read_queue_depth_8814_async())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn read_rx_transfers(
+        &self,
+        length: usize,
+        in_flight: usize,
+    ) -> Result<Vec<Vec<u8>>, DriverError> {
+        block_on_ready(self.read_rx_transfers_async(length, in_flight))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn read_bb_reg(&self, register: u16, mask: u32) -> Result<u32, DriverError> {
+        block_on_ready(self.read_bb_reg_async(register, mask))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn read_bb_dbgport(&self, selector: u32) -> Result<BbDbgportRead, DriverError> {
+        block_on_ready(self.read_bb_dbgport_async(selector))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn read_false_alarm_counters(&self) -> Result<FalseAlarmCounters, DriverError> {
+        block_on_ready(self.read_false_alarm_counters_async())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn run_iqk(&self, chip: ChipInfo, channel: u8) -> Result<IqkReport, DriverError> {
+        block_on_ready(self.run_iqk_async(chip, channel))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn run_phydm_watchdog_tick(
+        &self,
+        state: &mut PhydmDigState,
+    ) -> Result<PhydmWatchdogReport, DriverError> {
+        block_on_ready(self.run_phydm_watchdog_tick_async(state))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn init_power_tracking_8812(
+        &self,
+        state: &mut PowerTrackingState,
+    ) -> Result<(), DriverError> {
+        block_on_ready(self.init_power_tracking_8812_async(state))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn clear_power_tracking_8812(
+        &self,
+        state: &mut PowerTrackingState,
+    ) -> Result<(), DriverError> {
+        block_on_ready(self.clear_power_tracking_8812_async(state))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn tick_power_tracking_8812(
+        &self,
+        state: &mut PowerTrackingState,
+        channel: u8,
+        width: crate::types::ChannelWidth,
+    ) -> Result<PowerTrackingReport, DriverError> {
+        block_on_ready(self.tick_power_tracking_8812_async(state, channel, width))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -289,14 +390,16 @@ fn block_on_ready<F: std::future::Future>(future: F) -> F::Output {
     }
 }
 
-pub(crate) fn discover_bulk_endpoints(
+pub(crate) fn discover_bulk_endpoints_with_override(
     interface: &nusb::Interface,
+    bulk_out_override: Option<u8>,
 ) -> Result<(u8, u8, usize), DriverError> {
     let descriptor = interface
         .descriptor()
         .ok_or_else(|| DriverError::Nusb("interface 0 has no active descriptor".to_owned()))?;
     let mut bulk_in = None;
     let mut bulk_out = None;
+    let mut override_found = false;
     let mut bulk_out_count = 0usize;
     for endpoint in descriptor.endpoints() {
         if endpoint.transfer_type() != TransferType::Bulk {
@@ -307,7 +410,16 @@ pub(crate) fn discover_bulk_endpoints(
             bulk_in.get_or_insert(address);
         } else {
             bulk_out_count += 1;
+            if Some(address) == bulk_out_override {
+                override_found = true;
+                bulk_out = Some(address);
+            }
             bulk_out.get_or_insert(address);
+        }
+    }
+    if let Some(endpoint) = bulk_out_override {
+        if !override_found {
+            return Err(DriverError::EndpointOverrideNotFound(endpoint));
         }
     }
     Ok((
@@ -315,4 +427,14 @@ pub(crate) fn discover_bulk_endpoints(
         bulk_out.ok_or(DriverError::EndpointNotFound("bulk OUT"))?,
         bulk_out_count,
     ))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn device_matches_options(vendor_id: u16, product_id: u16, options: DriverOptions) -> bool {
+    match (options.target_vendor_id, options.target_product_id) {
+        (Some(vid), Some(pid)) => vendor_id == vid && product_id == pid,
+        (Some(vid), None) => vendor_id == vid && is_supported_id(vendor_id, product_id),
+        (None, Some(pid)) => product_id == pid && is_supported_id(vendor_id, product_id),
+        (None, None) => is_supported_id(vendor_id, product_id),
+    }
 }

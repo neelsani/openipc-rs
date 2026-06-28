@@ -21,11 +21,31 @@ the next release.
 
 - Done: register helpers around vendor request `0x05`.
 - Done: endpoint discovery and OUT endpoint selection.
+- Done: VID/PID targeting and bulk-OUT endpoint override for native and
+  WebUSB paths.
 - Done: firmware/table data checked into the Rust driver crate.
 - Done: RTL8812/RTL8821 bring-up paths.
 - Done: RTL8814 reserved-page/DDMA firmware path.
 - Done: TX descriptor support for adaptive-link feedback.
-- Still needed: EFUSE-backed MAC/RFE parsing.
+- Done: runtime TX-mode/radiotap parsing for legacy, HT, and VHT transmit.
+- Done: multi-transfer bulk-IN receive loops for native and desktop station
+  paths, plus a batch WebUSB read API.
+- Done: C2H packet handling, RTL8814 TX-status parsing, and optional
+  corrupted-FCS packet retention for diagnostics.
+- Done: thermal, false-alarm counters, RTL8814 queue-depth, BB-register, and
+  BB-dbgport diagnostics.
+- Done: EFUSE-backed MAC/RFE parsing and RFE-aware table loading.
+- Done: EFUSE TX-power PG parsing, per-rate TXAGC writes, optional 8812A
+  by-rate offsets, and regulatory limit table support.
+- Done: devourer-style RTL8812/RTL8821/RTL8814 band-switch and RFE pinmux
+  programming.
+- Done: RTL8812 thermal power tracking, RTL8812 IQK, RTL8814 IQK, and the
+  monitor-mode PHYDM DIG watchdog.
+- Done: devourer-compatible runtime switches for skipping TX power, forcing or
+  disabling IQK, selecting the RTL8814 firmware path/chunk size, and testing
+  the legacy RTL8814 TX descriptor shape.
+- Done: diagnostics exposed as explicit tick/read APIs rather than hidden
+  library pollers.
 - Still needed: hardware smoke tests and trace comparisons per chip family.
 
 ## Native And Desktop

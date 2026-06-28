@@ -1,3 +1,4 @@
+use crate::async_efuse::EfuseInfo;
 use crate::device::RealtekDevice;
 use crate::regs::*;
 use crate::types::{ChipFamily, ChipInfo, DriverError};
@@ -171,7 +172,8 @@ impl RealtekDevice {
                         QUEUE_HIGH,
                     ],
                 )
-                .await
+                .await?;
+                self.write_u8_async(REG_HIQ_NO_LMT_EN, 0xff).await
             }
         }
     }
@@ -207,7 +209,8 @@ impl RealtekDevice {
 
     pub(crate) async fn init_mac_rx_async(&self, chip: ChipInfo) -> Result<(), DriverError> {
         self.write_u8_async(REG_RX_DRVINFO_SZ, 4).await?;
-        self.init_network_type_async().await?;
+        self.init_interrupt_async(chip).await?;
+        self.init_network_type_async(chip).await?;
         self.init_wmac_setting_async().await?;
         self.init_adaptive_ctrl_async().await?;
         if chip.family == ChipFamily::Rtl8814 {
@@ -229,9 +232,25 @@ impl RealtekDevice {
         self.write_u16_async(REG_PKT_BE_BK_LIFE_TIME, 0x0400).await
     }
 
-    async fn init_network_type_async(&self) -> Result<(), DriverError> {
-        let cr = self.read_u32_async(REG_CR).await.unwrap_or(0) & !0x0003_0000;
+    async fn init_interrupt_async(&self, chip: ChipInfo) -> Result<(), DriverError> {
+        if chip.family == ChipFamily::Rtl8812 {
+            self.write_u32_async(REG_HIMR0_8812, 0).await?;
+            self.write_u32_async(REG_HIMR1_8812, 0).await?;
+        }
+        Ok(())
+    }
+
+    async fn init_network_type_async(&self, chip: ChipInfo) -> Result<(), DriverError> {
+        let nettype = if chip.family == ChipFamily::Rtl8814 {
+            0
+        } else {
+            NETTYPE_LINK_AP
+        };
+        let cr = (self.read_u32_async(REG_CR).await.unwrap_or(0) & !MASK_NETTYPE) | nettype;
         self.write_u32_async(REG_CR, cr).await?;
+        if chip.family != ChipFamily::Rtl8814 {
+            return Ok(());
+        }
         let txqctl_b2 = self.read_u8_async(REG_FWHW_TXQ_CTRL + 2).await.unwrap_or(0);
         self.write_u8_async(REG_FWHW_TXQ_CTRL + 2, txqctl_b2 & !(BIT6 as u8))
             .await?;
@@ -376,6 +395,10 @@ impl RealtekDevice {
             self.write_u8_async(0xf008, u1u2 & 0xe7).await?;
         }
 
+        let sys_func = self.read_u8_async(REG_SYS_FUNC_EN).await.unwrap_or(0);
+        self.write_u8_async(REG_SYS_FUNC_EN, sys_func & !(BIT10 as u8))
+            .await?;
+
         let ampdu = self
             .read_u8_async(REG_HT_SINGLE_AMPDU_8812)
             .await
@@ -459,7 +482,11 @@ impl RealtekDevice {
         Ok(())
     }
 
-    pub(crate) async fn finalize_mac_rx_async(&self, chip: ChipInfo) -> Result<(), DriverError> {
+    pub(crate) async fn finalize_mac_rx_async(
+        &self,
+        chip: ChipInfo,
+        efuse: EfuseInfo,
+    ) -> Result<(), DriverError> {
         let mut cr = self.read_u16_async(REG_CR).await.unwrap_or(0);
         cr |= HCI_TXDMA_EN
             | HCI_RXDMA_EN
@@ -475,13 +502,34 @@ impl RealtekDevice {
         }
         self.write_u16_async(REG_CR, cr).await?;
         self.write_u16_async(REG_RXFLTMAP2, 0xffff).await?;
-        self.write_u8_async(REG_HWSEQ_CTRL, 0xff).await?;
+        if chip.family == ChipFamily::Rtl8814 {
+            let hwseq = self.read_u32_async(REG_FWHW_TXQ_CTRL).await.unwrap_or(0);
+            self.write_u32_async(REG_FWHW_TXQ_CTRL, (hwseq & 0x00ff_ffff) | 0xff00_0000)
+                .await?;
+        } else {
+            self.write_u8_async(REG_HWSEQ_CTRL, 0xff).await?;
+        }
         self.write_u32_async(REG_BAR_MODE_CTRL, 0x0201_ffff).await?;
+        if chip.family == ChipFamily::Rtl8814 {
+            self.write_u8_async(REG_SECONDARY_CCA_CTRL_8814, 0x03)
+                .await?;
+        }
         self.write_u8_async(REG_NAV_UPPER, 0x00).await?;
+        if chip.family == ChipFamily::Rtl8814 {
+            self.write_u8_async(REG_NAV_UPPER, 0xeb).await?;
+        }
         let queue = self.read_u8_async(REG_QUEUE_CTRL).await.unwrap_or(0);
         self.write_u8_async(REG_QUEUE_CTRL, queue & 0xf7).await?;
         self.write_u8_async(REG_FWHW_TXQ_CTRL + 1, 0x0f).await?;
-        if chip.family != ChipFamily::Rtl8814 {
+        if chip.family == ChipFamily::Rtl8814 {
+            let txq = self.read_u8_async(REG_FWHW_TXQ_CTRL).await.unwrap_or(0);
+            self.write_u8_async(REG_FWHW_TXQ_CTRL, txq | EN_AMPDU_RTY_NEW)
+                .await?;
+            let txq2 = self.read_u8_async(REG_FWHW_TXQ_CTRL + 2).await.unwrap_or(0);
+            self.write_u8_async(REG_FWHW_TXQ_CTRL + 2, txq2 & !(BIT6 as u8))
+                .await?;
+            self.write_u8_async(REG_ACKTO, 0x80).await?;
+        } else {
             self.write_u8_async(REG_EARLY_MODE_CONTROL_8812 + 3, 0x01)
                 .await?;
             self.write_u16_async(REG_TX_RPT_TIME, 0x3df0).await?;
@@ -492,8 +540,33 @@ impl RealtekDevice {
         self.write_u8_async(REG_SDIO_CTRL_8812, 0).await?;
         self.write_u8_async(REG_ACLK_MON, 0).await?;
 
-        let fallback_mac = [0x02, 0x0d, 0xb0, 0xc7, 0xe4, 0xb3];
-        for (idx, byte) in fallback_mac.iter().enumerate() {
+        if let Some(mac) = efuse.mac {
+            self.program_macid_async(mac).await?;
+        } else if chip.family == ChipFamily::Rtl8814 {
+            self.program_macid_async([0x02, 0x0d, 0xb0, 0xc7, 0xe4, 0xb3])
+                .await?;
+        }
+
+        if chip.family == ChipFamily::Rtl8814 {
+            self.write_u32_async(REG_RRSR, 0x0000_0fff).await?;
+            self.write_u8_async(REG_SW_AMPDU_BURST_MODE_CTRL_8814, 0x00)
+                .await?;
+            self.write_u8_async(REG_QUEUE_CTRL, 0x04).await?;
+            self.write_u32_async(REG_TX_PTCL_CTRL, 0x0000_2f0f).await?;
+            self.write_u32_async(REG_RD_CTRL, 0x0f4f_ff00).await?;
+            self.write_u32_async(REG_CAMCMD, 0xc000_0000).await?;
+            self.write_u32_async(0x0990, 0x2710_0000).await?;
+            self.write_u32_async(0x0994, 0x4c48_0100).await?;
+            self.write_u32_async(0x0998, 0x302c_2824).await?;
+            self.write_u32_async(0x099c, 0x403c_3834).await?;
+            self.write_u32_async(0x09a0, 0x0000_0044).await?;
+            self.write_u32_async(0x09a4, 0x0008_0080).await?;
+        }
+        Ok(())
+    }
+
+    async fn program_macid_async(&self, mac: [u8; 6]) -> Result<(), DriverError> {
+        for (idx, byte) in mac.iter().enumerate() {
             self.write_u8_async(REG_MACID + idx as u16, *byte).await?;
         }
         Ok(())

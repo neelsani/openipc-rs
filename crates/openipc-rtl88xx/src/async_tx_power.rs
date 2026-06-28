@@ -1,7 +1,8 @@
+use crate::async_efuse::{tx_power_index_base, EfuseInfo};
 use crate::device::RealtekDevice;
 use crate::phy::RfPath;
 use crate::regs::*;
-use crate::types::{ChipFamily, ChipInfo, DriverError};
+use crate::types::{ChannelWidth, ChipFamily, ChipInfo, DriverError};
 
 const MGN_1M: u8 = 0x02;
 const MGN_2M: u8 = 0x04;
@@ -95,6 +96,45 @@ const TXAGC_A_REGS_8812: &[u16] = &[
 const TXAGC_B_REGS_8812: &[u16] = &[
     0x0e20, 0x0e24, 0x0e28, 0x0e2c, 0x0e30, 0x0e34, 0x0e38, 0x0e3c, 0x0e40, 0x0e44, 0x0e48, 0x0e4c,
 ];
+const TXAGC_RATES_8812: [[u8; 4]; 12] = [
+    [MGN_1M, MGN_2M, MGN_5_5M, MGN_11M],
+    [MGN_6M, MGN_9M, MGN_12M, MGN_18M],
+    [MGN_24M, MGN_36M, MGN_48M, MGN_54M],
+    [MGN_MCS0, MGN_MCS0 + 1, MGN_MCS0 + 2, MGN_MCS0 + 3],
+    [MGN_MCS0 + 4, MGN_MCS0 + 5, MGN_MCS0 + 6, MGN_MCS0 + 7],
+    [MGN_MCS0 + 8, MGN_MCS0 + 9, MGN_MCS0 + 10, MGN_MCS0 + 11],
+    [MGN_MCS0 + 12, MGN_MCS0 + 13, MGN_MCS0 + 14, MGN_MCS0 + 15],
+    [
+        MGN_VHT1SS_MCS0,
+        MGN_VHT1SS_MCS0 + 1,
+        MGN_VHT1SS_MCS0 + 2,
+        MGN_VHT1SS_MCS0 + 3,
+    ],
+    [
+        MGN_VHT1SS_MCS0 + 4,
+        MGN_VHT1SS_MCS0 + 5,
+        MGN_VHT1SS_MCS0 + 6,
+        MGN_VHT1SS_MCS0 + 7,
+    ],
+    [
+        MGN_VHT1SS_MCS0 + 8,
+        MGN_VHT1SS_MCS0 + 9,
+        MGN_VHT1SS_MCS0 + 10,
+        MGN_VHT1SS_MCS0 + 11,
+    ],
+    [
+        MGN_VHT1SS_MCS0 + 12,
+        MGN_VHT1SS_MCS0 + 13,
+        MGN_VHT1SS_MCS0 + 14,
+        MGN_VHT1SS_MCS0 + 15,
+    ],
+    [
+        MGN_VHT1SS_MCS0 + 16,
+        MGN_VHT1SS_MCS0 + 17,
+        MGN_VHT1SS_MCS0 + 18,
+        MGN_VHT1SS_MCS0 + 19,
+    ],
+];
 
 impl RealtekDevice {
     pub async fn set_tx_power_override_async(
@@ -116,6 +156,150 @@ impl RealtekDevice {
                     .await
             }
         }
+    }
+
+    pub(crate) async fn set_tx_power_level_for_chip_async(
+        &self,
+        chip: ChipInfo,
+        current_channel: u8,
+        power: u8,
+    ) -> Result<(), DriverError> {
+        if power > 63 {
+            return Err(DriverError::InvalidTxPower(power));
+        }
+        match chip.family {
+            ChipFamily::Rtl8814 => {
+                self.set_tx_power_override_8814_async(chip, current_channel, power)
+                    .await
+            }
+            ChipFamily::Rtl8812 | ChipFamily::Rtl8821 => {
+                self.set_tx_power_override_8812_family_async(chip, current_channel, power)
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn set_tx_power_level_from_efuse_for_chip_async(
+        &self,
+        chip: ChipInfo,
+        current_channel: u8,
+        width: ChannelWidth,
+        efuse: EfuseInfo,
+        fallback_power: u8,
+    ) -> Result<(), DriverError> {
+        if !efuse.tx_power.loaded {
+            return self
+                .set_tx_power_level_for_chip_async(chip, current_channel, fallback_power)
+                .await;
+        }
+
+        match chip.family {
+            ChipFamily::Rtl8814 => {
+                self.set_tx_power_from_efuse_8814_async(chip, current_channel, width, efuse)
+                    .await
+            }
+            ChipFamily::Rtl8812 | ChipFamily::Rtl8821 => {
+                self.set_tx_power_from_efuse_8812_family_async(
+                    chip,
+                    current_channel,
+                    width,
+                    efuse,
+                    fallback_power,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn set_tx_power_from_efuse_8812_family_async(
+        &self,
+        chip: ChipInfo,
+        current_channel: u8,
+        width: ChannelWidth,
+        efuse: EfuseInfo,
+        fallback_power: u8,
+    ) -> Result<(), DriverError> {
+        let include_cck = is_2ghz_channel(current_channel);
+        for path in RfPath::iter(chip.total_rf_paths().min(2)) {
+            let path_idx = path_index(path) as usize;
+            let regs = match path {
+                RfPath::A => TXAGC_A_REGS_8812,
+                RfPath::B => TXAGC_B_REGS_8812,
+                _ => continue,
+            };
+            for (row, register) in regs.iter().copied().enumerate() {
+                if row == 0 && !include_cck {
+                    continue;
+                }
+                let mut word = 0u32;
+                for (byte_idx, rate) in TXAGC_RATES_8812[row].iter().copied().enumerate() {
+                    let power = tx_power_index_base(
+                        &efuse.tx_power,
+                        path_idx,
+                        rate,
+                        rate_ntx(rate),
+                        width,
+                        current_channel,
+                    )
+                    .unwrap_or(fallback_power);
+                    word |= u32::from(power & !1) << (byte_idx * 8);
+                }
+                self.write_u32_async(register, word).await?;
+            }
+            let training_power = tx_power_index_base(
+                &efuse.tx_power,
+                path_idx,
+                MGN_MCS0 + 7,
+                0,
+                width,
+                current_channel,
+            )
+            .unwrap_or(fallback_power);
+            self.write_tx_power_training_8812_async(path, training_power)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn set_tx_power_from_efuse_8814_async(
+        &self,
+        chip: ChipInfo,
+        current_channel: u8,
+        width: ChannelWidth,
+        efuse: EfuseInfo,
+    ) -> Result<(), DriverError> {
+        let include_cck = is_2ghz_channel(current_channel);
+        for path in RfPath::iter(chip.total_rf_paths()) {
+            let path_idx = path_index(path) as usize;
+            for rates in [
+                if include_cck { Some(RATES_CCK) } else { None },
+                Some(RATES_OFDM),
+                Some(RATES_HT_1SS),
+                Some(RATES_VHT_1SS),
+                Some(RATES_HT_2SS),
+                Some(RATES_VHT_2SS),
+                Some(RATES_HT_3SS),
+                Some(RATES_VHT_3SS),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                for rate in rates {
+                    let power = tx_power_index_base(
+                        &efuse.tx_power,
+                        path_idx,
+                        *rate,
+                        rate_ntx(*rate),
+                        width,
+                        current_channel,
+                    )
+                    .unwrap_or(16);
+                    self.write_txagc_table_8814_async(path, *rate, power)
+                        .await?;
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn set_tx_power_override_8812_family_async(
@@ -224,7 +408,7 @@ impl RealtekDevice {
 }
 
 const fn txagc_word(power: u8) -> u32 {
-    let byte = power as u32;
+    let byte = (power & !1) as u32;
     byte | (byte << 8) | (byte << 16) | (byte << 24)
 }
 
@@ -238,6 +422,15 @@ const fn path_index(path: RfPath) -> u8 {
         RfPath::B => 1,
         RfPath::C => 2,
         RfPath::D => 3,
+    }
+}
+
+const fn rate_ntx(rate: u8) -> usize {
+    match rate {
+        0x88..=0x8f | 0xaa..=0xb3 => 1,
+        0x90..=0x97 | 0xb4..=0xbd => 2,
+        0x98..=0x9f | 0xbe..=0xc7 => 3,
+        _ => 0,
     }
 }
 
@@ -268,6 +461,7 @@ mod tests {
     #[test]
     fn txagc_word_repeats_power_in_all_rate_bytes() {
         assert_eq!(txagc_word(40), 0x2828_2828);
+        assert_eq!(txagc_word(41), 0x2828_2828);
     }
 
     #[test]

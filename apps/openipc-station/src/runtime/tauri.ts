@@ -56,6 +56,7 @@ export type TauriConnectRequest = {
   channelWidthMhz: number;
   channelOffset: number;
   skipReset?: boolean;
+  deviceId?: string;
 };
 
 export type TauriConnectReport = {

@@ -4,30 +4,42 @@ use nusb::MaybeFuture;
 use openipc_core::realtek_tx::{build_usb_tx_frame, RealtekTxOptions};
 
 #[cfg(target_arch = "wasm32")]
-use crate::device::discover_bulk_endpoints;
+use crate::device::discover_bulk_endpoints_with_override;
 use crate::device::RealtekDevice;
 use crate::regs::*;
 #[cfg(target_arch = "wasm32")]
 use crate::types::is_supported_id;
-use crate::types::{ChipFamily, ChipInfo, DriverError, InitReport, InitStatus, RadioConfig};
+use crate::types::{
+    ChipFamily, ChipInfo, DriverError, DriverOptions, InitReport, InitStatus, MonitorOptions,
+    RadioConfig,
+};
+use crate::PowerTrackingState;
 
 impl RealtekDevice {
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn open_first_async(
-        options: crate::types::DriverOptions,
-    ) -> Result<Self, DriverError> {
+    pub async fn open_first_async(options: DriverOptions) -> Result<Self, DriverError> {
         Self::open_first(options)
     }
 
     #[cfg(target_arch = "wasm32")]
     pub async fn from_web_usb_device(device: web_sys::UsbDevice) -> Result<Self, DriverError> {
+        Self::from_web_usb_device_with_options(device, DriverOptions::default()).await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn from_web_usb_device_with_options(
+        device: web_sys::UsbDevice,
+        options: DriverOptions,
+    ) -> Result<Self, DriverError> {
         let device = nusb::Device::from_js(device)
             .await
             .map_err(|err| DriverError::Nusb(format!("nusb from_js failed: {err}")))?;
         let descriptor = device.device_descriptor();
         let vendor_id = descriptor.vendor_id();
         let product_id = descriptor.product_id();
-        if !is_supported_id(vendor_id, product_id) {
+        if !is_supported_id(vendor_id, product_id)
+            && !web_usb_target_matches(vendor_id, product_id, options)
+        {
             return Err(DriverError::Nusb(format!(
                 "unsupported Realtek adapter {vendor_id:04x}:{product_id:04x}"
             )));
@@ -36,7 +48,8 @@ impl RealtekDevice {
             .claim_interface(0)
             .await
             .map_err(|err| DriverError::Nusb(format!("claim interface 0 failed: {err}")))?;
-        let (bulk_in_ep, bulk_out_ep, bulk_out_ep_count) = discover_bulk_endpoints(&interface)?;
+        let (bulk_in_ep, bulk_out_ep, bulk_out_ep_count) =
+            discover_bulk_endpoints_with_override(&interface, options.tx_endpoint_override)?;
         Ok(Self {
             device,
             interface,
@@ -62,9 +75,25 @@ impl RealtekDevice {
         radio: RadioConfig,
         accept_bad_fcs: bool,
     ) -> Result<InitReport, DriverError> {
+        let options = MonitorOptions::from_env().with_accept_bad_fcs(accept_bad_fcs);
+        self.initialize_monitor_with_options_async(radio, options)
+            .await
+    }
+
+    pub async fn initialize_monitor_with_options_async(
+        &self,
+        radio: RadioConfig,
+        options: MonitorOptions,
+    ) -> Result<InitReport, DriverError> {
         let chip = self.probe_chip_async().await?;
         let mut firmware_downloaded = false;
         let mut status = InitStatus::Initialized;
+        let early_efuse_info = match chip.family {
+            ChipFamily::Rtl8812 | ChipFamily::Rtl8821 => {
+                Some(self.read_efuse_info_async(chip).await?)
+            }
+            ChipFamily::Rtl8814 => None,
+        };
 
         let fw_state = self.read_u32_async(REG_MCUFWDL).await.unwrap_or(0);
         let fw_already_running = match chip.family {
@@ -74,7 +103,11 @@ impl RealtekDevice {
 
         if fw_already_running {
             status = InitStatus::AlreadyRunning;
-        } else {
+        }
+
+        let should_run_boot_path =
+            !fw_already_running || matches!(chip.family, ChipFamily::Rtl8812 | ChipFamily::Rtl8821);
+        if should_run_boot_path {
             match chip.family {
                 ChipFamily::Rtl8812 | ChipFamily::Rtl8821 => {
                     self.power_on_jaguar_async(chip).await?;
@@ -84,21 +117,51 @@ impl RealtekDevice {
                     firmware_downloaded = true;
                 }
                 ChipFamily::Rtl8814 => {
-                    self.download_firmware_8814_async().await?;
+                    self.download_firmware_8814_with_options_async(
+                        options.firmware_8814_mode,
+                        options.firmware_8814_chunk,
+                    )
+                    .await?;
                     firmware_downloaded = true;
                 }
             }
         }
 
-        self.load_mac_tables_async(chip).await?;
+        let efuse_info = if let Some(efuse_info) = early_efuse_info {
+            efuse_info
+        } else {
+            self.read_efuse_info_async(chip).await?
+        };
+
+        self.load_mac_tables_async(chip, efuse_info).await?;
         self.init_queue_fifo_async(chip).await?;
         self.init_mac_rx_async(chip).await?;
         self.enable_bb_rf_domain_8814_async(chip).await?;
-        self.load_phy_tables_async(chip).await?;
-        self.load_rf_tables_async(chip).await?;
-        self.finalize_mac_rx_async(chip).await?;
-        self.set_monitor_mode_async(accept_bad_fcs).await?;
-        self.set_channel_async(chip, radio).await?;
+        self.load_phy_tables_async(chip, efuse_info).await?;
+        self.load_rf_tables_async(chip, efuse_info).await?;
+        self.configure_single_tx_path_async(chip).await?;
+        self.finalize_mac_rx_async(chip, efuse_info).await?;
+        self.enable_rx_bar_async().await?;
+        self.set_channel_with_options_async(chip, radio, efuse_info, options.skip_tx_power)
+            .await?;
+        if chip.family == ChipFamily::Rtl8812 {
+            let mut power_tracking = PowerTrackingState::default();
+            self.init_power_tracking_8812_async(&mut power_tracking)
+                .await?;
+            self.clear_power_tracking_8812_async(&mut power_tracking)
+                .await?;
+            let _ = self
+                .tick_power_tracking_8812_async(
+                    &mut power_tracking,
+                    radio.channel,
+                    radio.channel_width,
+                )
+                .await?;
+        }
+        if options.should_run_iqk(chip.family) {
+            let _ = self.run_iqk_async(chip, radio.channel).await?;
+        }
+        self.set_monitor_mode_async(options.accept_bad_fcs).await?;
 
         Ok(InitReport {
             chip,
@@ -126,6 +189,36 @@ impl RealtekDevice {
         Ok(completion.buffer[..completion.actual_len].to_vec())
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub async fn read_rx_transfers_async(
+        &self,
+        length: usize,
+        in_flight: usize,
+    ) -> Result<Vec<Vec<u8>>, DriverError> {
+        let count = in_flight.clamp(1, 16);
+        let mut endpoint = self
+            .interface
+            .endpoint::<Bulk, In>(self.bulk_in_ep)
+            .map_err(|err| DriverError::Nusb(format!("open bulk IN endpoint failed: {err}")))?;
+        endpoint
+            .clear_halt()
+            .await
+            .map_err(|err| DriverError::Nusb(format!("clear halt on bulk IN failed: {err}")))?;
+        for _ in 0..count {
+            let buffer = endpoint.allocate(length);
+            endpoint.submit(buffer);
+        }
+        let mut transfers = Vec::with_capacity(count);
+        for _ in 0..count {
+            let completion = endpoint.next_complete().await;
+            completion
+                .status
+                .map_err(|err| DriverError::Nusb(format!("bulk IN transfer failed: {err}")))?;
+            transfers.push(completion.buffer[..completion.actual_len].to_vec());
+        }
+        Ok(transfers)
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn read_rx_transfer_async(&self, length: usize) -> Result<Vec<u8>, DriverError> {
         let mut endpoint = self
@@ -141,6 +234,41 @@ impl RealtekDevice {
             .status
             .map_err(|err| DriverError::Nusb(format!("bulk IN transfer failed: {err}")))?;
         Ok(completion.buffer[..completion.actual_len].to_vec())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn read_rx_transfers_async(
+        &self,
+        length: usize,
+        in_flight: usize,
+    ) -> Result<Vec<Vec<u8>>, DriverError> {
+        let count = in_flight.clamp(1, 16);
+        let mut endpoint = self
+            .interface
+            .endpoint::<Bulk, In>(self.bulk_in_ep)
+            .map_err(|err| DriverError::Nusb(format!("open bulk IN endpoint failed: {err}")))?;
+        endpoint
+            .clear_halt()
+            .wait()
+            .map_err(|err| DriverError::Nusb(format!("clear halt on bulk IN failed: {err}")))?;
+        for _ in 0..count {
+            let buffer = endpoint.allocate(length);
+            endpoint.submit(buffer);
+        }
+        let mut transfers = Vec::with_capacity(count);
+        for _ in 0..count {
+            let Some(completion) = endpoint.wait_next_complete(USB_TIMEOUT) else {
+                endpoint.cancel_all();
+                return Err(DriverError::Nusb(
+                    "bulk IN transfer timed out while reading in-flight batch".to_owned(),
+                ));
+            };
+            completion
+                .status
+                .map_err(|err| DriverError::Nusb(format!("bulk IN transfer failed: {err}")))?;
+            transfers.push(completion.buffer[..completion.actual_len].to_vec());
+        }
+        Ok(transfers)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -360,4 +488,12 @@ impl RealtekDevice {
         self.write_register_async(register, &value.to_le_bytes())
             .await
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn web_usb_target_matches(vendor_id: u16, product_id: u16, options: DriverOptions) -> bool {
+    matches!(
+        (options.target_vendor_id, options.target_product_id),
+        (Some(vid), Some(pid)) if vendor_id == vid && product_id == pid
+    )
 }

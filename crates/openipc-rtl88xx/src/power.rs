@@ -17,6 +17,78 @@ pub(crate) struct PowerStep {
 
 pub(crate) const RTL8812_POWER_ON_FLOW: &[PowerStep] = &[
     PowerStep {
+        offset: 0x0012,
+        cmd: PowerCommand::Write,
+        mask: BIT0 as u8,
+        value: BIT0 as u8,
+    },
+    PowerStep {
+        offset: 0x0014,
+        cmd: PowerCommand::Write,
+        mask: 0x80,
+        value: 0,
+    },
+    PowerStep {
+        offset: 0x0015,
+        cmd: PowerCommand::Write,
+        mask: 0x01,
+        value: 0,
+    },
+    PowerStep {
+        offset: 0x0023,
+        cmd: PowerCommand::Write,
+        mask: 0x10,
+        value: 0,
+    },
+    PowerStep {
+        offset: 0x0046,
+        cmd: PowerCommand::Write,
+        mask: 0xff,
+        value: 0,
+    },
+    PowerStep {
+        offset: 0x0043,
+        cmd: PowerCommand::Write,
+        mask: 0xff,
+        value: 0,
+    },
+    PowerStep {
+        offset: 0x0005,
+        cmd: PowerCommand::Write,
+        mask: BIT2 as u8,
+        value: 0,
+    },
+    PowerStep {
+        offset: 0x0005,
+        cmd: PowerCommand::Write,
+        mask: BIT3 as u8,
+        value: 0,
+    },
+    PowerStep {
+        offset: 0x0003,
+        cmd: PowerCommand::Write,
+        mask: BIT2 as u8,
+        value: BIT2 as u8,
+    },
+    PowerStep {
+        offset: 0x0301,
+        cmd: PowerCommand::Write,
+        mask: 0xff,
+        value: 0,
+    },
+    PowerStep {
+        offset: 0x0024,
+        cmd: PowerCommand::Write,
+        mask: BIT1 as u8,
+        value: BIT1 as u8,
+    },
+    PowerStep {
+        offset: 0x0028,
+        cmd: PowerCommand::Write,
+        mask: BIT3 as u8,
+        value: BIT3 as u8,
+    },
+    PowerStep {
         offset: 0x0005,
         cmd: PowerCommand::Write,
         mask: BIT2 as u8,

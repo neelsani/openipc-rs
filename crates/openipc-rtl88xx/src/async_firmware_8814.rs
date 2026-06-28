@@ -2,13 +2,24 @@ use crate::device::RealtekDevice;
 use crate::regs::*;
 use crate::rtl_data;
 use crate::time::{sleep_micros, sleep_ms, yield_now, DateNow};
-use crate::types::DriverError;
+use crate::types::{DriverError, Firmware8814Mode};
 
 impl RealtekDevice {
-    pub(crate) async fn download_firmware_8814_async(&self) -> Result<(), DriverError> {
+    pub(crate) async fn download_firmware_8814_with_options_async(
+        &self,
+        mode: Firmware8814Mode,
+        chunk_override: Option<usize>,
+    ) -> Result<(), DriverError> {
         let state = self.read_u32_async(REG_MCUFWDL).await?;
         if state & 0xff == 0x78 {
             return Ok(());
+        }
+
+        if mode == Firmware8814Mode::Rtw88
+            && self.read_u8_async(REG_MCUFWDL).await? & BIT7 as u8 != 0
+        {
+            self.write_u8_async(REG_MCUFWDL, 0x00).await?;
+            self.reset_8051_async().await?;
         }
 
         let firmware = rtl_data::RTL8814_FW_NIC;
@@ -23,9 +34,17 @@ impl RealtekDevice {
         }
 
         self.power_on_prefix_8814_async().await?;
-        self.pre_firmware_staging_8814_async().await?;
-        self.fwdl_kernel_path_8814_async(firmware, dmem_size, iram_size)
-            .await
+        match mode {
+            Firmware8814Mode::Kernel => {
+                self.pre_firmware_staging_8814_async().await?;
+                self.fwdl_kernel_path_8814_async(firmware, dmem_size, iram_size, chunk_override)
+                    .await
+            }
+            Firmware8814Mode::Rtw88 => {
+                self.fwdl_rtw88_path_8814_async(firmware, dmem_size, iram_size)
+                    .await
+            }
+        }
     }
 
     async fn power_on_prefix_8814_async(&self) -> Result<(), DriverError> {
@@ -198,7 +217,9 @@ impl RealtekDevice {
         firmware: &[u8],
         dmem_size: usize,
         iram_size: usize,
+        chunk_override: Option<usize>,
     ) -> Result<(), DriverError> {
+        let max_chunk = validated_chunk_size_8814(chunk_override)?;
         self.firmware_download_enable_8814_async(true).await?;
         self.enable_3081_8814_async(false).await?;
         self.ddma_reset_8814_async().await?;
@@ -228,11 +249,17 @@ impl RealtekDevice {
         let iram = &firmware[iram_start..iram_start + iram_size];
 
         let mut result = self
-            .stream_firmware_section_8814_async(dmem, OCPBASE_DMEM_3081, source)
+            .stream_firmware_section_8814_async(dmem, OCPBASE_DMEM_3081, source, max_chunk, true)
             .await;
         if result.is_ok() {
             result = self
-                .stream_firmware_section_8814_async(iram, OCPBASE_IMEM_3081, source)
+                .stream_firmware_section_8814_async(
+                    iram,
+                    OCPBASE_IMEM_3081,
+                    source,
+                    max_chunk,
+                    true,
+                )
                 .await;
         }
 
@@ -264,22 +291,111 @@ impl RealtekDevice {
         self.write_u8_async(REG_HMETFR, 0x0f).await
     }
 
+    async fn fwdl_rtw88_path_8814_async(
+        &self,
+        firmware: &[u8],
+        dmem_size: usize,
+        iram_size: usize,
+    ) -> Result<(), DriverError> {
+        self.pre_firmware_staging_rtw88_8814_async().await?;
+
+        let source = OCPBASE_TXBUF_3081 + RTL8814_TXDESC_OFFSET as u32;
+        let dmem = &firmware[RTL8814_FW_HEADER_SIZE..RTL8814_FW_HEADER_SIZE + dmem_size];
+        let iram_start = RTL8814_FW_HEADER_SIZE + dmem_size;
+        let iram = &firmware[iram_start..iram_start + iram_size];
+
+        self.stream_firmware_section_8814_async(
+            dmem,
+            OCPBASE_DMEM_3081,
+            source,
+            RTL8814_MAX_RSVD_PAGE_CHUNK_SIZE,
+            false,
+        )
+        .await?;
+        self.stream_firmware_section_8814_async(
+            iram,
+            OCPBASE_IMEM_3081,
+            source,
+            RTL8814_MAX_RSVD_PAGE_CHUNK_SIZE,
+            false,
+        )
+        .await?;
+
+        self.write_u8_async(REG_MCUFWDL, 0x79).await?;
+        self.write_u8_async(0x010d, 0x00).await?;
+        self.write_u32_async(0x1330, 0x8000_0000).await?;
+        self.write_u16_async(0x0230, 0x0000).await?;
+        self.write_u32_async(0x022c, 0x8000_0000).await?;
+        self.write_u8_async(REG_BCN_CTRL, 0x14).await?;
+        self.write_u32_async(0x0210, 0x0000_0004).await?;
+        self.write_u16_async(REG_MCUFWDL, 0x6078).await?;
+        self.write_u8_async(0x001d, 0x09).await?;
+        self.write_u8_async(REG_SYS_FUNC_EN + 1, 0xfe).await?;
+        self.firmware_free_to_go_8814_async().await?;
+        self.write_u8_async(REG_HMETFR, 0x0f).await
+    }
+
+    async fn pre_firmware_staging_rtw88_8814_async(&self) -> Result<(), DriverError> {
+        self.read_u32_discard_8814_async(0x1080).await?;
+        self.write_u32_async(0x1080, 0xf781_6d20).await?;
+        self.read_u8_discard_8814_async(0x0003).await?;
+        self.write_u8_async(0x0003, 0xfe).await?;
+        self.read_u8_discard_8814_async(0x1103).await?;
+        self.write_u8_async(0x1103, 0x0c).await?;
+        self.read_u32_discard_8814_async(0x0080).await?;
+        self.write_u8_async(0x01a0, 0xfd).await?;
+        self.read_u8_discard_8814_async(0x0003).await?;
+        self.write_u8_async(0x0003, 0xfa).await?;
+        self.read_u8_discard_8814_async(0x001d).await?;
+        self.write_u8_async(0x001d, 0x08).await?;
+        self.read_u8_discard_8814_async(0x010d).await?;
+        self.write_u8_async(0x010d, 0xc0).await?;
+        self.read_u8_discard_8814_async(0x0100).await?;
+        self.write_u8_async(0x0100, 0x05).await?;
+        self.write_u32_async(0x1330, 0x8000_0000).await?;
+        self.read_u16_discard_8814_async(0x0230).await?;
+        self.read_u32_discard_8814_async(0x022c).await?;
+        self.write_u16_async(0x0230, 0x0200).await?;
+        self.write_u32_async(0x022c, 0x8000_0000).await?;
+        self.read_u8_discard_8814_async(0x0550).await?;
+        self.write_u8_async(0x0550, 0x14).await?;
+        self.read_u8_discard_8814_async(0x1082).await?;
+        self.write_u8_async(0x1082, 0x80).await?;
+        self.read_u8_discard_8814_async(0x0009).await?;
+        self.write_u8_async(0x0009, 0xbc).await?;
+        self.read_u8_discard_8814_async(0x1082).await?;
+        self.write_u8_async(0x1082, 0x81).await?;
+        self.read_u8_discard_8814_async(0x0009).await?;
+        self.write_u8_async(0x0009, 0xfc).await?;
+        self.read_u16_discard_8814_async(0x0080).await?;
+        self.write_u16_async(0x0080, 0x2001).await?;
+        self.read_u32_discard_8814_async(0x1208).await?;
+        self.write_u32_async(0x1208, 0x0200_0000).await?;
+        self.read_u8_discard_8814_async(0x0550).await?;
+        self.write_u16_async(0x0204, 0x8000).await?;
+        self.read_u8_discard_8814_async(0x0101).await?;
+        self.write_u8_async(0x0101, 0x01).await?;
+        self.write_u8_async(0x0550, 0x14).await
+    }
+
     async fn stream_firmware_section_8814_async(
         &self,
         section: &[u8],
         ocp_dest: u32,
         tx_fifo_source: u32,
+        max_chunk: usize,
+        kernel_flags: bool,
     ) -> Result<(), DriverError> {
         let mut offset = 0usize;
         while offset < section.len() {
             let remaining = section.len() - offset;
             let mut chunk_len;
             let last_segment;
-            if remaining > RTL8814_MAX_RSVD_PAGE_BUF_SIZE {
-                chunk_len = RTL8814_MAX_RSVD_PAGE_BUF_SIZE;
+            if remaining > max_chunk {
+                chunk_len = max_chunk;
                 last_segment = false;
-                let final_block_len = remaining - RTL8814_MAX_RSVD_PAGE_BUF_SIZE;
-                if final_block_len < RTL8814_MAX_RSVD_PAGE_BUF_SIZE
+                let final_block_len = remaining - max_chunk;
+                if final_block_len < max_chunk
                     && ((final_block_len + RTL8814_TXDESC_OFFSET) & 0x3f) == 0
                 {
                     chunk_len -= 4;
@@ -296,16 +412,32 @@ impl RealtekDevice {
 
             let chunk = &section[offset..offset + chunk_len];
             self.set_download_fw_rsvd_page_8814_async(chunk).await?;
-            self.wait_download_rsvd_page_ok_8814_async().await?;
+            if kernel_flags {
+                self.wait_download_rsvd_page_ok_8814_async().await?;
+            } else {
+                sleep_micros(100).await;
+                let _ = self.wait_download_rsvd_page_ok_rtw88_8814_async().await;
+                self.write_u16_async(REG_FIFOPAGE_CTRL_2_8814, 0x8000)
+                    .await?;
+                self.write_u8_async(REG_BCN_CTRL, 0x14).await?;
+                self.write_u8_async(REG_CR + 1, 0x00).await?;
+            }
             self.iddma_download_fw_3081_async(
                 tx_fifo_source,
                 ocp_dest + offset as u32,
                 chunk_len as u32,
                 offset == 0,
                 last_segment,
+                kernel_flags,
             )
             .await?;
             offset += chunk_len;
+            if !kernel_flags && offset < section.len() {
+                self.write_u16_async(REG_FIFOPAGE_CTRL_2_8814, 0x8000)
+                    .await?;
+                self.write_u8_async(REG_CR + 1, 0x01).await?;
+                self.write_u8_async(REG_BCN_CTRL, 0x14).await?;
+            }
         }
         Ok(())
     }
@@ -337,6 +469,19 @@ impl RealtekDevice {
         ))
     }
 
+    async fn wait_download_rsvd_page_ok_rtw88_8814_async(&self) -> Result<(), DriverError> {
+        for _ in 0..200 {
+            let value = self.read_u32_async(REG_FIFOPAGE_CTRL_2_8814).await?;
+            if value & BIT15 != 0 {
+                return Ok(());
+            }
+            sleep_micros(50).await;
+        }
+        Err(DriverError::Nusb(
+            "RTL8814 rtw88 reserved-page download did not report completion".to_string(),
+        ))
+    }
+
     async fn iddma_download_fw_3081_async(
         &self,
         source: u32,
@@ -344,6 +489,7 @@ impl RealtekDevice {
         length: u32,
         first_segment: bool,
         last_segment: bool,
+        kernel_flags: bool,
     ) -> Result<(), DriverError> {
         self.wait_ddma_idle_8814_async("pre").await?;
 
@@ -363,21 +509,25 @@ impl RealtekDevice {
             if ddma & DDMA_CHKSUM_FAIL_8814 != 0 {
                 self.write_u32_async(REG_DDMA_CH0CTRL_8814, ddma | DDMA_RST_CHKSUM_STS_8814)
                     .await?;
-                let clear = if dest < OCPBASE_DMEM_3081 {
-                    fwctrl & !(IMEM_DL_RDY_8814 | IMEM_CHKSUM_OK_8814)
-                } else {
-                    fwctrl & !(DMEM_DL_RDY_8814 | DMEM_CHKSUM_OK_8814)
-                };
-                self.write_u8_async(REG_MCUFWDL, clear).await?;
+                if kernel_flags {
+                    let clear = if dest < OCPBASE_DMEM_3081 {
+                        fwctrl & !(IMEM_DL_RDY_8814 | IMEM_CHKSUM_OK_8814)
+                    } else {
+                        fwctrl & !(DMEM_DL_RDY_8814 | DMEM_CHKSUM_OK_8814)
+                    };
+                    self.write_u8_async(REG_MCUFWDL, clear).await?;
+                }
                 return Err(DriverError::FirmwareChecksumTimeout);
             }
 
-            let flags = if dest < OCPBASE_DMEM_3081 {
-                IMEM_DL_RDY_8814 | IMEM_CHKSUM_OK_8814
-            } else {
-                DMEM_DL_RDY_8814 | DMEM_CHKSUM_OK_8814
-            };
-            self.write_u8_async(REG_MCUFWDL, fwctrl | flags).await?;
+            if kernel_flags {
+                let flags = if dest < OCPBASE_DMEM_3081 {
+                    IMEM_DL_RDY_8814 | IMEM_CHKSUM_OK_8814
+                } else {
+                    DMEM_DL_RDY_8814 | DMEM_CHKSUM_OK_8814
+                };
+                self.write_u8_async(REG_MCUFWDL, fwctrl | flags).await?;
+            }
         }
         Ok(())
     }
@@ -465,6 +615,20 @@ fn le32_at(bytes: &[u8], offset: usize) -> Result<u32, DriverError> {
         .try_into()
         .expect("slice length is checked");
     Ok(u32::from_le_bytes(array))
+}
+
+fn validated_chunk_size_8814(chunk_override: Option<usize>) -> Result<usize, DriverError> {
+    let Some(chunk) = chunk_override else {
+        return Ok(RTL8814_MAX_RSVD_PAGE_BUF_SIZE);
+    };
+    if (64..=RTL8814_MAX_RSVD_PAGE_CHUNK_SIZE).contains(&chunk) {
+        Ok(chunk)
+    } else {
+        Err(DriverError::Nusb(format!(
+            "RTL8814 firmware chunk override {chunk} is outside 64..={}",
+            RTL8814_MAX_RSVD_PAGE_CHUNK_SIZE
+        )))
+    }
 }
 
 fn build_rsvd_page_packet_8814(chunk: &[u8]) -> Vec<u8> {

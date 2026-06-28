@@ -21,7 +21,10 @@ pub use channel::{ChannelId, RadioPort};
 pub use fec::{FecCode, FecError};
 pub use ieee80211::{FrameLayout, WifiFrame};
 pub use pipeline::{PipelineEvent, ReceiverPipeline};
-pub use radiotap::{ChannelBandwidth, TxRadioParams, FRAME_TYPE_DATA, FRAME_TYPE_RTS};
+pub use radiotap::{
+    build_stream_radiotap, parse_tx_mode_str, ChannelBandwidth, TxMode, TxModeKind, TxRadioParams,
+    FRAME_TYPE_DATA, FRAME_TYPE_RTS,
+};
 pub use realtek::{parse_rx_aggregate, RealtekRxPacket, RxPacketAttrib};
 pub use realtek_tx::{build_usb_tx_frame, RealtekTxOptions};
 pub use rtp::{Codec, DepacketizedFrame, RtpDepacketizer, RtpHeader};

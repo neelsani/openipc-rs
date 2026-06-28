@@ -1,6 +1,6 @@
 [package]
 name = "openipc-rs-desktop"
-version = "0.1.13"
+version = "0.1.14"
 description = "Native desktop shell for openipc-rs"
 edition = "2021"
 license = "MIT"

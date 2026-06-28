@@ -134,6 +134,11 @@ directly. Browser applications go through `openipc-web`, where JavaScript first
 gets a user-approved `UsbDevice` and Rust/WASM uses the WebUSB-capable `nusb`
 backend.
 
+On Android, apps should discover and permission USB devices with Android
+`UsbManager`, then pass an already-open file descriptor into Rust. The driver
+exposes `RealtekDevice::from_nusb_device`, which lets higher layers wrap that
+descriptor with `nusb::Device::from_fd` before running the normal Realtek HAL.
+
 ## Diagnostics And Polling
 
 The crate exposes diagnostics as explicit calls: thermal meter reads, false

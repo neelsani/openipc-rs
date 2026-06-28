@@ -16,37 +16,37 @@ The source of truth is `SUPPORTED_DEVICES` in the driver crate. The current
 table includes the Realtek reference IDs plus the RTL8821AU vendor IDs mirrored
 from devourer:
 
-| VID:PID | Family Hint | Label |
-| --- | --- | --- |
-| `0bda:8812` | RTL8812 | RTL8812AU / RTL8811AU reference PID |
-| `0bda:0811` | RTL8812 | RTL8811AU |
-| `0bda:a811` | RTL8812 | RTL8811AU |
-| `0bda:b811` | RTL8812 | RTL8811AU / RTL8821AU variant |
-| `0bda:8813` | RTL8814 | RTL8814AU |
-| `0bda:0820` | RTL8821 | RTL8821AU |
-| `0bda:0821` | RTL8821 | RTL8821AU |
-| `0bda:0823` | RTL8821 | RTL8821AU |
-| `0bda:8822` | RTL8821 | RTL8821AU |
-| `0411:0242` | RTL8821 | Buffalo RTL8821AU |
-| `0411:029b` | RTL8821 | Buffalo RTL8821AU |
-| `04bb:0953` | RTL8821 | I-O Data RTL8821AU |
-| `056e:4007` | RTL8821 | Elecom RTL8821AU |
-| `056e:400e` | RTL8821 | Elecom RTL8821AU |
-| `056e:400f` | RTL8821 | Elecom RTL8821AU |
-| `0846:9052` | RTL8821 | Netgear RTL8821AU |
-| `0e66:0023` | RTL8821 | Hawking RTL8821AU |
-| `2001:3314` | RTL8821 | D-Link RTL8821AU |
-| `2001:3318` | RTL8821 | D-Link RTL8821AU |
-| `2019:ab32` | RTL8821 | Planex RTL8821AU |
-| `20f4:804b` | RTL8821 | TRENDnet RTL8821AU |
-| `2357:011e` | RTL8821 | TP-Link RTL8821AU |
-| `2357:0120` | RTL8821 | TP-Link Archer T2U Plus / RTL8821AU |
-| `2357:0122` | RTL8821 | TP-Link RTL8821AU |
-| `3823:6249` | RTL8821 | Obihai RTL8821AU |
-| `7392:a811` | RTL8821 | Edimax RTL8821AU |
-| `7392:a812` | RTL8821 | Edimax RTL8821AU |
-| `7392:a813` | RTL8821 | Edimax RTL8821AU |
-| `7392:b611` | RTL8821 | Edimax RTL8821AU |
+| VID:PID     | Family Hint | Label                               |
+| ----------- | ----------- | ----------------------------------- |
+| `0bda:8812` | RTL8812     | RTL8812AU / RTL8811AU reference PID |
+| `0bda:0811` | RTL8812     | RTL8811AU                           |
+| `0bda:a811` | RTL8812     | RTL8811AU                           |
+| `0bda:b811` | RTL8812     | RTL8811AU / RTL8821AU variant       |
+| `0bda:8813` | RTL8814     | RTL8814AU                           |
+| `0bda:0820` | RTL8821     | RTL8821AU                           |
+| `0bda:0821` | RTL8821     | RTL8821AU                           |
+| `0bda:0823` | RTL8821     | RTL8821AU                           |
+| `0bda:8822` | RTL8821     | RTL8821AU                           |
+| `0411:0242` | RTL8821     | Buffalo RTL8821AU                   |
+| `0411:029b` | RTL8821     | Buffalo RTL8821AU                   |
+| `04bb:0953` | RTL8821     | I-O Data RTL8821AU                  |
+| `056e:4007` | RTL8821     | Elecom RTL8821AU                    |
+| `056e:400e` | RTL8821     | Elecom RTL8821AU                    |
+| `056e:400f` | RTL8821     | Elecom RTL8821AU                    |
+| `0846:9052` | RTL8821     | Netgear RTL8821AU                   |
+| `0e66:0023` | RTL8821     | Hawking RTL8821AU                   |
+| `2001:3314` | RTL8821     | D-Link RTL8821AU                    |
+| `2001:3318` | RTL8821     | D-Link RTL8821AU                    |
+| `2019:ab32` | RTL8821     | Planex RTL8821AU                    |
+| `20f4:804b` | RTL8821     | TRENDnet RTL8821AU                  |
+| `2357:011e` | RTL8821     | TP-Link RTL8821AU                   |
+| `2357:0120` | RTL8821     | TP-Link Archer T2U Plus / RTL8821AU |
+| `2357:0122` | RTL8821     | TP-Link RTL8821AU                   |
+| `3823:6249` | RTL8821     | Obihai RTL8821AU                    |
+| `7392:a811` | RTL8821     | Edimax RTL8821AU                    |
+| `7392:a812` | RTL8821     | Edimax RTL8821AU                    |
+| `7392:a813` | RTL8821     | Edimax RTL8821AU                    |
+| `7392:b611` | RTL8821     | Edimax RTL8821AU                    |
 
 The chip probe still reads hardware state after opening the device. The table is
 only the first filter used for discovery.
@@ -110,6 +110,11 @@ The browser still needs the same Realtek HAL work as native: WebUSB changes how
 control and bulk transfers are issued, not what registers or firmware steps the
 adapter needs.
 
+Android is another transport boundary. The Android app should use `UsbManager`
+for discovery and permission, then pass an already-open file descriptor to the
+Tauri command that wraps it with `nusb::Device::from_fd`. Once the descriptor is
+wrapped, the same Realtek initialization and RX/TX code runs.
+
 ## Runtime Options
 
 Native and browser code use the same two option structs:
@@ -121,17 +126,17 @@ Native and browser code use the same two option structs:
 
 Native builds additionally read devourer-compatible environment variables:
 
-| Variable | Effect |
-| --- | --- |
-| `DEVOURER_VID` / `DEVOURER_PID` | Target a specific USB adapter. |
-| `DEVOURER_SKIP_RESET` | Skip USB reset before claiming the adapter. |
-| `DEVOURER_TX_EP` | Force a bulk-OUT endpoint. |
-| `DEVOURER_SKIP_TXPWR` | Skip TX-power table programming during channel set. |
-| `DEVOURER_FORCE_IQK` | Run IQK where it is otherwise opt-in, notably RTL8814. |
-| `DEVOURER_DISABLE_IQK` | Suppress IQK. |
-| `DEVOURER_8814_FWDL=kernel\|rtw88` | Select the RTL8814 firmware path. |
-| `DEVOURER_8814_FWDL_CHUNK=<n>` | Override RTL8814 kernel-path chunk size. |
-| `DEVOURER_TX_LEGACY_8812_DESC` | Use the older 8812 TX descriptor shape on RTL8814. |
+| Variable                           | Effect                                                 |
+| ---------------------------------- | ------------------------------------------------------ |
+| `DEVOURER_VID` / `DEVOURER_PID`    | Target a specific USB adapter.                         |
+| `DEVOURER_SKIP_RESET`              | Skip USB reset before claiming the adapter.            |
+| `DEVOURER_TX_EP`                   | Force a bulk-OUT endpoint.                             |
+| `DEVOURER_SKIP_TXPWR`              | Skip TX-power table programming during channel set.    |
+| `DEVOURER_FORCE_IQK`               | Run IQK where it is otherwise opt-in, notably RTL8814. |
+| `DEVOURER_DISABLE_IQK`             | Suppress IQK.                                          |
+| `DEVOURER_8814_FWDL=kernel\|rtw88` | Select the RTL8814 firmware path.                      |
+| `DEVOURER_8814_FWDL_CHUNK=<n>`     | Override RTL8814 kernel-path chunk size.               |
+| `DEVOURER_TX_LEGACY_8812_DESC`     | Use the older 8812 TX descriptor shape on RTL8814.     |
 
 The browser API exposes the same choices with
 `WebUsbRealtekDevice.fromWebUsbDeviceWithOptions`,

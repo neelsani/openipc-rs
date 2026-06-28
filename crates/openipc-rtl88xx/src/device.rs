@@ -31,7 +31,7 @@ pub struct RealtekDevice {
 }
 
 impl RealtekDevice {
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
     pub fn open_first(options: DriverOptions) -> Result<Self, DriverError> {
         let info = nusb::list_devices()
             .wait()
@@ -46,6 +46,30 @@ impl RealtekDevice {
                 "open {vendor_id:04x}:{product_id:04x} failed: {err}"
             ))
         })?;
+
+        Self::from_nusb_device(device, options)
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn open_first(_options: DriverOptions) -> Result<Self, DriverError> {
+        Err(DriverError::Nusb(
+            "Android USB discovery must use UsbManager and nusb::Device::from_fd".to_owned(),
+        ))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn from_nusb_device(
+        device: nusb::Device,
+        options: DriverOptions,
+    ) -> Result<Self, DriverError> {
+        let descriptor = device.device_descriptor();
+        let vendor_id = descriptor.vendor_id();
+        let product_id = descriptor.product_id();
+        if !device_matches_options(vendor_id, product_id, options) {
+            return Err(DriverError::Nusb(format!(
+                "unsupported or unexpected USB device {vendor_id:04x}:{product_id:04x}"
+            )));
+        }
 
         if !options.skip_reset {
             device

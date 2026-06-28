@@ -52,12 +52,12 @@ Required release secret:
 
 Configure npm trusted publishing for `@openipc-rs/web` on npmjs.com:
 
-| Field                | Value          |
-| -------------------- | -------------- |
-| Publisher            | GitHub Actions |
-| Organization or user | `neelsani`     |
-| Repository           | `openipc-rs`   |
-| Workflow filename    | `ci.yml`       |
+| Field                | Value                         |
+| -------------------- | ----------------------------- |
+| Publisher            | GitHub Actions                |
+| Organization or user | `neelsani`                    |
+| Repository           | `openipc-rs`                  |
+| Workflow filename    | `ci.yml`                      |
 | Allowed action       | package publish from `ci.yml` |
 
 The existing Cloudflare secrets are still required for `master` and release-tag
@@ -196,8 +196,9 @@ Linux releases are built on Ubuntu runners and emit the Linux bundle formats
 enabled by Tauri, such as AppImage, `.deb`, and `.rpm`; they are not separate
 per-distro builds.
 
-These bundles are currently unsigned. Users may see operating-system warnings
-until signing and notarization are configured.
+macOS bundles are ad-hoc signed with `signingIdentity = "-"`. Windows and Linux
+bundles are not code-signed. Users may see operating-system warnings until
+platform signing and macOS notarization are configured.
 
 ## Station Web App
 

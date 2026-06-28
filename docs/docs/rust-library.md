@@ -119,6 +119,87 @@ The returned frame bytes are encoded Annex-B H.264/H.265. Your application can
 write them to a file, feed a native decoder, or forward RTP/Annex-B to another
 player.
 
+## Understand Pipeline Events
+
+`ReceiverPipeline::push_80211_frame` returns a list because one input frame can
+advance several layers:
+
+```rust
+for event in pipeline.push_80211_frame(packet.data)? {
+    match event {
+        PipelineEvent::IgnoredFrame => {}
+        PipelineEvent::SessionEstablished { epoch, fec_k, fec_n } => {
+            eprintln!("session epoch={epoch} fec={fec_k}/{fec_n}");
+        }
+        PipelineEvent::WfbPayload { packet_seq, len } => {
+            eprintln!("recovered WFB payload seq={packet_seq} len={len}");
+        }
+        PipelineEvent::RtpPacket { payload, .. } => {
+            // Mirror RTP, inspect packet timing, or ignore it.
+            println!("rtp bytes={}", payload.len());
+        }
+        PipelineEvent::VideoFrame(frame) => {
+            // Complete encoded access unit for a decoder or file writer.
+            println!("annex-b frame bytes={}", frame.data.len());
+        }
+    }
+}
+```
+
+`RtpPacket` and `VideoFrame` are not competing states. The pipeline emits
+`RtpPacket` when a recovered payload parses as RTP, then may emit `VideoFrame`
+from the same call if that RTP packet completes a H.264/H.265 access unit.
+
+## Read Raw Payload Bytes
+
+OpenIPC/WFB uses separate radio ports. Video is port `0x00`; the ground-station
+MAVLink downlink observed in aviateur and PixelPilot is port `0x10`; data-style
+payloads may use another port such as `0x20`. Use `PayloadPipeline` when you
+only want recovered bytes and want your own app to decide how to parse them:
+
+```rust
+use openipc_core::{
+    ChannelId, FrameLayout, PayloadPipeline, PayloadPipelineEvent, RadioPort,
+    WfbKeypair,
+};
+
+fn build_payload_pipeline(
+    link_id: u32,
+    port: RadioPort,
+    keypair_bytes: &[u8],
+) -> Result<PayloadPipeline, Box<dyn std::error::Error>> {
+    let keypair = WfbKeypair::from_bytes(keypair_bytes)?;
+    Ok(PayloadPipeline::with_keypair(
+        ChannelId::from_link_port(link_id, port),
+        FrameLayout::WithFcs,
+        keypair,
+        0,
+    )?)
+}
+
+fn handle_wifi_frame(
+    pipeline: &mut PayloadPipeline,
+    frame: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    for event in pipeline.push_80211_frame(frame)? {
+        if let PayloadPipelineEvent::Payload(payload) = event {
+            // payload.data is raw recovered bytes for the configured radio port.
+            // payload.packet_seq carries the recovered WFB packet sequence.
+            // Parse, store, or inspect it in your own application layer.
+            println!("telemetry bytes: {}", payload.data.len());
+        }
+    }
+    Ok(())
+}
+```
+
+`RadioPort::MavlinkRx` is just a named convenience for the observed OpenIPC
+MAVLink downlink port. You can also use `RadioPort::DataRx` or
+`RadioPort::Custom(n)`. `openipc-rs` deliberately does not parse MAVLink, MSP,
+CRSF, or arbitrary vendor protocols in the core crate. The boundary is recovered
+bytes plus packet sequence metadata, so another crate or process can decide how
+to interpret them.
+
 ## Open The Native Realtek Driver
 
 ```rust

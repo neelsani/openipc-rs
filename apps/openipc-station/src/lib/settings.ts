@@ -1,9 +1,5 @@
 import type { VideoCodecPreference } from "@/video";
-import type {
-  ChannelWidthMhz,
-  Settings,
-  VideoStats,
-} from "./types";
+import type { ChannelWidthMhz, Settings, VideoStats } from "./types";
 
 export const DEFAULT_CHANNEL_ID = "1963316736";
 export const DEFAULT_TRANSFER_SIZE = 32 * 1024;
@@ -103,11 +99,28 @@ export function loadStoredSettings(): Settings {
 
 export function sanitizeSettings(value: Partial<Settings>): Settings {
   return {
-    wifiDevice: typeof value.wifiDevice === "string" ? value.wifiDevice : DEFAULT_SETTINGS.wifiDevice,
-    channelId: typeof value.channelId === "string" ? value.channelId : DEFAULT_SETTINGS.channelId,
-    minimumEpoch: typeof value.minimumEpoch === "string" ? value.minimumEpoch : DEFAULT_SETTINGS.minimumEpoch,
-    transferSize: oneOfNumber(value.transferSize, [16 * 1024, 32 * 1024, 64 * 1024], DEFAULT_TRANSFER_SIZE),
-    videoCodec: oneOfString<VideoCodecPreference>(value.videoCodec, ["auto", "h264", "h265"], "auto"),
+    wifiDevice:
+      typeof value.wifiDevice === "string"
+        ? value.wifiDevice
+        : DEFAULT_SETTINGS.wifiDevice,
+    channelId:
+      typeof value.channelId === "string"
+        ? value.channelId
+        : DEFAULT_SETTINGS.channelId,
+    minimumEpoch:
+      typeof value.minimumEpoch === "string"
+        ? value.minimumEpoch
+        : DEFAULT_SETTINGS.minimumEpoch,
+    transferSize: oneOfNumber(
+      value.transferSize,
+      [16 * 1024, 32 * 1024, 64 * 1024],
+      DEFAULT_TRANSFER_SIZE,
+    ),
+    videoCodec: oneOfString<VideoCodecPreference>(
+      value.videoCodec,
+      ["auto", "h264", "h265"],
+      "auto",
+    ),
     adaptiveEnabled: value.adaptiveEnabled === true,
     rfChannel: oneOfNumber(
       value.rfChannel,
@@ -120,20 +133,42 @@ export function sanitizeSettings(value: Partial<Settings>): Settings {
       DEFAULT_SETTINGS.channelWidthMhz,
     ) as ChannelWidthMhz,
     channelOffset: clampInteger(value.channelOffset, 0, 3, 0),
-    alinkTxPower: clampInteger(value.alinkTxPower, 1, 40, DEFAULT_SETTINGS.alinkTxPower),
+    alinkTxPower: clampInteger(
+      value.alinkTxPower,
+      1,
+      40,
+      DEFAULT_SETTINGS.alinkTxPower,
+    ),
     darkMode: value.darkMode !== false,
   };
 }
 
-function oneOfNumber(value: unknown, allowed: number[], fallback: number): number {
-  return typeof value === "number" && allowed.includes(value) ? value : fallback;
+function oneOfNumber(
+  value: unknown,
+  allowed: number[],
+  fallback: number,
+): number {
+  return typeof value === "number" && allowed.includes(value)
+    ? value
+    : fallback;
 }
 
-function oneOfString<T extends string>(value: unknown, allowed: T[], fallback: T): T {
-  return typeof value === "string" && allowed.includes(value as T) ? (value as T) : fallback;
+function oneOfString<T extends string>(
+  value: unknown,
+  allowed: T[],
+  fallback: T,
+): T {
+  return typeof value === "string" && allowed.includes(value as T)
+    ? (value as T)
+    : fallback;
 }
 
-function clampInteger(value: unknown, min: number, max: number, fallback: number): number {
+function clampInteger(
+  value: unknown,
+  min: number,
+  max: number,
+  fallback: number,
+): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return fallback;
   }

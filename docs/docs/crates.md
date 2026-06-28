@@ -8,19 +8,22 @@ sidebar_position: 4
 The UI app uses all of these pieces, but library users often only need one or
 two crates.
 
-| Name | Published As | Use It For |
-| --- | --- | --- |
-| `openipc-core` | [crates.io](https://crates.io/crates/openipc-core) | Parsing Realtek RX aggregates, filtering OpenIPC/WFB frames, decrypting WFB packets, recovering FEC blocks, extracting RTP, building Annex-B H.264/H.265 frames, and creating adaptive-link uplink payloads. |
-| `openipc-rtl88xx` | [crates.io](https://crates.io/crates/openipc-rtl88xx) | Opening supported Realtek USB WiFi adapters, running monitor-mode initialization, reading bulk-IN transfers, sending adaptive-link bulk-OUT packets, and setting TX power overrides. |
-| `openipc-native` | [crates.io](https://crates.io/crates/openipc-native) | CLI utilities and a thin native-facing library adapter. This is useful for probes, capture decoding, and reference receive loops. |
-| `openipc-web` | [crates.io](https://crates.io/crates/openipc-web) | Rust/WASM bindings. Downstream Rust users normally do not call this directly unless they are building the npm package from source. |
-| `@openipc-rs/web` | [npm](https://www.npmjs.com/package/@openipc-rs/web) | Browser SDK generated from `openipc-web`: WASM, JavaScript glue, and TypeScript definitions for WebUSB apps. |
-| `openipc-station` | Not published | The React/Vite station app and Tauri desktop shell under `apps/openipc-station`. |
+| Name              | Published As                                          | Use It For                                                                                                                                                                                                                                                                  |
+| ----------------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `openipc-core`    | [crates.io](https://crates.io/crates/openipc-core)    | Parsing Realtek RX aggregates, filtering OpenIPC/WFB frames, decrypting WFB packets, recovering FEC blocks, extracting RTP, building Annex-B H.264/H.265 frames, exposing generic raw payload taps for telemetry/data channels, and creating adaptive-link uplink payloads. |
+| `openipc-rtl88xx` | [crates.io](https://crates.io/crates/openipc-rtl88xx) | Opening supported Realtek USB WiFi adapters, running monitor-mode initialization, reading bulk-IN transfers, sending adaptive-link bulk-OUT packets, and setting TX power overrides.                                                                                        |
+| `openipc-native`  | [crates.io](https://crates.io/crates/openipc-native)  | CLI utilities and a thin native-facing library adapter. This is useful for probes, capture decoding, and reference receive loops.                                                                                                                                           |
+| `openipc-web`     | [crates.io](https://crates.io/crates/openipc-web)     | Rust/WASM bindings. Downstream Rust users normally do not call this directly unless they are building the npm package from source.                                                                                                                                          |
+| `@openipc-rs/web` | [npm](https://www.npmjs.com/package/@openipc-rs/web)  | Browser SDK generated from `openipc-web`: WASM, JavaScript glue, and TypeScript definitions for WebUSB apps.                                                                                                                                                                |
+| `openipc-station` | Not published                                         | The React/Vite station app and Tauri desktop shell under `apps/openipc-station`.                                                                                                                                                                                            |
 
 ## Choosing A Layer
 
 Use `openipc-core` if you already have captured USB transfers, 802.11 frames, or
-RTP packets and only need protocol reconstruction.
+RTP packets and only need protocol reconstruction. It is also the right layer
+for non-video payloads: configure a `PayloadPipeline` for the radio port you
+care about and receive recovered bytes plus packet sequence metadata. The crate
+does not parse MAVLink, MSP, CRSF, or other telemetry formats for you.
 
 Use `openipc-core` plus `openipc-rtl88xx` if you are writing a native Rust
 receiver, recorder, diagnostic app, or hardware validation tool.

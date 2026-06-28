@@ -20,7 +20,9 @@ pub use adaptive::{AdaptiveLink, AdaptiveLinkSender, LinkQuality};
 pub use channel::{ChannelId, RadioPort};
 pub use fec::{FecCode, FecError};
 pub use ieee80211::{FrameLayout, WifiFrame};
-pub use pipeline::{PipelineEvent, ReceiverPipeline};
+pub use pipeline::{
+    PayloadPipeline, PayloadPipelineEvent, PipelineEvent, ReceiverPipeline, RecoveredPayload,
+};
 pub use radiotap::{
     build_stream_radiotap, parse_tx_mode_str, ChannelBandwidth, TxMode, TxModeKind, TxRadioParams,
     FRAME_TYPE_DATA, FRAME_TYPE_RTS,

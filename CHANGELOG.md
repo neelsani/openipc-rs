@@ -3,47 +3,48 @@
 ## 0.1.14 - 2026-06-28
 
 ### Changes
+
 - Up (9f8968f)
 - Update rtl driver match new and match old av (a182f44)
-
 
 ## 0.1.13 - 2026-06-27
 
 ### Changes
-- Yhuhi (2220641)
 
+- Yhuhi (2220641)
 
 ## 0.1.12 - 2026-06-27
 
 ### Fixes
-- Fix ci (079a3df)
 
+- Fix ci (079a3df)
 
 ## 0.1.11 - 2026-06-27
 
 ### Changes
-- O (1a22004)
 
+- O (1a22004)
 
 ## 0.1.10 - 2026-06-27
 
 ### Changes
-- Update ci (e6cd4ff)
 
+- Update ci (e6cd4ff)
 
 ## 0.1.9 - 2026-06-27
 
 ### Changes
+
 - Update (fd8cc04)
 - Bump (31c2ee8)
 - Sfsd (d5d009b)
 - Sdf (5449f7f)
 - D (60e5201)
 
-
 ## 0.1.4 - 2026-06-27
 
 ### Changes
+
 - Sfsf (d03b207)
 - Fds (b9f35a3)
 - Fsdf (1569ea6)
@@ -56,16 +57,17 @@
 - Sdf (1e964bc)
 
 ### Fixes
+
 - Fix (2040e04)
 
 ## 0.1.1 - 2026-06-27
 
 ### Changes
+
 - Initial (15ae8f7)
 - Windows icon (a340285)
 - Icons (e37c7ca)
 
 ### Fixes
+
 - Fix ci (973d9cf)
-
-

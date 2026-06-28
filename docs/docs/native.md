@@ -66,17 +66,17 @@ cargo run -p openipc-native -- recv \
 
 Important receive options:
 
-| Option | Meaning |
-| --- | --- |
-| `--key <gs.key>` | WFB keypair file. Required for encrypted streams. |
-| `--channel-id <id>` | OpenIPC/WFB channel id as decimal or `0x` hex. Defaults to the OpenIPC link id and video radio port. |
-| `--epoch <n>` | Minimum accepted WFB session epoch. |
-| `--rf-channel <n>` | WiFi channel used for monitor mode. |
-| `--rf-width WIDTH` | Channel width: `20`, `40`, or `80`. |
-| `--rf-offset <n>` | Secondary-channel offset. |
-| `--rx-urbs <n>` | Number of pending USB bulk-IN reads. |
-| `--max-transfers <n>` | Stop after a fixed number of USB transfers. Useful for repeatable tests. |
-| `--no-init` | Skip Realtek hardware initialization. Useful only when an adapter is already configured. |
+| Option                | Meaning                                                                                              |
+| --------------------- | ---------------------------------------------------------------------------------------------------- |
+| `--key <gs.key>`      | WFB keypair file. Required for encrypted streams.                                                    |
+| `--channel-id <id>`   | OpenIPC/WFB channel id as decimal or `0x` hex. Defaults to the OpenIPC link id and video radio port. |
+| `--epoch <n>`         | Minimum accepted WFB session epoch.                                                                  |
+| `--rf-channel <n>`    | WiFi channel used for monitor mode.                                                                  |
+| `--rf-width WIDTH`    | Channel width: `20`, `40`, or `80`.                                                                  |
+| `--rf-offset <n>`     | Secondary-channel offset.                                                                            |
+| `--rx-urbs <n>`       | Number of pending USB bulk-IN reads.                                                                 |
+| `--max-transfers <n>` | Stop after a fixed number of USB transfers. Useful for repeatable tests.                             |
+| `--no-init`           | Skip Realtek hardware initialization. Useful only when an adapter is already configured.             |
 
 ## Adaptive Link
 

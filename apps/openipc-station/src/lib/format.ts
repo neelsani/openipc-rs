@@ -30,9 +30,10 @@ export function formatMs(ms: number): string {
 
 export function parseInteger(value: string, label: string): number {
   const trimmed = value.trim();
-  const parsed = trimmed.startsWith("0x") || trimmed.startsWith("0X")
-    ? Number.parseInt(trimmed.slice(2), 16)
-    : Number.parseInt(trimmed, 10);
+  const parsed =
+    trimmed.startsWith("0x") || trimmed.startsWith("0X")
+      ? Number.parseInt(trimmed.slice(2), 16)
+      : Number.parseInt(trimmed, 10);
   if (!Number.isFinite(parsed) || parsed < 0) {
     throw new Error(`${label} is invalid`);
   }

@@ -432,7 +432,7 @@ pub fn is_supported_id(vendor_id: u16, product_id: u16) -> bool {
         .any(|dev| dev.vendor_id == vendor_id && dev.product_id == product_id)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
 pub fn list_devices() -> Result<Vec<UsbDeviceSummary>, DriverError> {
     let devices = nusb::list_devices()
         .wait()
@@ -452,12 +452,14 @@ pub fn list_devices() -> Result<Vec<UsbDeviceSummary>, DriverError> {
         .collect())
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", target_os = "android"))]
 pub fn list_devices() -> Result<Vec<UsbDeviceSummary>, DriverError> {
-    Err(DriverError::Nusb(
+    let message = if cfg!(target_os = "android") {
+        "USB enumeration is unavailable in the Android app sandbox; use UsbManager and nusb::Device::from_fd"
+    } else {
         "blocking USB enumeration is unavailable on wasm; use nusb/WebUSB async enumeration"
-            .to_owned(),
-    ))
+    };
+    Err(DriverError::Nusb(message.to_owned()))
 }
 
 pub fn list_supported_devices() -> Result<Vec<UsbDeviceSummary>, DriverError> {

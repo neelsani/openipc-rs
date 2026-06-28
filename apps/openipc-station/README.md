@@ -13,6 +13,9 @@ bun run dev
 ```
 
 `bun run dev` builds the Rust/WASM package first, then starts Vite.
+Browser mode uses WebUSB. The Connect button opens the browser device picker,
+then the Rust/WASM SDK claims the adapter, initializes monitor mode, reads USB
+bulk transfers, and returns encoded video frames plus metrics to React.
 
 ## Production Web Build
 
@@ -35,3 +38,40 @@ bun run desktop:dev
 
 Desktop mode opens a Tauri window and uses the native Rust/nusb backend instead
 of browser WebUSB.
+
+The terminal still shows a local Vite URL because Tauri loads that dev server
+inside the WebView. Opening the URL in a normal browser is not the desktop app;
+it will use WebUSB. The Tauri window uses native USB commands and receives
+batches over Tauri events.
+
+Video decode happens in the frontend through WebCodecs in both modes. The Rust
+side delivers encoded Annex-B H.264/H.265 frames. The video fullscreen button is
+video-region fullscreen in the browser and native-window fullscreen plus a
+video-only overlay in the Tauri app, so the OSD stays visible in both modes.
+
+## UI Responsibilities
+
+- Device/channel/key selection and persistent settings.
+- Start/stop receive, recording, decoder reset, and video fullscreen.
+- WebCodecs playback and canvas recording.
+- Link HUD, metrics graphs, latency diagnostics, and logs.
+- Raw payload counters for the default telemetry tap; protocol parsing is left
+  to future app code or downstream integrations.
+
+## Android/Tauri
+
+Android uses the same Tauri app shell, but USB discovery is Android-owned. The
+Rust backend cannot enumerate USB adapters from the app sandbox with `nusb`
+today. A generated Android shell or Tauri plugin should use `UsbManager`, ask
+for permission, open the `UsbDeviceConnection`, and pass its file descriptor to
+the `openipc_connect_from_fd` Tauri command.
+
+```sh
+bun run android:init
+bun run android:dev
+bun run android:build
+```
+
+The Rust command duplicates the descriptor before handing it to
+`nusb::Device::from_fd`, so Android can keep owning the original
+`UsbDeviceConnection`.

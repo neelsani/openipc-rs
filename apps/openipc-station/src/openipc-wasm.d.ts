@@ -1,38 +1,57 @@
 declare module "@openipc/wasm" {
   export default function initWasm(moduleOrPath?: unknown): Promise<unknown>;
 
-export type OpenIpcVideoFrame = {
-  data: Uint8Array;
-  codec: "h264" | "h265";
-  codecString: string;
-  isKeyFrame: boolean;
-  timestamp: number;
-};
+  export type OpenIpcVideoFrame = {
+    data: Uint8Array;
+    codec: "h264" | "h265";
+    codecString: string;
+    isKeyFrame: boolean;
+    timestamp: number;
+  };
 
-export type OpenIpcRxTransferProfile = {
-  frames: OpenIpcVideoFrame[];
-  transferBytes: number;
-  packets: number;
-  acceptedPackets: number;
-  droppedPackets: number;
-  crcDropped: number;
-  icvDropped: number;
-  reportDropped: number;
-  ignoredFrames: number;
-  sessions: number;
-  wfbPayloads: number;
-  rtpPackets: number;
-  videoFrames: number;
-  parseMs: number;
-  pipelineMs: number;
-  totalMs: number;
-};
+  export type OpenIpcRawPayload = {
+    data: Uint8Array;
+    packetSeq: string;
+    channelId: number;
+  };
+
+  export type OpenIpcRxTransferProfile = {
+    frames: OpenIpcVideoFrame[];
+    mavlinkPayloads: OpenIpcRawPayload[];
+    transferBytes: number;
+    packets: number;
+    acceptedPackets: number;
+    droppedPackets: number;
+    crcDropped: number;
+    icvDropped: number;
+    reportDropped: number;
+    ignoredFrames: number;
+    sessions: number;
+    wfbPayloads: number;
+    rtpPackets: number;
+    videoFrames: number;
+    mavlinkPayloadCount: number;
+    mavlinkBytes: number;
+    parseMs: number;
+    pipelineMs: number;
+    totalMs: number;
+  };
 
   export class OpenIpcReceiver {
     constructor();
-    static withChannelId(channelId: number, fecK: number, fecN: number): OpenIpcReceiver;
+    static withChannelId(
+      channelId: number,
+      fecK: number,
+      fecN: number,
+    ): OpenIpcReceiver;
     static withKeypair(
       channelId: number,
+      keypair: Uint8Array,
+      minimumEpoch: bigint,
+    ): OpenIpcReceiver;
+    static withKeypairAndMavlinkChannel(
+      channelId: number,
+      mavlinkChannelId: number,
       keypair: Uint8Array,
       minimumEpoch: bigint,
     ): OpenIpcReceiver;
@@ -69,7 +88,12 @@ export type OpenIpcRxTransferProfile = {
     ): void;
     recordRxTransfer(data: Uint8Array, nowMs: number): void;
     recordReceiverCounters(receiver: OpenIpcReceiver, nowMs: number): void;
-    recordFec(nowMs: number, total: number, recovered: number, lost: number): void;
+    recordFec(
+      nowMs: number,
+      total: number,
+      recovered: number,
+      lost: number,
+    ): void;
     requestKeyframe(): void;
     setKeyframeRequestMessages(messages: number): void;
     setVideoStartIdleMs(idleMs: number): void;

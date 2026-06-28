@@ -13,9 +13,16 @@ import initWasm, {
   listAuthorizedUsbDevices,
   supportedUsbFilters,
   type OpenIpcVideoFrame,
+  type OpenIpcRawPayload,
   type OpenIpcRxTransferProfile,
 } from "@openipc/wasm";
-import { formatBytes, formatMs, messageFrom, parseEpoch, parseInteger } from "@/lib/format";
+import {
+  formatBytes,
+  formatMs,
+  messageFrom,
+  parseEpoch,
+  parseInteger,
+} from "@/lib/format";
 import {
   DEFAULT_VIDEO_STATS,
   SETTINGS_STORAGE_KEY,
@@ -37,9 +44,14 @@ import type {
   RtpClockState,
   RuntimeState,
   UsbInfo,
+  WebCodecsCapabilities,
   VideoStats,
 } from "@/lib/types";
-import { authorizedDeviceId, webUsbDeviceId, webUsbDeviceLabel } from "@/lib/usb";
+import {
+  authorizedDeviceId,
+  webUsbDeviceId,
+  webUsbDeviceLabel,
+} from "@/lib/usb";
 import {
   alternateCodecStrings,
   frameInfoFromPacket,
@@ -59,6 +71,7 @@ import {
   TAURI_STOPPED_EVENT,
   type TauriLogPayload,
   type TauriRxBatchPayload,
+  type TauriRawPayloadPayload,
   type TauriStoppedPayload,
   type TauriVideoFramePayload,
 } from "@/runtime/tauri";
@@ -76,6 +89,9 @@ const EMPTY_METRICS: Metrics = {
   bytes: 0,
   lastTransferBytes: 0,
   lastFrameBytes: 0,
+  mavlinkPayloads: 0,
+  mavlinkBytes: 0,
+  lastMavlinkBytes: 0,
   errors: 0,
   adaptiveTxFrames: 0,
   adaptiveTxErrors: 0,
@@ -154,7 +170,142 @@ type FrameTimingContext = {
   loopStartMs: number;
 };
 
-function createStageAccumulators(): Record<DiagnosticStageId, StageAccumulator> {
+function emptyCodecCapability(codec: string): WebCodecsCapabilities["h264"] {
+  return {
+    supported: null,
+    codec,
+    config: "Not checked",
+  };
+}
+
+function emptyWebCodecsCapabilities(): WebCodecsCapabilities {
+  return {
+    videoDecoder: false,
+    encodedVideoChunk: false,
+    secureContext: false,
+    h264: emptyCodecCapability("avc1.42E01E"),
+    h265: emptyCodecCapability("hev1.1.6.L93.B0"),
+    userAgent: "",
+    checkedAt: "Not checked",
+  };
+}
+
+function describeDecoderConfig(config: VideoDecoderConfig): string {
+  const format = config.avc?.format ?? config.hevc?.format ?? "default";
+  const hardware = config.hardwareAcceleration ?? "no-preference";
+  return `${config.codec} / ${format} / ${hardware}`;
+}
+
+async function probeCodecSupport(
+  label: "h264" | "h265",
+  configs: VideoDecoderConfig[],
+): Promise<WebCodecsCapabilities["h264"]> {
+  let lastError = "";
+  let lastUnsupported = configs[0];
+
+  for (const config of configs) {
+    try {
+      const support = await VideoDecoder.isConfigSupported(config);
+      const checkedConfig = support.config ?? config;
+      if (support.supported !== false) {
+        return {
+          supported: true,
+          codec: checkedConfig.codec,
+          config: describeDecoderConfig(checkedConfig),
+        };
+      }
+      lastUnsupported = checkedConfig;
+    } catch (error) {
+      lastError = messageFrom(error);
+    }
+  }
+
+  return {
+    supported: false,
+    codec: configs[0]?.codec ?? label,
+    config: lastUnsupported
+      ? describeDecoderConfig(lastUnsupported)
+      : "No config",
+    error: lastError || undefined,
+  };
+}
+
+async function probeWebCodecsCapabilities(): Promise<WebCodecsCapabilities> {
+  const videoDecoder = "VideoDecoder" in window;
+  const encodedVideoChunk = "EncodedVideoChunk" in window;
+  const secureContext = window.isSecureContext === true;
+  const base = {
+    hardwareAcceleration: "prefer-hardware" as const,
+    optimizeForLatency: true,
+  };
+
+  if (!videoDecoder || !encodedVideoChunk) {
+    return {
+      videoDecoder,
+      encodedVideoChunk,
+      secureContext,
+      h264: {
+        supported: false,
+        codec: "avc1.42E01E",
+        config: "VideoDecoder or EncodedVideoChunk unavailable",
+      },
+      h265: {
+        supported: false,
+        codec: "hev1.1.6.L93.B0",
+        config: "VideoDecoder or EncodedVideoChunk unavailable",
+      },
+      userAgent: navigator.userAgent,
+      checkedAt: new Date().toLocaleTimeString(),
+    };
+  }
+
+  const [h264, h265] = await Promise.all([
+    probeCodecSupport("h264", [
+      {
+        ...base,
+        codec: "avc1.42E01E",
+        avc: { format: "annexb" },
+      },
+      {
+        ...base,
+        codec: "avc1.42E01E",
+      },
+    ]),
+    probeCodecSupport("h265", [
+      {
+        ...base,
+        codec: "hev1.1.6.L93.B0",
+        hevc: { format: "annexb" },
+      },
+      {
+        ...base,
+        codec: "hev1.1.6.L93.B0",
+      },
+    ]),
+  ]);
+
+  return {
+    videoDecoder,
+    encodedVideoChunk,
+    secureContext,
+    h264,
+    h265,
+    userAgent: navigator.userAgent,
+    checkedAt: new Date().toLocaleTimeString(),
+  };
+}
+
+function capabilityLabel(value: boolean | null): string {
+  if (value === null) {
+    return "unknown";
+  }
+  return value ? "yes" : "no";
+}
+
+function createStageAccumulators(): Record<
+  DiagnosticStageId,
+  StageAccumulator
+> {
   const accumulators = {} as Record<DiagnosticStageId, StageAccumulator>;
   for (const stage of DIAGNOSTIC_STAGE_ORDER) {
     accumulators[stage] = {
@@ -181,6 +332,8 @@ function emptyTransferStats(): DiagnosticTransferStats {
     wfbPayloads: 0,
     rtpPackets: 0,
     videoFrames: 0,
+    mavlinkPayloads: 0,
+    mavlinkBytes: 0,
   };
 }
 
@@ -207,16 +360,25 @@ function createEmptyDiagnostics(): DiagnosticsState {
   };
 }
 
-function summarizeStage(stage: DiagnosticStageId, acc: StageAccumulator): DiagnosticStageMetric {
+function summarizeStage(
+  stage: DiagnosticStageId,
+  acc: StageAccumulator,
+): DiagnosticStageMetric {
   const samples = acc.samples;
   const sorted = [...samples].sort((a, b) => a - b);
-  const p95Index = sorted.length > 0 ? Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95)) : 0;
+  const p95Index =
+    sorted.length > 0
+      ? Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))
+      : 0;
   return {
     id: stage,
     label: DIAGNOSTIC_STAGE_LABELS[stage],
     count: acc.count,
     lastMs: acc.lastMs,
-    avgMs: samples.length > 0 ? samples.reduce((sum, value) => sum + value, 0) / samples.length : 0,
+    avgMs:
+      samples.length > 0
+        ? samples.reduce((sum, value) => sum + value, 0) / samples.length
+        : 0,
     p95Ms: sorted[p95Index] ?? 0,
     maxMs: acc.maxMs,
   };
@@ -231,8 +393,15 @@ function parseQuality(json: string): LinkQualityReport {
 }
 
 function pickRecorderMimeType(): string {
-  const candidates = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
-  return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate)) ?? "";
+  const candidates = [
+    "video/webm;codecs=vp9",
+    "video/webm;codecs=vp8",
+    "video/webm",
+  ];
+  return (
+    candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate)) ??
+    ""
+  );
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -301,12 +470,15 @@ export function useOpenIpcRuntime() {
   const frameCountRef = useRef(0);
   const logIdRef = useRef(0);
   const diagnosticStageRef = useRef(createStageAccumulators());
-  const diagnosticTransfersRef = useRef<DiagnosticTransferStats>(emptyTransferStats());
+  const diagnosticTransfersRef =
+    useRef<DiagnosticTransferStats>(emptyTransferStats());
   const diagnosticEventsRef = useRef<DiagnosticEvent[]>([]);
   const diagnosticEventIdRef = useRef(0);
   const diagnosticFallbackFramesRef = useRef(0);
   const diagnosticDroppedBeforeKeyframeRef = useRef(0);
-  const pendingDecodeSamplesRef = useRef(new Map<number, PendingDecodeSample>());
+  const pendingDecodeSamplesRef = useRef(
+    new Map<number, PendingDecodeSample>(),
+  );
   const lastDiagnosticsUpdateRef = useRef(0);
   const lastPerfLogRef = useRef(0);
   const lastSlowLogRef = useRef(0);
@@ -316,6 +488,8 @@ export function useOpenIpcRuntime() {
   const [wasmReady, setWasmReady] = useState(false);
   const [webUsbSupported, setWebUsbSupported] = useState(false);
   const [webCodecsSupported, setWebCodecsSupported] = useState(false);
+  const [webCodecsCapabilities, setWebCodecsCapabilities] =
+    useState<WebCodecsCapabilities>(() => emptyWebCodecsCapabilities());
   const [running, setRunning] = useState(false);
   const [recording, setRecording] = useState(false);
   const [lastRecordingUrl, setLastRecordingUrl] = useState<string | null>(null);
@@ -324,12 +498,18 @@ export function useOpenIpcRuntime() {
   const [keyReady, setKeyReady] = useState(false);
   const [settings, setSettings] = useState(() => loadStoredSettings());
   const [fullscreen, setFullscreen] = useState(false);
-  const [authorizedDevices, setAuthorizedDevices] = useState<AuthorizedUsbDevice[]>([]);
+  const [authorizedDevices, setAuthorizedDevices] = useState<
+    AuthorizedUsbDevice[]
+  >([]);
   const settingsRef = useRef(settings);
   const [metrics, setMetrics] = useState<Metrics>({ ...EMPTY_METRICS });
   const [videoStats, setVideoStats] = useState<VideoStats>(DEFAULT_VIDEO_STATS);
-  const [diagnostics, setDiagnostics] = useState<DiagnosticsState>(() => createEmptyDiagnostics());
-  const [linkQuality, setLinkQuality] = useState<LinkQualityReport | null>(null);
+  const [diagnostics, setDiagnostics] = useState<DiagnosticsState>(() =>
+    createEmptyDiagnostics(),
+  );
+  const [linkQuality, setLinkQuality] = useState<LinkQualityReport | null>(
+    null,
+  );
   const [logs, setLogs] = useState<LogEntry[]>([]);
 
   const appendLog = useCallback((level: LogLevel, message: string) => {
@@ -368,7 +548,10 @@ export function useOpenIpcRuntime() {
         time: new Date().toLocaleTimeString(),
       };
       diagnosticEventIdRef.current += 1;
-      diagnosticEventsRef.current = [...diagnosticEventsRef.current.slice(-(DIAGNOSTIC_EVENT_LIMIT - 1)), event];
+      diagnosticEventsRef.current = [
+        ...diagnosticEventsRef.current.slice(-(DIAGNOSTIC_EVENT_LIMIT - 1)),
+        event,
+      ];
       if (now - lastSlowLogRef.current > 2000) {
         lastSlowLogRef.current = now;
         appendLog("debug", `Slow ${event.label}: ${formatMs(durationMs)}`);
@@ -389,6 +572,8 @@ export function useOpenIpcRuntime() {
     totals.wfbPayloads += profile.wfbPayloads;
     totals.rtpPackets += profile.rtpPackets;
     totals.videoFrames += profile.videoFrames;
+    totals.mavlinkPayloads += profile.mavlinkPayloadCount;
+    totals.mavlinkBytes += profile.mavlinkBytes;
   }
 
   function publishDiagnostics(force = false) {
@@ -420,9 +605,14 @@ export function useOpenIpcRuntime() {
       lastUpdatedMs: now,
     });
 
-    if (runningRef.current && bottleneck && now - lastPerfLogRef.current > 1000) {
+    if (
+      runningRef.current &&
+      bottleneck &&
+      now - lastPerfLogRef.current > 1000
+    ) {
       lastPerfLogRef.current = now;
-      const find = (stage: DiagnosticStageId) => stages.find((metric) => metric.id === stage);
+      const find = (stage: DiagnosticStageId) =>
+        stages.find((metric) => metric.id === stage);
       appendLog(
         "debug",
         `Perf ${bottleneck.label} p95 ${formatMs(bottleneck.p95Ms)} | USB ${formatMs(
@@ -468,14 +658,19 @@ export function useOpenIpcRuntime() {
   useEffect(() => {
     settingsRef.current = settings;
     try {
-      window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+      window.localStorage.setItem(
+        SETTINGS_STORAGE_KEY,
+        JSON.stringify(settings),
+      );
     } catch {
       // localStorage can be blocked in hardened browser profiles.
     }
   }, [settings]);
 
   useEffect(() => {
-    document.documentElement.dataset.theme = settings.darkMode ? "dark" : "light";
+    document.documentElement.dataset.theme = settings.darkMode
+      ? "dark"
+      : "light";
     document.documentElement.classList.toggle("dark", settings.darkMode);
   }, [settings.darkMode]);
 
@@ -484,8 +679,32 @@ export function useOpenIpcRuntime() {
       setFullscreen(document.fullscreenElement !== null);
     };
     document.addEventListener("fullscreenchange", onFullscreenChange);
-    return () => document.removeEventListener("fullscreenchange", onFullscreenChange);
+    return () =>
+      document.removeEventListener("fullscreenchange", onFullscreenChange);
   }, []);
+
+  useEffect(() => {
+    document.documentElement.classList.toggle(
+      "openipc-video-fullscreen",
+      desktopRuntime && fullscreen,
+    );
+    return () => {
+      document.documentElement.classList.remove("openipc-video-fullscreen");
+    };
+  }, [desktopRuntime, fullscreen]);
+
+  useEffect(() => {
+    if (!desktopRuntime || !fullscreen) {
+      return undefined;
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        void setFullscreenMode(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [desktopRuntime, fullscreen]);
 
   useEffect(() => {
     if (!desktopRuntime) {
@@ -498,7 +717,12 @@ export function useOpenIpcRuntime() {
           setFullscreen(enabled);
         }
       })
-      .catch((error) => appendLog("warn", `Fullscreen state check failed: ${messageFrom(error)}`));
+      .catch((error) =>
+        appendLog(
+          "warn",
+          `Fullscreen state check failed: ${messageFrom(error)}`,
+        ),
+      );
     return () => {
       cancelled = true;
     };
@@ -556,14 +780,21 @@ export function useOpenIpcRuntime() {
     for (let i = 0; i < bars; i += 1) {
       const sample = frame[(i * 193) % frame.length] ?? 0;
       const level = Math.max(12, (sample / 255) * (height - 86));
-      ctx.fillStyle = i % 3 === 0 ? "#6fd3b4" : i % 3 === 1 ? "#74a7d7" : "#d6a85f";
-      ctx.fillRect(i * barWidth, height - level - 42, Math.max(2, barWidth - 2), level);
+      ctx.fillStyle =
+        i % 3 === 0 ? "#6fd3b4" : i % 3 === 1 ? "#74a7d7" : "#d6a85f";
+      ctx.fillRect(
+        i * barWidth,
+        height - level - 42,
+        Math.max(2, barWidth - 2),
+        level,
+      );
     }
 
     ctx.fillStyle = "rgba(17, 22, 20, 0.78)";
     ctx.fillRect(0, 0, width, 62);
     ctx.fillStyle = "#edf6f2";
-    ctx.font = "600 18px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+    ctx.font =
+      "600 18px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
     ctx.fillText(`Frame ${frameNumber}`, 24, 34);
     ctx.font = "13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
     ctx.fillStyle = "#b7c8c0";
@@ -611,7 +842,10 @@ export function useOpenIpcRuntime() {
     const pending = pendingDecodeSamplesRef.current.get(frame.timestamp);
     if (pending) {
       pendingDecodeSamplesRef.current.delete(frame.timestamp);
-      recordDiagnosticStage("decodeToRender", renderStart - pending.submittedAtMs);
+      recordDiagnosticStage(
+        "decodeToRender",
+        renderStart - pending.submittedAtMs,
+      );
       if (pending.loopStartMs !== undefined) {
         recordDiagnosticStage("clientFrame", renderStart - pending.loopStartMs);
       }
@@ -671,14 +905,19 @@ export function useOpenIpcRuntime() {
       return nowUs;
     }
 
-    if (timestamp < clock.lastRtp && clock.lastRtp - timestamp > RTP_TIMESTAMP_HALF_WRAP) {
+    if (
+      timestamp < clock.lastRtp &&
+      clock.lastRtp - timestamp > RTP_TIMESTAMP_HALF_WRAP
+    ) {
       clock.wrapOffset += RTP_TIMESTAMP_WRAP;
     }
 
     const extendedTimestamp = clock.wrapOffset + timestamp;
     let timestampUs =
       clock.baseUs +
-      Math.round(((extendedTimestamp - clock.baseRtp) * 1_000_000) / RTP_VIDEO_CLOCK_HZ);
+      Math.round(
+        ((extendedTimestamp - clock.baseRtp) * 1_000_000) / RTP_VIDEO_CLOCK_HZ,
+      );
     if (!Number.isFinite(timestampUs) || timestampUs <= clock.lastUs) {
       timestampUs = clock.lastUs + 1;
     }
@@ -687,7 +926,10 @@ export function useOpenIpcRuntime() {
     return timestampUs;
   }
 
-  function decoderConfigsFor(info: AnnexBFrameInfo, codecString: string): VideoDecoderConfig[] {
+  function decoderConfigsFor(
+    info: AnnexBFrameInfo,
+    codecString: string,
+  ): VideoDecoderConfig[] {
     const base: VideoDecoderConfig = {
       codec: codecString,
       hardwareAcceleration: "prefer-hardware",
@@ -703,7 +945,10 @@ export function useOpenIpcRuntime() {
     return [base];
   }
 
-  function decoderConfigFormat(info: AnnexBFrameInfo, config: VideoDecoderConfig): string {
+  function decoderConfigFormat(
+    info: AnnexBFrameInfo,
+    config: VideoDecoderConfig,
+  ): string {
     if (info.codec === "h264") {
       return config.avc?.format ?? "default";
     }
@@ -758,7 +1003,10 @@ export function useOpenIpcRuntime() {
             },
             true,
           );
-          appendLog("info", `VideoDecoder configured for ${codecString} ${format}`);
+          appendLog(
+            "info",
+            `VideoDecoder configured for ${codecString} ${format}`,
+          );
           return true;
         } catch (error) {
           appendLog(
@@ -768,15 +1016,23 @@ export function useOpenIpcRuntime() {
         }
       }
     }
-    publishVideoStats({ decoderName: `${info.codec.toUpperCase()} unsupported` }, true);
+    publishVideoStats(
+      { decoderName: `${info.codec.toUpperCase()} unsupported` },
+      true,
+    );
     return false;
   }
 
-  async function decodeVideoFrame(packet: OpenIpcVideoFrame, timing?: FrameTimingContext) {
+  async function decodeVideoFrame(
+    packet: OpenIpcVideoFrame,
+    timing?: FrameTimingContext,
+  ) {
     const decodeStart = performance.now();
     recordEncodedFrame(packet.data.byteLength);
     const selectedCodec =
-      settingsRef.current.videoCodec === "auto" ? packet.codec : settingsRef.current.videoCodec;
+      settingsRef.current.videoCodec === "auto"
+        ? packet.codec
+        : settingsRef.current.videoCodec;
     const info = frameInfoFromPacket({ ...packet, codec: selectedCodec });
     const configStart = performance.now();
     const configured = await configureDecoder(info);
@@ -838,9 +1094,14 @@ export function useOpenIpcRuntime() {
       appendLog("error", "MediaRecorder is not available");
       return;
     }
-    const stream = canvas.captureStream(Math.max(30, Math.round(videoStats.renderFps || 60)));
+    const stream = canvas.captureStream(
+      Math.max(30, Math.round(videoStats.renderFps || 60)),
+    );
     const mimeType = pickRecorderMimeType();
-    const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+    const recorder = new MediaRecorder(
+      stream,
+      mimeType ? { mimeType } : undefined,
+    );
     recordedChunksRef.current = [];
     recorder.ondataavailable = (event) => {
       if (event.data.size > 0) {
@@ -849,7 +1110,9 @@ export function useOpenIpcRuntime() {
     };
     recorder.onstop = () => {
       stream.getTracks().forEach((track) => track.stop());
-      const blob = new Blob(recordedChunksRef.current, { type: mimeType || "video/webm" });
+      const blob = new Blob(recordedChunksRef.current, {
+        type: mimeType || "video/webm",
+      });
       if (lastRecordingUrlRef.current) {
         URL.revokeObjectURL(lastRecordingUrlRef.current);
       }
@@ -857,7 +1120,10 @@ export function useOpenIpcRuntime() {
       lastRecordingUrlRef.current = url;
       setLastRecordingUrl(url);
       setRecording(false);
-      appendLog("info", `Recording saved in browser memory (${formatBytes(blob.size)})`);
+      appendLog(
+        "info",
+        `Recording saved in browser memory (${formatBytes(blob.size)})`,
+      );
 
       const link = document.createElement("a");
       link.href = url;
@@ -898,8 +1164,18 @@ export function useOpenIpcRuntime() {
       setKeyReady(false);
       return;
     }
-    receiverRef.current = OpenIpcReceiver.withKeypair(channelId, keyBytes, minimumEpoch);
-    adaptiveRef.current = new OpenIpcAdaptiveLink(Math.floor(channelId / 256), keyBytes, 0n, 1, 5);
+    receiverRef.current = OpenIpcReceiver.withKeypair(
+      channelId,
+      keyBytes,
+      minimumEpoch,
+    );
+    adaptiveRef.current = new OpenIpcAdaptiveLink(
+      Math.floor(channelId / 256),
+      keyBytes,
+      0n,
+      1,
+      5,
+    );
     rtpClockRef.current = null;
     setLinkQuality(null);
     setKeyReady(true);
@@ -948,15 +1224,45 @@ export function useOpenIpcRuntime() {
     }
   }
 
+  async function loadDefaultKeypair() {
+    const defaultKeypair = await fetchDefaultKeypair();
+    if (!defaultKeypair) {
+      throw new Error("Default gs.key was not found");
+    }
+    applyKeypair(defaultKeypair, "Default gs.key", false);
+    appendLog("info", "Loaded default gs.key");
+  }
+
+  function clearKeypair() {
+    keyBytesRef.current = null;
+    setKeyName("No key");
+    setKeyReady(false);
+    clearStoredKeypair();
+    closeDecoder();
+    appendLog("info", "Receiver key cleared");
+  }
+
   useEffect(() => {
     let cancelled = false;
 
     async function boot() {
       try {
+        const capabilities = await probeWebCodecsCapabilities();
+        if (cancelled) {
+          return;
+        }
+        setWebCodecsCapabilities(capabilities);
+        setWebCodecsSupported(
+          capabilities.videoDecoder && capabilities.encodedVideoChunk,
+        );
+        appendLog(
+          "info",
+          `WebCodecs API ${capabilityLabel(capabilities.videoDecoder && capabilities.encodedVideoChunk)}; H.264 ${capabilityLabel(capabilities.h264.supported)}; H.265 ${capabilityLabel(capabilities.h265.supported)}`,
+        );
+
         if (desktopRuntime) {
           setWasmReady(true);
           setWebUsbSupported(true);
-          setWebCodecsSupported("VideoDecoder" in window && "EncodedVideoChunk" in window);
           setRuntime("ready");
           appendLog("info", "Native desktop backend ready");
           try {
@@ -974,7 +1280,6 @@ export function useOpenIpcRuntime() {
         receiverRef.current = new OpenIpcReceiver();
         setWasmReady(true);
         setWebUsbSupported("usb" in navigator);
-        setWebCodecsSupported("VideoDecoder" in window && "EncodedVideoChunk" in window);
         setRuntime("ready");
         appendLog("info", "WASM receiver loaded");
         try {
@@ -1043,11 +1348,15 @@ export function useOpenIpcRuntime() {
     }
   }
 
-  async function selectWebUsbDevice(filters: USBDeviceFilter[]): Promise<USBDevice> {
+  async function selectWebUsbDevice(
+    filters: USBDeviceFilter[],
+  ): Promise<USBDevice> {
     const selectedDevice = settingsRef.current.wifiDevice;
     if (selectedDevice) {
       const authorized = await navigator.usb.getDevices();
-      const match = authorized.find((device) => webUsbDeviceId(device) === selectedDevice);
+      const match = authorized.find(
+        (device) => webUsbDeviceId(device) === selectedDevice,
+      );
       if (match) {
         return match;
       }
@@ -1068,7 +1377,9 @@ export function useOpenIpcRuntime() {
       appliedTxPowerRef.current = null;
       setUsbInfo(report.usbInfo);
       setSettings((current) => ({ ...current, wifiDevice: report.deviceId }));
-      void refreshAuthorizedDevices().catch((error) => appendLog("warn", messageFrom(error)));
+      void refreshAuthorizedDevices().catch((error) =>
+        appendLog("warn", messageFrom(error)),
+      );
       appendLog(
         "info",
         `Initialized ${report.initReport.chip} on channel ${currentSettings.rfChannel}/${currentSettings.channelWidthMhz} MHz (${report.initReport.status})`,
@@ -1098,7 +1409,9 @@ export function useOpenIpcRuntime() {
       bulkOut: realtek.bulkOutEndpoint(),
     });
     setSettings((current) => ({ ...current, wifiDevice: deviceId }));
-    void refreshAuthorizedDevices().catch((error) => appendLog("warn", messageFrom(error)));
+    void refreshAuthorizedDevices().catch((error) =>
+      appendLog("warn", messageFrom(error)),
+    );
     appendLog(
       "info",
       `Initialized ${initReport.chip} on channel ${currentSettings.rfChannel}/${currentSettings.channelWidthMhz} MHz (${initReport.status})`,
@@ -1111,7 +1424,9 @@ export function useOpenIpcRuntime() {
     }
   }
 
-  function tauriFrameToOpenIpcFrame(frame: TauriVideoFramePayload): OpenIpcVideoFrame {
+  function tauriFrameToOpenIpcFrame(
+    frame: TauriVideoFramePayload,
+  ): OpenIpcVideoFrame {
     return {
       data: base64ToBytes(frame.dataBase64),
       codec: frame.codec,
@@ -1121,9 +1436,22 @@ export function useOpenIpcRuntime() {
     };
   }
 
-  function tauriBatchToProfile(batch: TauriRxBatchPayload): OpenIpcRxTransferProfile {
+  function tauriPayloadToOpenIpcPayload(
+    payload: TauriRawPayloadPayload,
+  ): OpenIpcRawPayload {
+    return {
+      data: base64ToBytes(payload.dataBase64),
+      packetSeq: payload.packetSeq,
+      channelId: payload.channelId,
+    };
+  }
+
+  function tauriBatchToProfile(
+    batch: TauriRxBatchPayload,
+  ): OpenIpcRxTransferProfile {
     return {
       frames: batch.frames.map(tauriFrameToOpenIpcFrame),
+      mavlinkPayloads: batch.mavlinkPayloads.map(tauriPayloadToOpenIpcPayload),
       transferBytes: batch.transferBytes,
       packets: batch.packets,
       acceptedPackets: batch.acceptedPackets,
@@ -1136,6 +1464,8 @@ export function useOpenIpcRuntime() {
       wfbPayloads: batch.wfbPayloads,
       rtpPackets: batch.rtpPackets,
       videoFrames: batch.videoFrames,
+      mavlinkPayloadCount: batch.mavlinkPayloadCount,
+      mavlinkBytes: batch.mavlinkBytes,
       parseMs: batch.parseMs,
       pipelineMs: batch.pipelineMs,
       totalMs: batch.totalMs,
@@ -1170,6 +1500,9 @@ export function useOpenIpcRuntime() {
       transfers: current.transfers + 1,
       bytes: current.bytes + profile.transferBytes,
       lastTransferBytes: profile.transferBytes,
+      mavlinkPayloads: current.mavlinkPayloads + profile.mavlinkPayloadCount,
+      mavlinkBytes: current.mavlinkBytes + profile.mavlinkBytes,
+      lastMavlinkBytes: profile.mavlinkBytes,
       adaptiveTxFrames: current.adaptiveTxFrames + batch.adaptiveTxFrames,
       adaptiveTxErrors: current.adaptiveTxErrors + batch.adaptiveTxErrors,
       fecRecovered: batch.fecCounters.recoveredPackets,
@@ -1188,7 +1521,10 @@ export function useOpenIpcRuntime() {
         frames: frameCountRef.current,
         lastFrameBytes,
       }));
-      appendLog("rx", `${profile.frames.length} frame(s) from ${formatBytes(profile.transferBytes)}`);
+      appendLog(
+        "rx",
+        `${profile.frames.length} frame(s) from ${formatBytes(profile.transferBytes)}`,
+      );
     }
     publishDiagnostics();
   }
@@ -1200,22 +1536,33 @@ export function useOpenIpcRuntime() {
     }
     cleanupTauriSubscriptions();
 
-    const unlistenBatch = await listenTauriEvent<TauriRxBatchPayload>(TAURI_RX_BATCH_EVENT, (batch) => {
-      void handleTauriBatch(batch).catch((error) => {
-        setMetrics((current) => ({ ...current, errors: current.errors + 1 }));
-        appendLog("error", messageFrom(error));
-      });
-    });
-    const unlistenLog = await listenTauriEvent<TauriLogPayload>(TAURI_LOG_EVENT, (event) => {
-      appendLog(event.level, event.message);
-    });
-    const unlistenStopped = await listenTauriEvent<TauriStoppedPayload>(TAURI_STOPPED_EVENT, (event) => {
-      runningRef.current = false;
-      setRunning(false);
-      setRuntime(event.reason === "error" ? "error" : "ready");
-      cleanupTauriSubscriptions();
-      void tauriStopRx().catch((error) => appendLog("warn", messageFrom(error)));
-    });
+    const unlistenBatch = await listenTauriEvent<TauriRxBatchPayload>(
+      TAURI_RX_BATCH_EVENT,
+      (batch) => {
+        void handleTauriBatch(batch).catch((error) => {
+          setMetrics((current) => ({ ...current, errors: current.errors + 1 }));
+          appendLog("error", messageFrom(error));
+        });
+      },
+    );
+    const unlistenLog = await listenTauriEvent<TauriLogPayload>(
+      TAURI_LOG_EVENT,
+      (event) => {
+        appendLog(event.level, event.message);
+      },
+    );
+    const unlistenStopped = await listenTauriEvent<TauriStoppedPayload>(
+      TAURI_STOPPED_EVENT,
+      (event) => {
+        runningRef.current = false;
+        setRunning(false);
+        setRuntime(event.reason === "error" ? "error" : "ready");
+        cleanupTauriSubscriptions();
+        void tauriStopRx().catch((error) =>
+          appendLog("warn", messageFrom(error)),
+        );
+      },
+    );
     tauriUnlistenRef.current = [unlistenBatch, unlistenLog, unlistenStopped];
 
     const currentSettings = settingsRef.current;
@@ -1231,7 +1578,10 @@ export function useOpenIpcRuntime() {
         transferSize: currentSettings.transferSize,
         adaptiveEnabled: currentSettings.adaptiveEnabled,
         rfChannel: currentSettings.rfChannel,
-        alinkTxPower: Math.max(1, Math.min(40, Math.trunc(currentSettings.alinkTxPower))),
+        alinkTxPower: Math.max(
+          1,
+          Math.min(40, Math.trunc(currentSettings.alinkTxPower)),
+        ),
       });
     } catch (error) {
       runningRef.current = false;
@@ -1256,7 +1606,10 @@ export function useOpenIpcRuntime() {
     runningRef.current = true;
     setRunning(true);
     setRuntime("running");
-    appendLog("info", `RX loop started (${WEBUSB_RX_TRANSFERS_IN_FLIGHT} bulk-IN transfers in flight)`);
+    appendLog(
+      "info",
+      `RX loop started (${WEBUSB_RX_TRANSFERS_IN_FLIGHT} bulk-IN transfers in flight)`,
+    );
 
     while (runningRef.current) {
       const batchLoopStart = performance.now();
@@ -1280,7 +1633,10 @@ export function useOpenIpcRuntime() {
           if (adaptiveTracker) {
             const adaptiveRxStart = performance.now();
             adaptiveTracker.recordRxTransfer(transfer, nowMs);
-            recordDiagnosticStage("adaptiveRx", performance.now() - adaptiveRxStart);
+            recordDiagnosticStage(
+              "adaptiveRx",
+              performance.now() - adaptiveRxStart,
+            );
           }
           const profile = receiver.pushRxTransferProfiled(transfer);
           recordDiagnosticStage("realtekParse", profile.parseMs);
@@ -1294,16 +1650,28 @@ export function useOpenIpcRuntime() {
             const qualityStart = performance.now();
             adaptiveTracker.recordReceiverCounters(receiver, nowMs);
             setLinkQuality(parseQuality(adaptiveTracker.quality(nowMs)));
-            recordDiagnosticStage("adaptiveQuality", performance.now() - qualityStart);
+            recordDiagnosticStage(
+              "adaptiveQuality",
+              performance.now() - qualityStart,
+            );
           }
           if (currentSettings.adaptiveEnabled && adaptiveTracker) {
             try {
-              const txPower = Math.max(1, Math.min(40, Math.trunc(currentSettings.alinkTxPower)));
+              const txPower = Math.max(
+                1,
+                Math.min(40, Math.trunc(currentSettings.alinkTxPower)),
+              );
               const txPowerKey = `${currentSettings.rfChannel}:${txPower}`;
               if (appliedTxPowerRef.current !== txPowerKey) {
                 const txPowerStart = performance.now();
-                await device.setTxPowerOverride(currentSettings.rfChannel, txPower);
-                recordDiagnosticStage("txPower", performance.now() - txPowerStart);
+                await device.setTxPowerOverride(
+                  currentSettings.rfChannel,
+                  txPower,
+                );
+                recordDiagnosticStage(
+                  "txPower",
+                  performance.now() - txPowerStart,
+                );
                 appliedTxPowerRef.current = txPowerKey;
                 appendLog("info", `Adaptive uplink TX power set to ${txPower}`);
               }
@@ -1313,7 +1681,10 @@ export function useOpenIpcRuntime() {
                 nowMs,
                 currentSettings.rfChannel,
               );
-              recordDiagnosticStage("adaptiveTx", performance.now() - adaptiveTxStart);
+              recordDiagnosticStage(
+                "adaptiveTx",
+                performance.now() - adaptiveTxStart,
+              );
               if (sent > 0) {
                 setMetrics((current) => ({
                   ...current,
@@ -1333,6 +1704,10 @@ export function useOpenIpcRuntime() {
             transfers: current.transfers + 1,
             bytes: current.bytes + profile.transferBytes,
             lastTransferBytes: profile.transferBytes,
+            mavlinkPayloads:
+              current.mavlinkPayloads + profile.mavlinkPayloadCount,
+            mavlinkBytes: current.mavlinkBytes + profile.mavlinkBytes,
+            lastMavlinkBytes: profile.mavlinkBytes,
             fecRecovered: counters.recoveredPackets,
             fecLost: counters.lostPackets,
           }));
@@ -1349,7 +1724,10 @@ export function useOpenIpcRuntime() {
               frames: frameCountRef.current,
               lastFrameBytes,
             }));
-            appendLog("rx", `${frames.length} frame(s) from ${formatBytes(profile.transferBytes)}`);
+            appendLog(
+              "rx",
+              `${frames.length} frame(s) from ${formatBytes(profile.transferBytes)}`,
+            );
           }
           recordDiagnosticStage("rxLoop", performance.now() - loopStart);
           publishDiagnostics();
@@ -1373,7 +1751,9 @@ export function useOpenIpcRuntime() {
     if (desktopRuntime) {
       setRunning(false);
       setRuntime("ready");
-      void tauriStopRx().catch((error) => appendLog("warn", messageFrom(error)));
+      void tauriStopRx().catch((error) =>
+        appendLog("warn", messageFrom(error)),
+      );
     }
   }
 
@@ -1399,13 +1779,18 @@ export function useOpenIpcRuntime() {
     appendLog("info", "Counters reset");
   }
 
-  const bestLinkScore = linkQuality ? Math.max(linkQuality.linkScore[0], linkQuality.linkScore[1]) : 0;
+  const bestLinkScore = linkQuality
+    ? Math.max(linkQuality.linkScore[0], linkQuality.linkScore[1])
+    : 0;
   const packetLoss = linkQuality?.lostLastSecond ?? 0;
   const fecRecovered = linkQuality?.recoveredLastSecond ?? 0;
-  const activeResolution = videoStats.resolution === "None" ? "Waiting" : videoStats.resolution;
+  const activeResolution =
+    videoStats.resolution === "None" ? "Waiting" : videoStats.resolution;
   const selectedDeviceKnown =
     settings.wifiDevice === "" ||
-    authorizedDevices.some((device) => authorizedDeviceId(device) === settings.wifiDevice);
+    authorizedDevices.some(
+      (device) => authorizedDeviceId(device) === settings.wifiDevice,
+    );
 
   return {
     activeResolution,
@@ -1416,6 +1801,7 @@ export function useOpenIpcRuntime() {
     desktopRuntime,
     fecRecovered,
     fullscreen,
+    keyReady,
     keyName,
     lastRecordingUrl,
     linkQuality,
@@ -1433,18 +1819,33 @@ export function useOpenIpcRuntime() {
     usbInfo,
     videoStats,
     wasmReady,
+    webCodecsCapabilities,
     webCodecsSupported,
     webUsbSupported,
     actions: {
       closeDecoder,
-      connectUsb: () => void connectUsb().catch((error) => appendLog("error", messageFrom(error))),
+      clearKeypair,
+      clearLogs: () => setLogs([]),
+      connectUsb: () =>
+        void connectUsb().catch((error) =>
+          appendLog("error", messageFrom(error)),
+        ),
+      loadDefaultKeypair: () =>
+        void loadDefaultKeypair().catch((error) =>
+          appendLog("error", messageFrom(error)),
+        ),
       loadKey: (event: ChangeEvent<HTMLInputElement>) =>
-        void loadKey(event).catch((error) => appendLog("error", messageFrom(error))),
+        void loadKey(event).catch((error) =>
+          appendLog("error", messageFrom(error)),
+        ),
       refreshAuthorizedDevices: () =>
-        void refreshAuthorizedDevices().catch((error) => appendLog("error", messageFrom(error))),
+        void refreshAuthorizedDevices().catch((error) =>
+          appendLog("error", messageFrom(error)),
+        ),
       resetCounters,
       setFullscreen: (enabled: boolean) => void setFullscreenMode(enabled),
-      startRx: () => void startRx().catch((error) => appendLog("error", messageFrom(error))),
+      startRx: () =>
+        void startRx().catch((error) => appendLog("error", messageFrom(error))),
       stopRx,
       toggleRecording: recording ? stopRecording : startRecording,
     },

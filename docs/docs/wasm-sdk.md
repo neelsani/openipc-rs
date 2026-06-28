@@ -43,7 +43,7 @@ sequenceDiagram
         UI->>WASM: readRxTransfer(32768)
         WASM-->>UI: Uint8Array
         UI->>WASM: receiver.pushRxTransferProfiled(bytes)
-        WASM-->>UI: frames and metrics
+        WASM-->>UI: frames, raw payloads, and metrics
         UI->>Codec: EncodedVideoChunk
     end
 ```
@@ -64,7 +64,9 @@ const usbDevice = await navigator.usb.requestDevice({ filters });
 const radio = await WebUsbRealtekDevice.fromWebUsbDevice(usbDevice);
 
 const channelId = 7669206 << 8;
-const keypairBytes = new Uint8Array(await (await fetch("/gs.key")).arrayBuffer());
+const keypairBytes = new Uint8Array(
+  await (await fetch("/gs.key")).arrayBuffer(),
+);
 const receiver = OpenIpcReceiver.withKeypair(channelId, keypairBytes, 0n);
 
 await radio.initializeMonitor(36, 20, 0);
@@ -77,12 +79,26 @@ while (true) {
     // frame.data is encoded Annex-B H.264/H.265.
     console.log(frame.codec, frame.data.byteLength, frame.isKeyFrame);
   }
+
+  for (const payload of batch.mavlinkPayloads) {
+    // payload.data is raw recovered bytes from the MAVLink RX radio port.
+    // The SDK does not parse MAVLink messages or forward them.
+    console.log(payload.packetSeq, payload.data.byteLength);
+  }
 }
 ```
 
 `pushRxTransferProfiled` is usually the best entry point for applications. It
 returns frames and counters from the same call, so the UI can update metrics
 without replaying the transfer through another parser.
+
+By default `OpenIpcReceiver.withKeypair(...)` also watches the matching
+MAVLink downlink channel (`link_id:0x10`) and exposes those recovered bytes as
+`mavlinkPayloads`. That name is a browser SDK convenience, not a core protocol
+restriction. The Rust core uses `PayloadPipeline` for any non-video radio port.
+If your setup uses a non-standard MAVLink port, call
+`OpenIpcReceiver.withKeypairAndMavlinkChannel(videoChannelId, mavlinkChannelId,
+keypairBytes, minimumEpoch)`.
 
 ## WebCodecs Rendering
 

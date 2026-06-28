@@ -39,6 +39,12 @@ Video decode still happens in the WebView through WebCodecs. Rust handles USB
 and protocol reconstruction; the UI handles decoded frame lifecycle, rendering,
 recording, and HUD updates.
 
+The video fullscreen button has a desktop-specific path. Browser builds use the
+element Fullscreen API on `#video-region`. Tauri builds call the native window
+fullscreen API and apply a video-only overlay class, because embedded WebViews
+do not consistently support element fullscreen. The canvas and OSD stay inside
+the video region in both modes.
+
 ## Build
 
 Check the source-level desktop build without bundling installers:
@@ -57,6 +63,64 @@ bun run desktop:build
 
 CI checks and releases desktop targets for Linux x64/arm64, macOS Apple
 Silicon/Intel, and Windows x64/arm64.
+
+## Android
+
+Tauri can build the station for Android, but Android USB access is different
+from Linux/macOS/Windows desktop USB access.
+
+`nusb::list_devices()` is not the supported Android app-sandbox path today.
+Android apps should discover devices through Android's own USB APIs:
+
+1. Use `UsbManager` to list attached devices and match one of the Realtek
+   VID/PID pairs.
+2. Request user permission for that `UsbDevice`.
+3. Open a `UsbDeviceConnection`.
+4. Read `UsbDeviceConnection.fileDescriptor`.
+5. Call the Tauri command `openipc_connect_from_fd` with that fd plus the usual
+   channel settings.
+
+The Rust command duplicates the descriptor with `dup(2)`, then wraps the
+duplicate with `nusb::Device::from_fd`. Android/Kotlin keeps owning the original
+`UsbDeviceConnection`; Rust owns only the duplicate.
+
+The command shape is:
+
+```ts
+await tauriConnectFromFd({
+  fd,
+  vendorId: 0x0bda,
+  productId: 0x8812,
+  product: "RTL8812AU",
+  channel: 161,
+  channelWidthMhz: 20,
+  channelOffset: 0,
+  skipReset: true,
+});
+```
+
+A minimal Android-side bridge looks like this conceptually:
+
+```kotlin
+val manager = getSystemService(Context.USB_SERVICE) as UsbManager
+val device = manager.deviceList.values.first { usbDevice ->
+    usbDevice.vendorId == 0x0bda && usbDevice.productId == 0x8812
+}
+
+// Request permission first in real code, then:
+val connection = manager.openDevice(device)
+val fd = connection.fileDescriptor
+```
+
+After `bun run android:init`, put the permission and picker code in the
+generated Android project or a small Tauri mobile plugin. The shared Rust
+receive path after `openipc_connect_from_fd` is the same Realtek HAL,
+OpenIPC/WFB/RTP pipeline, adaptive-link feedback path, and WebCodecs UI used by
+desktop Tauri.
+
+On Android, `openipc_list_devices` returns the supported Realtek IDs as a
+compatibility hint rather than enumerating attached adapters. The attached-device
+list comes from `UsbManager`.
 
 ## Signing
 

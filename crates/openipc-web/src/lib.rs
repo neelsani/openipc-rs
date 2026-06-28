@@ -5,7 +5,8 @@ use openipc_core::realtek::{parse_rx_aggregate, RxPacketType};
 use openipc_core::realtek_tx::RealtekTxOptions;
 use openipc_core::{
     AdaptiveLinkSender, ChannelId, Codec, DepacketizedFrame, FecCounters, FrameLayout,
-    PipelineEvent, RadioPort, ReceiverPipeline, WfbKeypair, WfbTxKeypair,
+    PayloadPipeline, PayloadPipelineEvent, PipelineEvent, RadioPort, ReceiverPipeline, WfbKeypair,
+    WfbTxKeypair,
 };
 #[cfg(target_arch = "wasm32")]
 use openipc_rtl88xx::{
@@ -25,8 +26,15 @@ export type OpenIpcVideoFrame = {
     timestamp: number;
 };
 
+export type OpenIpcRawPayload = {
+    data: Uint8Array;
+    packetSeq: string;
+    channelId: number;
+};
+
 export type OpenIpcRxTransferProfile = {
     frames: OpenIpcVideoFrame[];
+    mavlinkPayloads: OpenIpcRawPayload[];
     transferBytes: number;
     packets: number;
     acceptedPackets: number;
@@ -39,6 +47,8 @@ export type OpenIpcRxTransferProfile = {
     wfbPayloads: number;
     rtpPackets: number;
     videoFrames: number;
+    mavlinkPayloadCount: number;
+    mavlinkBytes: number;
     parseMs: number;
     pipelineMs: number;
     totalMs: number;
@@ -48,6 +58,7 @@ export type OpenIpcRxTransferProfile = {
 #[wasm_bindgen]
 pub struct OpenIpcReceiver {
     pipeline: ReceiverPipeline,
+    mavlink_pipeline: Option<PayloadPipeline>,
 }
 
 #[wasm_bindgen]
@@ -70,7 +81,10 @@ impl OpenIpcReceiver {
             fec_n,
         )
         .map_err(|err| JsValue::from_str(&format!("invalid receiver config: {err:?}")))?;
-        Ok(Self { pipeline })
+        Ok(Self {
+            pipeline,
+            mavlink_pipeline: None,
+        })
     }
 
     #[wasm_bindgen(js_name = withKeypair)]
@@ -81,14 +95,31 @@ impl OpenIpcReceiver {
     ) -> Result<OpenIpcReceiver, JsValue> {
         let keypair = WfbKeypair::from_bytes(keypair)
             .map_err(|err| JsValue::from_str(&format!("invalid WFB keypair: {err}")))?;
-        let pipeline = ReceiverPipeline::with_keypair(
-            ChannelId::new(channel_id),
-            FrameLayout::WithFcs,
+        let mavlink_channel_id =
+            ChannelId::from_link_port(channel_id >> 8, RadioPort::MavlinkRx).raw();
+        openipc_receiver_with_keypair_and_mavlink_channel_inner(
+            channel_id,
+            mavlink_channel_id,
             keypair,
             minimum_epoch,
         )
-        .map_err(|err| JsValue::from_str(&format!("invalid encrypted receiver config: {err}")))?;
-        Ok(Self { pipeline })
+    }
+
+    #[wasm_bindgen(js_name = withKeypairAndMavlinkChannel)]
+    pub fn with_keypair_and_mavlink_channel(
+        channel_id: u32,
+        mavlink_channel_id: u32,
+        keypair: &[u8],
+        minimum_epoch: u64,
+    ) -> Result<OpenIpcReceiver, JsValue> {
+        let keypair = WfbKeypair::from_bytes(keypair)
+            .map_err(|err| JsValue::from_str(&format!("invalid WFB keypair: {err}")))?;
+        openipc_receiver_with_keypair_and_mavlink_channel_inner(
+            channel_id,
+            mavlink_channel_id,
+            keypair,
+            minimum_epoch,
+        )
     }
 
     #[wasm_bindgen(js_name = pushRtpPacket)]
@@ -236,6 +267,7 @@ impl OpenIpcReceiver {
         let parse_ms = elapsed_ms(parse_start);
 
         let frames = Array::new();
+        let mavlink_payloads = Array::new();
         let mut accepted_packets = 0usize;
         let mut crc_dropped = 0usize;
         let mut icv_dropped = 0usize;
@@ -245,6 +277,8 @@ impl OpenIpcReceiver {
         let mut wfb_payloads = 0usize;
         let mut rtp_packets = 0usize;
         let mut video_frames = 0usize;
+        let mut mavlink_payload_count = 0usize;
+        let mut mavlink_bytes = 0usize;
 
         let pipeline_start = now_ms();
         let packet_count = packets.len();
@@ -262,6 +296,17 @@ impl OpenIpcReceiver {
                 continue;
             }
             accepted_packets += 1;
+            if let Some(mavlink_pipeline) = self.mavlink_pipeline.as_mut() {
+                if let Ok(events) = mavlink_pipeline.push_80211_frame(packet.data) {
+                    append_payload_objects(
+                        &mavlink_payloads,
+                        events,
+                        mavlink_pipeline.channel_id(),
+                        &mut mavlink_payload_count,
+                        &mut mavlink_bytes,
+                    )?;
+                }
+            }
             let events = self
                 .pipeline
                 .push_80211_frame(packet.data)
@@ -283,6 +328,11 @@ impl OpenIpcReceiver {
 
         let object = Object::new();
         Reflect::set(&object, &JsValue::from_str("frames"), &frames)?;
+        Reflect::set(
+            &object,
+            &JsValue::from_str("mavlinkPayloads"),
+            &mavlink_payloads,
+        )?;
         set_number(&object, "transferBytes", transfer.len() as f64)?;
         set_number(&object, "packets", packet_count as f64)?;
         set_number(&object, "acceptedPackets", accepted_packets as f64)?;
@@ -299,6 +349,8 @@ impl OpenIpcReceiver {
         set_number(&object, "wfbPayloads", wfb_payloads as f64)?;
         set_number(&object, "rtpPackets", rtp_packets as f64)?;
         set_number(&object, "videoFrames", video_frames as f64)?;
+        set_number(&object, "mavlinkPayloadCount", mavlink_payload_count as f64)?;
+        set_number(&object, "mavlinkBytes", mavlink_bytes as f64)?;
         set_number(&object, "parseMs", parse_ms)?;
         set_number(&object, "pipelineMs", pipeline_ms)?;
         set_number(&object, "totalMs", elapsed_ms(total_start))?;
@@ -1015,6 +1067,42 @@ fn append_video_frame_objects(frames: &Array, events: Vec<PipelineEvent>) -> Res
     Ok(())
 }
 
+fn append_payload_objects(
+    payloads: &Array,
+    events: Vec<PayloadPipelineEvent>,
+    channel_id: ChannelId,
+    payload_count: &mut usize,
+    payload_bytes: &mut usize,
+) -> Result<(), JsValue> {
+    for event in events {
+        if let PayloadPipelineEvent::Payload(payload) = event {
+            *payload_count += 1;
+            *payload_bytes += payload.data.len();
+            payloads.push(&raw_payload_object(payload, channel_id)?.into());
+        }
+    }
+    Ok(())
+}
+
+fn raw_payload_object(
+    payload: openipc_core::RecoveredPayload,
+    channel_id: ChannelId,
+) -> Result<Object, JsValue> {
+    let object = Object::new();
+    Reflect::set(
+        &object,
+        &JsValue::from_str("data"),
+        &Uint8Array::from(payload.data.as_slice()),
+    )?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("packetSeq"),
+        &JsValue::from_str(&payload.packet_seq.to_string()),
+    )?;
+    set_number(&object, "channelId", channel_id.raw() as f64)?;
+    Ok(object)
+}
+
 fn accept_rx_packet(attrib: openipc_core::realtek::RxPacketAttrib, keep_corrupted: bool) -> bool {
     attrib.pkt_rpt_type == RxPacketType::NormalRx
         && (keep_corrupted || (!attrib.crc_err && !attrib.icv_err))
@@ -1157,6 +1245,32 @@ fn elapsed_ms(start_ms: f64) -> f64 {
     } else {
         0.0
     }
+}
+
+fn openipc_receiver_with_keypair_and_mavlink_channel_inner(
+    channel_id: u32,
+    mavlink_channel_id: u32,
+    keypair: WfbKeypair,
+    minimum_epoch: u64,
+) -> Result<OpenIpcReceiver, JsValue> {
+    let pipeline = ReceiverPipeline::with_keypair(
+        ChannelId::new(channel_id),
+        FrameLayout::WithFcs,
+        keypair,
+        minimum_epoch,
+    )
+    .map_err(|err| JsValue::from_str(&format!("invalid encrypted receiver config: {err}")))?;
+    let mavlink_pipeline = PayloadPipeline::with_keypair(
+        ChannelId::new(mavlink_channel_id),
+        FrameLayout::WithFcs,
+        keypair,
+        minimum_epoch,
+    )
+    .map_err(|err| JsValue::from_str(&format!("invalid MAVLink receiver config: {err}")))?;
+    Ok(OpenIpcReceiver {
+        pipeline,
+        mavlink_pipeline: Some(mavlink_pipeline),
+    })
 }
 
 fn counters_json(counters: FecCounters) -> String {

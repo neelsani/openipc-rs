@@ -1,612 +1,612 @@
 name: CI
 
 on:
-    push:
-        branches:
-            - master
-        tags:
-            - "v*"
-    pull_request:
-    workflow_dispatch:
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
 
 permissions:
-    contents: read
+  contents: read
 
 concurrency:
-    group: ${{ github.workflow }}-${{ github.ref }}
-    cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
-    CARGO_TERM_COLOR: always
+  CARGO_TERM_COLOR: always
 
 jobs:
-    rust:
-        name: Rust Workspace
-        runs-on: ubuntu-latest
+  rust:
+    name: Rust Workspace
+    runs-on: ubuntu-latest
 
-        steps:
-            - name: Checkout
-              uses: actions/checkout@v4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-            - name: Install Linux desktop dependencies
-              run: |
-                  sudo apt-get update
-                  sudo apt-get install -y \
-                    build-essential \
-                    curl \
-                    file \
-                    libayatana-appindicator3-dev \
-                    librsvg2-dev \
-                    libssl-dev \
-                    libwebkit2gtk-4.1-dev \
-                    patchelf \
-                    wget
+      - name: Install Linux desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            patchelf \
+            wget
 
-            - name: Install Rust
-              uses: dtolnay/rust-toolchain@stable
-              with:
-                  components: clippy,rustfmt
-                  targets: wasm32-unknown-unknown
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+          targets: wasm32-unknown-unknown
 
-            - name: Cache Cargo
-              uses: actions/cache@v4
-              with:
-                  path: |
-                      ~/.cargo/bin/
-                      ~/.cargo/registry/index/
-                      ~/.cargo/registry/cache/
-                      ~/.cargo/git/db/
-                      target/
-                  key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-                  restore-keys: |
-                      cargo-${{ runner.os }}-
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
 
-            - name: Format
-              run: cargo fmt --all --check
+      - name: Format
+        run: cargo fmt --all --check
 
-            - name: Clippy
-              run: cargo clippy --workspace --all-targets --no-deps -- -D warnings
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --no-deps -- -D warnings
 
-            - name: Test
-              run: cargo test --workspace --all-targets
+      - name: Test
+        run: cargo test --workspace --all-targets
 
-            - name: Validate shared versions
-              run: |
-                  python3 <<'PY'
-                  import json
-                  import pathlib
-                  import sys
-                  import tomllib
+      - name: Validate shared versions
+        run: |
+          python3 <<'PY'
+          import json
+          import pathlib
+          import sys
+          import tomllib
 
-                  root = pathlib.Path(".")
-                  expected = tomllib.loads((root / "crates/openipc-core/Cargo.toml").read_text())["package"]["version"]
+          root = pathlib.Path(".")
+          expected = tomllib.loads((root / "crates/openipc-core/Cargo.toml").read_text())["package"]["version"]
 
-                  cargo_manifests = [
-                      "crates/openipc-core/Cargo.toml",
-                      "crates/openipc-rtl88xx/Cargo.toml",
-                      "crates/openipc-native/Cargo.toml",
-                      "crates/openipc-web/Cargo.toml",
-                      "apps/openipc-station/src-tauri/Cargo.toml",
-                  ]
-                  json_files = [
-                      "crates/openipc-web/package.json",
-                      "apps/openipc-station/package.json",
-                      "docs/package.json",
-                  ]
-                  bun_lock_files = [
-                      "apps/openipc-station/bun.lock",
-                      "docs/bun.lock",
-                  ]
+          cargo_manifests = [
+              "crates/openipc-core/Cargo.toml",
+              "crates/openipc-rtl88xx/Cargo.toml",
+              "crates/openipc-native/Cargo.toml",
+              "crates/openipc-web/Cargo.toml",
+              "apps/openipc-station/src-tauri/Cargo.toml",
+          ]
+          json_files = [
+              "crates/openipc-web/package.json",
+              "apps/openipc-station/package.json",
+              "docs/package.json",
+          ]
+          bun_lock_files = [
+              "apps/openipc-station/bun.lock",
+              "docs/bun.lock",
+          ]
 
-                  errors = []
-                  for rel in cargo_manifests:
-                      version = tomllib.loads((root / rel).read_text())["package"]["version"]
-                      if version != expected:
-                          errors.append(f"{rel}: {version} != {expected}")
+          errors = []
+          for rel in cargo_manifests:
+              version = tomllib.loads((root / rel).read_text())["package"]["version"]
+              if version != expected:
+                  errors.append(f"{rel}: {version} != {expected}")
 
-                  for rel in json_files:
-                      version = json.loads((root / rel).read_text())["version"]
-                      if version != expected:
-                          errors.append(f"{rel}: {version} != {expected}")
+          for rel in json_files:
+              version = json.loads((root / rel).read_text())["version"]
+              if version != expected:
+                  errors.append(f"{rel}: {version} != {expected}")
 
-                  for rel in bun_lock_files:
-                      path = root / rel
-                      if not path.is_file():
-                          errors.append(f"{rel} is missing")
-                          continue
-                      text = path.read_text()
-                      if "/api/npm/" in text or "artifacthub" in text or "oraclecorp" in text:
-                          errors.append(f"{rel} contains a non-public registry URL")
+          for rel in bun_lock_files:
+              path = root / rel
+              if not path.is_file():
+                  errors.append(f"{rel} is missing")
+                  continue
+              text = path.read_text()
+              if "/api/npm/" in text or "artifacthub" in text or "oraclecorp" in text:
+                  errors.append(f"{rel} contains a non-public registry URL")
 
-                  npm_locks = sorted(str(path) for path in root.rglob("package-lock.json"))
-                  if npm_locks:
-                      errors.append("package-lock.json files are not used; found: " + ", ".join(npm_locks))
+          npm_locks = sorted(str(path) for path in root.rglob("package-lock.json"))
+          if npm_locks:
+              errors.append("package-lock.json files are not used; found: " + ", ".join(npm_locks))
 
-                  changelog = (root / "CHANGELOG.md").read_text()
-                  if f"## {expected} " not in changelog and f"## {expected}\n" not in changelog:
-                      errors.append(f"CHANGELOG.md does not contain a {expected} section")
+          changelog = (root / "CHANGELOG.md").read_text()
+          if f"## {expected} " not in changelog and f"## {expected}\n" not in changelog:
+              errors.append(f"CHANGELOG.md does not contain a {expected} section")
 
-                  if errors:
-                      print("Version metadata is out of sync:", file=sys.stderr)
-                      for error in errors:
-                          print(f"  - {error}", file=sys.stderr)
-                      sys.exit(1)
+          if errors:
+              print("Version metadata is out of sync:", file=sys.stderr)
+              for error in errors:
+                  print(f"  - {error}", file=sys.stderr)
+              sys.exit(1)
 
-                  print(f"All release metadata is at {expected}")
-                  PY
+          print(f"All release metadata is at {expected}")
+          PY
 
-            - name: Check WASM crate
-              run: cargo check -p openipc-web --target wasm32-unknown-unknown
+      - name: Check WASM crate
+        run: cargo check -p openipc-web --target wasm32-unknown-unknown
 
-    wasm-package:
-        name: WASM SDK Package
-        runs-on: ubuntu-latest
+  wasm-package:
+    name: WASM SDK Package
+    runs-on: ubuntu-latest
 
-        steps:
-            - name: Checkout
-              uses: actions/checkout@v4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-            - name: Install Rust
-              uses: dtolnay/rust-toolchain@stable
-              with:
-                  targets: wasm32-unknown-unknown
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
 
-            - name: Cache Cargo
-              uses: actions/cache@v4
-              with:
-                  path: |
-                      ~/.cargo/bin/
-                      ~/.cargo/registry/index/
-                      ~/.cargo/registry/cache/
-                      ~/.cargo/git/db/
-                      .cargo-tools/
-                      target/
-                  key: wasm-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-                  restore-keys: |
-                      wasm-cargo-${{ runner.os }}-
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            .cargo-tools/
+            target/
+          key: wasm-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            wasm-cargo-${{ runner.os }}-
 
-            - name: Install Bun
-              uses: oven-sh/setup-bun@v2
-              with:
-                  bun-version: 1.3.14
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
 
-            - name: Install app dependencies
-              working-directory: apps/openipc-station
-              run: bun install --frozen-lockfile
+      - name: Install app dependencies
+        working-directory: apps/openipc-station
+        run: bun install --frozen-lockfile
 
-            - name: Build station web app
-              working-directory: apps/openipc-station
-              run: bun run build
+      - name: Build station web app
+        working-directory: apps/openipc-station
+        run: bun run build
 
-            - name: Verify WASM npm package
-              run: bun pm pack --cwd crates/openipc-web/pkg --dry-run
+      - name: Verify WASM npm package
+        run: bun pm pack --cwd crates/openipc-web/pkg --dry-run
 
-    deploy-station:
-        name: Deploy Station Site
-        runs-on: ubuntu-latest
-        needs:
-            - wasm-package
-        if: "github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))"
-        permissions:
-            contents: read
-            deployments: write
+  deploy-station:
+    name: Deploy Station Site
+    runs-on: ubuntu-latest
+    needs:
+      - wasm-package
+    if: "github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))"
+    permissions:
+      contents: read
+      deployments: write
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            .cargo-tools/
+            target/
+          key: station-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            station-cargo-${{ runner.os }}-
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install app dependencies
+        working-directory: apps/openipc-station
+        run: bun install --frozen-lockfile
+
+      - name: Build station web app
+        working-directory: apps/openipc-station
+        run: bun run build
+
+      - name: Deploy station to Cloudflare Pages
+        if: env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != ''
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: apps/openipc-station
+          command: pages deploy dist --project-name=openipc-rs-station --branch=master
+
+      - name: Skip station deploy
+        if: env.CLOUDFLARE_API_TOKEN == '' || env.CLOUDFLARE_ACCOUNT_ID == ''
+        run: echo "Skipping station deploy because Cloudflare secrets are not configured."
+
+  docs:
+    name: Docs Site
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install docs dependencies
+        working-directory: docs
+        run: bun install --frozen-lockfile
+
+      - name: Build docs
+        working-directory: docs
+        run: bun run build
+
+  deploy-docs:
+    name: Deploy Docs Site
+    runs-on: ubuntu-latest
+    needs:
+      - docs
+    if: "github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))"
+    permissions:
+      contents: read
+      deployments: write
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install docs dependencies
+        working-directory: docs
+        run: bun install --frozen-lockfile
+
+      - name: Build docs
+        working-directory: docs
+        run: bun run build
+
+      - name: Deploy docs to Cloudflare Pages
+        if: env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != ''
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: docs
+          command: pages deploy build --project-name=openipc-rs-docs --branch=master
+
+      - name: Skip docs deploy
+        if: env.CLOUDFLARE_API_TOKEN == '' || env.CLOUDFLARE_ACCOUNT_ID == ''
+        run: echo "Skipping docs deploy because Cloudflare secrets are not configured."
+
+  desktop:
+    name: Desktop Check (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x64
+            os: ubuntu-24.04
+            rust_target: x86_64-unknown-linux-gnu
+          - label: linux-arm64
+            os: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-gnu
+          - label: macos-apple-silicon
+            os: macos-15
+            rust_target: aarch64-apple-darwin
+          - label: macos-intel
+            os: macos-15-intel
+            rust_target: x86_64-apple-darwin
+          - label: windows-x64
+            os: windows-2025
+            rust_target: x86_64-pc-windows-msvc
+          - label: windows-arm64
+            os: windows-11-arm
+            rust_target: aarch64-pc-windows-msvc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            patchelf \
+            wget
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown,${{ matrix.rust_target }}
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            .cargo-tools/
+            target/
+          key: desktop-cargo-${{ matrix.label }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            desktop-cargo-${{ matrix.label }}-
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install app dependencies
+        working-directory: apps/openipc-station
+        run: bun install --frozen-lockfile
+
+      - name: Check desktop build
+        working-directory: apps/openipc-station
+        run: bun run desktop:check
+
+  publish-crates:
+    name: Publish Crates.io Packages
+    runs-on: ubuntu-latest
+    needs:
+      - rust
+      - wasm-package
+      - docs
+      - desktop
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate crates.io token
+        if: env.CARGO_REGISTRY_TOKEN == ''
+        run: |
+          echo "CARGO_REGISTRY_TOKEN is required to publish crates.io packages." >&2
+          exit 1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: publish-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            publish-cargo-${{ runner.os }}-
+
+      - name: Validate crate versions
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          for manifest in \
+            crates/openipc-core/Cargo.toml \
+            crates/openipc-rtl88xx/Cargo.toml \
+            crates/openipc-native/Cargo.toml \
+            crates/openipc-web/Cargo.toml
+          do
+            CRATE_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' "$manifest" | head -n 1)
+            if [ "$CRATE_VERSION" != "$VERSION" ]; then
+              echo "$manifest has version $CRATE_VERSION but tag is $VERSION" >&2
+              exit 1
+            fi
+          done
+
+      - name: Publish openipc-rs crates
+        run: cargo publish --workspace
+
+  publish-wasm-npm:
+    name: Publish WASM SDK To npm
+    runs-on: ubuntu-latest
+    needs:
+      - rust
+      - wasm-package
+      - docs
+      - desktop
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            .cargo-tools/
+            target/
+          key: publish-wasm-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            publish-wasm-cargo-${{ runner.os }}-
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Check Bun
+        run: bun --version
+
+      - name: Build WASM SDK package
+        run: bun run --cwd crates/openipc-web build
+
+      - name: Install npm for trusted publishing
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Check npm
+        run: npm --version
+
+      - name: Publish npm package
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PACKAGE_VERSION=$(node -e 'console.log(require("./crates/openipc-web/pkg/package.json").version)')
+          if [ "$PACKAGE_VERSION" != "$VERSION" ]; then
+            echo "Tag version $VERSION does not match @openipc-rs/web package version $PACKAGE_VERSION" >&2
+            exit 1
+          fi
+          if npm view "@openipc-rs/web@$VERSION" version >/dev/null 2>&1; then
+            echo "@openipc-rs/web@$VERSION is already on npm; skipping"
+            exit 0
+          fi
+          npm publish crates/openipc-web/pkg --access public --provenance
+
+  desktop-release:
+    name: Desktop Release (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    needs:
+      - rust
+      - wasm-package
+      - docs
+      - desktop
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x64
+            os: ubuntu-24.04
+            rust_target: x86_64-unknown-linux-gnu
+          - label: linux-arm64
+            os: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-gnu
+          - label: macos-apple-silicon
+            os: macos-15
+            rust_target: aarch64-apple-darwin
+          - label: macos-intel
+            os: macos-15-intel
+            rust_target: x86_64-apple-darwin
+          - label: windows-x64
+            os: windows-2025
+            rust_target: x86_64-pc-windows-msvc
+          - label: windows-arm64
+            os: windows-11-arm
+            rust_target: aarch64-pc-windows-msvc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            patchelf \
+            wget
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown,${{ matrix.rust_target }}
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            .cargo-tools/
+            target/
+          key: release-desktop-cargo-${{ matrix.label }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            release-desktop-cargo-${{ matrix.label }}-
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install app dependencies
+        working-directory: apps/openipc-station
+        run: bun install --frozen-lockfile
+
+      - name: Build and upload desktop bundles
+        uses: tauri-apps/tauri-action@v0
         env:
-            CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-            CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-
-        steps:
-            - name: Checkout
-              uses: actions/checkout@v4
-
-            - name: Install Rust
-              uses: dtolnay/rust-toolchain@stable
-              with:
-                  targets: wasm32-unknown-unknown
-
-            - name: Cache Cargo
-              uses: actions/cache@v4
-              with:
-                  path: |
-                      ~/.cargo/bin/
-                      ~/.cargo/registry/index/
-                      ~/.cargo/registry/cache/
-                      ~/.cargo/git/db/
-                      .cargo-tools/
-                      target/
-                  key: station-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-                  restore-keys: |
-                      station-cargo-${{ runner.os }}-
-
-            - name: Install Bun
-              uses: oven-sh/setup-bun@v2
-              with:
-                  bun-version: 1.3.14
-
-            - name: Install app dependencies
-              working-directory: apps/openipc-station
-              run: bun install --frozen-lockfile
-
-            - name: Build station web app
-              working-directory: apps/openipc-station
-              run: bun run build
-
-            - name: Deploy station to Cloudflare Pages
-              if: env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != ''
-              uses: cloudflare/wrangler-action@v3
-              with:
-                  apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-                  accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-                  workingDirectory: apps/openipc-station
-                  command: pages deploy dist --project-name=openipc-rs-station --branch=master
-
-            - name: Skip station deploy
-              if: env.CLOUDFLARE_API_TOKEN == '' || env.CLOUDFLARE_ACCOUNT_ID == ''
-              run: echo "Skipping station deploy because Cloudflare secrets are not configured."
-
-    docs:
-        name: Docs Site
-        runs-on: ubuntu-latest
-
-        steps:
-            - name: Checkout
-              uses: actions/checkout@v4
-
-            - name: Install Bun
-              uses: oven-sh/setup-bun@v2
-              with:
-                  bun-version: 1.3.14
-
-            - name: Install docs dependencies
-              working-directory: docs
-              run: bun install --frozen-lockfile
-
-            - name: Build docs
-              working-directory: docs
-              run: bun run build
-
-    deploy-docs:
-        name: Deploy Docs Site
-        runs-on: ubuntu-latest
-        needs:
-            - docs
-        if: "github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))"
-        permissions:
-            contents: read
-            deployments: write
-        env:
-            CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-            CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-
-        steps:
-            - name: Checkout
-              uses: actions/checkout@v4
-
-            - name: Install Bun
-              uses: oven-sh/setup-bun@v2
-              with:
-                  bun-version: 1.3.14
-
-            - name: Install docs dependencies
-              working-directory: docs
-              run: bun install --frozen-lockfile
-
-            - name: Build docs
-              working-directory: docs
-              run: bun run build
-
-            - name: Deploy docs to Cloudflare Pages
-              if: env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != ''
-              uses: cloudflare/wrangler-action@v3
-              with:
-                  apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-                  accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-                  workingDirectory: docs
-                  command: pages deploy build --project-name=openipc-rs-docs --branch=master
-
-            - name: Skip docs deploy
-              if: env.CLOUDFLARE_API_TOKEN == '' || env.CLOUDFLARE_ACCOUNT_ID == ''
-              run: echo "Skipping docs deploy because Cloudflare secrets are not configured."
-
-    desktop:
-        name: Desktop Check (${{ matrix.label }})
-        runs-on: ${{ matrix.os }}
-
-        strategy:
-            fail-fast: false
-            matrix:
-                include:
-                    - label: linux-x64
-                      os: ubuntu-24.04
-                      rust_target: x86_64-unknown-linux-gnu
-                    - label: linux-arm64
-                      os: ubuntu-24.04-arm
-                      rust_target: aarch64-unknown-linux-gnu
-                    - label: macos-apple-silicon
-                      os: macos-15
-                      rust_target: aarch64-apple-darwin
-                    - label: macos-intel
-                      os: macos-15-intel
-                      rust_target: x86_64-apple-darwin
-                    - label: windows-x64
-                      os: windows-2025
-                      rust_target: x86_64-pc-windows-msvc
-                    - label: windows-arm64
-                      os: windows-11-arm
-                      rust_target: aarch64-pc-windows-msvc
-
-        steps:
-            - name: Checkout
-              uses: actions/checkout@v4
-
-            - name: Install Linux desktop dependencies
-              if: runner.os == 'Linux'
-              run: |
-                  sudo apt-get update
-                  sudo apt-get install -y \
-                    build-essential \
-                    curl \
-                    file \
-                    libayatana-appindicator3-dev \
-                    librsvg2-dev \
-                    libssl-dev \
-                    libwebkit2gtk-4.1-dev \
-                    patchelf \
-                    wget
-
-            - name: Install Rust
-              uses: dtolnay/rust-toolchain@stable
-              with:
-                  targets: wasm32-unknown-unknown,${{ matrix.rust_target }}
-
-            - name: Cache Cargo
-              uses: actions/cache@v4
-              with:
-                  path: |
-                      ~/.cargo/bin/
-                      ~/.cargo/registry/index/
-                      ~/.cargo/registry/cache/
-                      ~/.cargo/git/db/
-                      .cargo-tools/
-                      target/
-                  key: desktop-cargo-${{ matrix.label }}-${{ hashFiles('Cargo.lock') }}
-                  restore-keys: |
-                      desktop-cargo-${{ matrix.label }}-
-
-            - name: Install Bun
-              uses: oven-sh/setup-bun@v2
-              with:
-                  bun-version: 1.3.14
-
-            - name: Install app dependencies
-              working-directory: apps/openipc-station
-              run: bun install --frozen-lockfile
-
-            - name: Check desktop build
-              working-directory: apps/openipc-station
-              run: bun run desktop:check
-
-    publish-crates:
-        name: Publish Crates.io Packages
-        runs-on: ubuntu-latest
-        needs:
-            - rust
-            - wasm-package
-            - docs
-            - desktop
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-        permissions:
-            contents: read
-        env:
-            CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-        steps:
-            - name: Checkout
-              uses: actions/checkout@v4
-
-            - name: Validate crates.io token
-              if: env.CARGO_REGISTRY_TOKEN == ''
-              run: |
-                  echo "CARGO_REGISTRY_TOKEN is required to publish crates.io packages." >&2
-                  exit 1
-
-            - name: Install Rust
-              uses: dtolnay/rust-toolchain@stable
-              with:
-                  targets: wasm32-unknown-unknown
-
-            - name: Cache Cargo
-              uses: actions/cache@v4
-              with:
-                  path: |
-                      ~/.cargo/bin/
-                      ~/.cargo/registry/index/
-                      ~/.cargo/registry/cache/
-                      ~/.cargo/git/db/
-                      target/
-                  key: publish-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-                  restore-keys: |
-                      publish-cargo-${{ runner.os }}-
-
-            - name: Validate crate versions
-              run: |
-                  VERSION="${GITHUB_REF_NAME#v}"
-                  for manifest in \
-                    crates/openipc-core/Cargo.toml \
-                    crates/openipc-rtl88xx/Cargo.toml \
-                    crates/openipc-native/Cargo.toml \
-                    crates/openipc-web/Cargo.toml
-                  do
-                    CRATE_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' "$manifest" | head -n 1)
-                    if [ "$CRATE_VERSION" != "$VERSION" ]; then
-                      echo "$manifest has version $CRATE_VERSION but tag is $VERSION" >&2
-                      exit 1
-                    fi
-                  done
-
-            - name: Publish openipc-rs crates
-              run: cargo publish --workspace
-
-    publish-wasm-npm:
-        name: Publish WASM SDK To npm
-        runs-on: ubuntu-latest
-        needs:
-            - rust
-            - wasm-package
-            - docs
-            - desktop
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-        permissions:
-            contents: read
-            id-token: write
-
-        steps:
-            - name: Checkout
-              uses: actions/checkout@v4
-
-            - name: Install Rust
-              uses: dtolnay/rust-toolchain@stable
-              with:
-                  targets: wasm32-unknown-unknown
-
-            - name: Cache Cargo
-              uses: actions/cache@v4
-              with:
-                  path: |
-                      ~/.cargo/bin/
-                      ~/.cargo/registry/index/
-                      ~/.cargo/registry/cache/
-                      ~/.cargo/git/db/
-                      .cargo-tools/
-                      target/
-                  key: publish-wasm-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-                  restore-keys: |
-                      publish-wasm-cargo-${{ runner.os }}-
-
-            - name: Install Bun
-              uses: oven-sh/setup-bun@v2
-              with:
-                  bun-version: 1.3.14
-
-            - name: Check Bun
-              run: bun --version
-
-            - name: Build WASM SDK package
-              run: bun run --cwd crates/openipc-web build
-
-            - name: Install npm for trusted publishing
-              uses: actions/setup-node@v4
-              with:
-                  node-version: 24
-                  registry-url: https://registry.npmjs.org
-
-            - name: Check npm
-              run: npm --version
-
-            - name: Publish npm package
-              run: |
-                  VERSION="${GITHUB_REF_NAME#v}"
-                  PACKAGE_VERSION=$(node -e 'console.log(require("./crates/openipc-web/pkg/package.json").version)')
-                  if [ "$PACKAGE_VERSION" != "$VERSION" ]; then
-                    echo "Tag version $VERSION does not match @openipc-rs/web package version $PACKAGE_VERSION" >&2
-                    exit 1
-                  fi
-                  if npm view "@openipc-rs/web@$VERSION" version >/dev/null 2>&1; then
-                    echo "@openipc-rs/web@$VERSION is already on npm; skipping"
-                    exit 0
-                  fi
-                  npm publish crates/openipc-web/pkg --access public --provenance
-
-    desktop-release:
-        name: Desktop Release (${{ matrix.label }})
-        runs-on: ${{ matrix.os }}
-        needs:
-            - rust
-            - wasm-package
-            - docs
-            - desktop
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-        permissions:
-            contents: write
-
-        strategy:
-            fail-fast: false
-            matrix:
-                include:
-                    - label: linux-x64
-                      os: ubuntu-24.04
-                      rust_target: x86_64-unknown-linux-gnu
-                    - label: linux-arm64
-                      os: ubuntu-24.04-arm
-                      rust_target: aarch64-unknown-linux-gnu
-                    - label: macos-apple-silicon
-                      os: macos-15
-                      rust_target: aarch64-apple-darwin
-                    - label: macos-intel
-                      os: macos-15-intel
-                      rust_target: x86_64-apple-darwin
-                    - label: windows-x64
-                      os: windows-2025
-                      rust_target: x86_64-pc-windows-msvc
-                    - label: windows-arm64
-                      os: windows-11-arm
-                      rust_target: aarch64-pc-windows-msvc
-
-        steps:
-            - name: Checkout
-              uses: actions/checkout@v4
-
-            - name: Install Linux desktop dependencies
-              if: runner.os == 'Linux'
-              run: |
-                  sudo apt-get update
-                  sudo apt-get install -y \
-                    build-essential \
-                    curl \
-                    file \
-                    libayatana-appindicator3-dev \
-                    librsvg2-dev \
-                    libssl-dev \
-                    libwebkit2gtk-4.1-dev \
-                    patchelf \
-                    wget
-
-            - name: Install Rust
-              uses: dtolnay/rust-toolchain@stable
-              with:
-                  targets: wasm32-unknown-unknown,${{ matrix.rust_target }}
-
-            - name: Cache Cargo
-              uses: actions/cache@v4
-              with:
-                  path: |
-                      ~/.cargo/bin/
-                      ~/.cargo/registry/index/
-                      ~/.cargo/registry/cache/
-                      ~/.cargo/git/db/
-                      .cargo-tools/
-                      target/
-                  key: release-desktop-cargo-${{ matrix.label }}-${{ hashFiles('Cargo.lock') }}
-                  restore-keys: |
-                      release-desktop-cargo-${{ matrix.label }}-
-
-            - name: Install Bun
-              uses: oven-sh/setup-bun@v2
-              with:
-                  bun-version: 1.3.14
-
-            - name: Install app dependencies
-              working-directory: apps/openipc-station
-              run: bun install --frozen-lockfile
-
-            - name: Build and upload desktop bundles
-              uses: tauri-apps/tauri-action@v0
-              env:
-                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-              with:
-                  projectPath: apps/openipc-station
-                  tagName: ${{ github.ref_name }}
-                  releaseName: OpenIPC Station ${{ github.ref_name }}
-                  releaseBody: Desktop installers and application bundles for OpenIPC Station.
-                  releaseDraft: false
-                  prerelease: ${{ contains(github.ref_name, '-') }}
-                  assetNamePattern: openipc-rs-station-[platform]-[arch]-[version].[ext]
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: apps/openipc-station
+          tagName: ${{ github.ref_name }}
+          releaseName: OpenIPC Station ${{ github.ref_name }}
+          releaseBody: Desktop installers and application bundles for OpenIPC Station.
+          releaseDraft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          assetNamePattern: openipc-rs-station-[platform]-[arch]-[version].[ext]

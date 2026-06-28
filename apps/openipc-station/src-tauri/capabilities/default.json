@@ -1,6 +1,6 @@
 {
-    "identifier": "default",
-    "description": "Default OpenIPC Station desktop permissions",
-    "windows": ["main"],
-    "permissions": ["core:default", "core:window:allow-set-fullscreen"]
+  "identifier": "default",
+  "description": "Default OpenIPC Station desktop permissions",
+  "windows": ["main"],
+  "permissions": ["core:default", "core:window:allow-set-fullscreen"]
 }

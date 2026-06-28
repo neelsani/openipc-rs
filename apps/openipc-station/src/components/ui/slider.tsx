@@ -8,21 +8,24 @@ export function Slider({
 }: React.ComponentProps<typeof SliderPrimitive.Root>) {
   return (
     <SliderPrimitive.Root
-      className={cn("relative flex w-full touch-none select-none items-center", className)}
+      className={cn(
+        "relative flex w-full touch-none select-none items-center",
+        className,
+      )}
       data-slot="slider"
       {...props}
     >
       <SliderPrimitive.Track
-        className="relative h-2 w-full grow overflow-hidden rounded-full bg-secondary"
+        className="relative h-2 w-full grow overflow-hidden rounded-full border border-border/60 bg-secondary"
         data-slot="slider-track"
       >
         <SliderPrimitive.Range
-          className="absolute h-full bg-primary"
+          className="absolute h-full bg-gradient-to-r from-primary to-cyan-300"
           data-slot="slider-range"
         />
       </SliderPrimitive.Track>
       <SliderPrimitive.Thumb
-        className="block size-4 rounded-full border border-primary bg-background shadow transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
+        className="block size-4 rounded-full border border-primary bg-background shadow shadow-primary/25 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
         data-slot="slider-thumb"
       />
     </SliderPrimitive.Root>

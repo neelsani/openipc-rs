@@ -16,6 +16,7 @@ flowchart LR
     Fec --> Rtp["RTP packet"]
     Rtp --> Video["H.264/H.265 Annex-B"]
     Video --> Decode["WebCodecs or native decoder"]
+    Fec --> Raw["Raw non-video payload bytes"]
 ```
 
 ## Receive Path
@@ -28,13 +29,36 @@ flowchart LR
 4. WFB session packets update the data-decryption session key.
 5. WFB data packets decrypt into primary and parity FEC fragments.
 6. Reed-Solomon recovery repairs missing primary fragments where possible.
-7. Primary fragments emit RTP packets.
+7. Video-channel primary fragments emit RTP packets.
 8. RTP H.264/H.265 depacketization emits Annex-B frames.
 
 The pipeline emits events as it learns new information. Session packets update
 the decryptor. Data packets may produce recovered RTP packets. RTP packets may
 or may not complete a video access unit. Only completed access units are sent to
 the video decoder.
+
+This event stream is intentionally layered. An app can count WFB payloads,
+mirror RTP, and write Annex-B frames from the same receive loop:
+
+```rust
+for event in pipeline.push_80211_frame(frame)? {
+    match event {
+        PipelineEvent::WfbPayload { .. } => counters.wfb += 1,
+        PipelineEvent::RtpPacket { payload, .. } => mirror_rtp(&payload)?,
+        PipelineEvent::VideoFrame(frame) => decoder.push(frame.data)?,
+        _ => {}
+    }
+}
+```
+
+`RtpPacket` and `VideoFrame` can both appear for the same input frame because
+the depacketizer may complete an access unit while processing that RTP packet.
+
+Non-video WFB channels stop earlier. `PayloadPipeline` returns recovered payload
+bytes after decryption and FEC, without treating them as RTP. Use it for
+MAVLink, MSP, CRSF, data ports, or custom radio ports. The station currently
+watches the observed OpenIPC MAVLink downlink port and exposes byte counts in
+diagnostics. It does not parse MAVLink messages.
 
 ## Annex-B Frames
 

@@ -9,26 +9,26 @@ pushes to `master`, `v*` tags, and manual dispatch.
 
 ## What Runs
 
-| Job | Purpose |
-| --- | --- |
-| `Rust Workspace` | Installs Linux desktop dependencies, runs `cargo fmt`, workspace clippy, workspace tests, shared version checks, changelog presence checks, and `openipc-web` WASM target check. |
-| `WASM SDK Package` | Installs app dependencies, builds the station web app, and dry-runs the generated `@openipc-rs/web` package. |
-| `Docs Site` | Builds the Docusaurus site. |
-| `Desktop Check` | Runs `bun run desktop:check` for Linux x64/arm64, macOS Apple Silicon/Intel, and Windows x64/arm64. |
-| `Deploy Station Site` | Deploys `apps/openipc-station/dist` to Cloudflare Pages on pushes to `master` and `v*` tags. |
-| `Deploy Docs Site` | Deploys `docs/build` to Cloudflare Pages on pushes to `master` and `v*` tags. |
-| `Publish Crates.io Packages` | Publishes the workspace crates on `v*` tags. |
-| `Publish WASM SDK To npm` | Builds `@openipc-rs/web` with Bun and publishes it with npm trusted publishing on `v*` tags. |
-| `Desktop Release` | Uses `tauri-apps/tauri-action` to build and upload desktop bundles to the GitHub Release on `v*` tags. |
+| Job                          | Purpose                                                                                                                                                                          |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Rust Workspace`             | Installs Linux desktop dependencies, runs `cargo fmt`, workspace clippy, workspace tests, shared version checks, changelog presence checks, and `openipc-web` WASM target check. |
+| `WASM SDK Package`           | Installs app dependencies, builds the station web app, and dry-runs the generated `@openipc-rs/web` package.                                                                     |
+| `Docs Site`                  | Builds the Docusaurus site.                                                                                                                                                      |
+| `Desktop Check`              | Runs `bun run desktop:check` for Linux x64/arm64, macOS Apple Silicon/Intel, and Windows x64/arm64.                                                                              |
+| `Deploy Station Site`        | Deploys `apps/openipc-station/dist` to Cloudflare Pages on pushes to `master` and `v*` tags.                                                                                     |
+| `Deploy Docs Site`           | Deploys `docs/build` to Cloudflare Pages on pushes to `master` and `v*` tags.                                                                                                    |
+| `Publish Crates.io Packages` | Publishes the workspace crates on `v*` tags.                                                                                                                                     |
+| `Publish WASM SDK To npm`    | Builds `@openipc-rs/web` with Bun and publishes it with npm trusted publishing on `v*` tags.                                                                                     |
+| `Desktop Release`            | Uses `tauri-apps/tauri-action` to build and upload desktop bundles to the GitHub Release on `v*` tags.                                                                           |
 
 ## Event Behavior
 
-| Event | Validation | Deploys | Publishes |
-| --- | --- | --- | --- |
-| Pull request | yes | no | no |
-| Push to `master` | yes | station and docs | no |
-| Push tag `v0.2.0` | yes | station and docs | crates.io, npm, GitHub Release desktop artifacts |
-| Manual dispatch | validation jobs | no deploy unless it is also a push ref | no |
+| Event             | Validation      | Deploys                                | Publishes                                        |
+| ----------------- | --------------- | -------------------------------------- | ------------------------------------------------ |
+| Pull request      | yes             | no                                     | no                                               |
+| Push to `master`  | yes             | station and docs                       | no                                               |
+| Push tag `v0.2.0` | yes             | station and docs                       | crates.io, npm, GitHub Release desktop artifacts |
+| Manual dispatch   | validation jobs | no deploy unless it is also a push ref | no                                               |
 
 `cargo release` creates a release commit on `master` and a `v*` tag. GitHub
 sees those as separate push events. With the current workflow, the release
@@ -46,14 +46,14 @@ Pushes to tags like `v0.2.0` run the release publishing jobs after validation:
 
 Desktop release targets:
 
-| Release label | GitHub runner | Rust target |
-| --- | --- | --- |
-| `linux-x64` | `ubuntu-24.04` | `x86_64-unknown-linux-gnu` |
-| `linux-arm64` | `ubuntu-24.04-arm` | `aarch64-unknown-linux-gnu` |
-| `macos-apple-silicon` | `macos-15` | `aarch64-apple-darwin` |
-| `macos-intel` | `macos-15-intel` | `x86_64-apple-darwin` |
-| `windows-x64` | `windows-2025` | `x86_64-pc-windows-msvc` |
-| `windows-arm64` | `windows-11-arm` | `aarch64-pc-windows-msvc` |
+| Release label         | GitHub runner      | Rust target                 |
+| --------------------- | ------------------ | --------------------------- |
+| `linux-x64`           | `ubuntu-24.04`     | `x86_64-unknown-linux-gnu`  |
+| `linux-arm64`         | `ubuntu-24.04-arm` | `aarch64-unknown-linux-gnu` |
+| `macos-apple-silicon` | `macos-15`         | `aarch64-apple-darwin`      |
+| `macos-intel`         | `macos-15-intel`   | `x86_64-apple-darwin`       |
+| `windows-x64`         | `windows-2025`     | `x86_64-pc-windows-msvc`    |
+| `windows-arm64`       | `windows-11-arm`   | `aarch64-pc-windows-msvc`   |
 
 Linux releases are built on Ubuntu runners and use Tauri's Linux bundle targets
 from that host, such as AppImage, Debian package, and RPM package. This is not a

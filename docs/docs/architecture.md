@@ -11,7 +11,7 @@ not reimplement the OpenIPC packet stack in different languages.
 ```mermaid
 flowchart LR
     subgraph Shared["Shared Rust crates"]
-        Core["openipc-core<br/>WFB, FEC, RTP, Annex-B"]
+        Core["openipc-core<br/>WFB, FEC, RTP, Annex-B, raw payloads"]
         Rtl["openipc-rtl88xx<br/>Realtek USB HAL"]
     end
 
@@ -20,7 +20,7 @@ flowchart LR
     Browser["Browser UI<br/>React + WebUSB permission"] --> Wasm["openipc-web<br/>wasm-bindgen"]
     Wasm --> Rtl
     Rtl --> Core
-    Core --> Output["Annex-B frames<br/>metrics<br/>adaptive feedback"]
+    Core --> Output["Annex-B frames<br/>raw payload bytes<br/>metrics<br/>adaptive feedback"]
     Output --> Players["WebCodecs<br/>UDP/file output<br/>recording"]
 ```
 
@@ -30,6 +30,9 @@ flowchart LR
 - OpenIPC/WFB 802.11 frame filtering.
 - WFB session-key handling, data decryption, FEC recovery, and counters.
 - RTP parsing and H.264/H.265 depacketization into Annex-B frames.
+- Generic recovered-payload taps for non-video WFB radio ports. The core crate
+  returns bytes and packet sequence metadata; application crates decide whether
+  those bytes are MAVLink, MSP, CRSF, IP, or something else.
 - Adaptive-link quality windows and feedback packet construction.
 - WFB uplink encryption, FEC parity generation, and 802.11 wrapping.
 - Realtek TX descriptor construction for monitor-injection packets.
@@ -81,6 +84,8 @@ flowchart TD
     E --> F["RTP depacketizer"]
     F --> G["Annex-B H.264/H.265 frames"]
     G --> H["WebCodecs, file output, or UDP mirror"]
+    E --> I["PayloadPipeline"]
+    I --> J["raw telemetry/data bytes"]
 ```
 
 Adaptive-link feedback flows the other direction:

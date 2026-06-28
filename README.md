@@ -9,7 +9,7 @@ desktop.
 ## Repository
 
 ```text
-crates/openipc-core       WFB, RTP, FEC, crypto, video packet pipeline
+crates/openipc-core       WFB, RTP, FEC, crypto, video and raw payload pipeline
 crates/openipc-rtl88xx    Realtek rtl88xx USB WiFi driver
 crates/openipc-native     Native CLI and library adapter
 crates/openipc-web        wasm-bindgen package for browser/WebUSB apps
@@ -20,13 +20,13 @@ scripts                   cleanup helpers
 
 ## Packages
 
-| Package | Link | What it is |
-| --- | --- | --- |
-| `openipc-core` | [crates.io](https://crates.io/crates/openipc-core) | Shared protocol code: WFB, FEC, RTP, crypto, video frame extraction, adaptive-link packet logic. |
-| `openipc-rtl88xx` | [crates.io](https://crates.io/crates/openipc-rtl88xx) | Realtek rtl88xx USB WiFi driver/HAL for monitor receive and adaptive-link transmit. |
-| `openipc-native` | [crates.io](https://crates.io/crates/openipc-native) | Native CLI/library adapter around the driver and receive pipeline. |
-| `openipc-web` | [crates.io](https://crates.io/crates/openipc-web) | Rust/WASM bindings for browser WebUSB applications. |
-| `@openipc-rs/web` | [npm](https://www.npmjs.com/package/@openipc-rs/web) | Generated npm package from `openipc-web`, with WASM, JS glue, and TypeScript definitions. |
+| Package           | Link                                                  | What it is                                                                                                                 |
+| ----------------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `openipc-core`    | [crates.io](https://crates.io/crates/openipc-core)    | Shared protocol code: WFB, FEC, RTP, crypto, video frame extraction, generic raw payload taps, adaptive-link packet logic. |
+| `openipc-rtl88xx` | [crates.io](https://crates.io/crates/openipc-rtl88xx) | Realtek rtl88xx USB WiFi driver/HAL for monitor receive and adaptive-link transmit.                                        |
+| `openipc-native`  | [crates.io](https://crates.io/crates/openipc-native)  | Native CLI/library adapter around the driver and receive pipeline.                                                         |
+| `openipc-web`     | [crates.io](https://crates.io/crates/openipc-web)     | Rust/WASM bindings for browser WebUSB applications.                                                                        |
+| `@openipc-rs/web` | [npm](https://www.npmjs.com/package/@openipc-rs/web)  | Generated npm package from `openipc-web`, with WASM, JS glue, and TypeScript definitions.                                  |
 
 ## Quick Start
 
@@ -56,6 +56,17 @@ cd apps/openipc-station
 bun install
 bun run desktop:dev
 ```
+
+Start the Tauri Android shell setup:
+
+```sh
+cd apps/openipc-station
+bun run android:init
+```
+
+Android USB discovery must use Android `UsbManager`; the Rust backend accepts an
+authorized USB file descriptor through the Tauri `openipc_connect_from_fd`
+command.
 
 Use the native CLI:
 

@@ -68,7 +68,8 @@ function readWasmBindgenVersion() {
 }
 
 function wasmBindgenBinary() {
-  const executable = process.platform === "win32" ? "wasm-bindgen.exe" : "wasm-bindgen";
+  const executable =
+    process.platform === "win32" ? "wasm-bindgen.exe" : "wasm-bindgen";
   return join(rootDir, ".cargo-tools", "bin", executable);
 }
 
@@ -86,9 +87,14 @@ function installedWasmBindgenVersion(binary) {
 async function copyPackageMetadata() {
   mkdirSync(pkgDir, { recursive: true });
 
-  const packageJson = JSON.parse(readFileSync(join(crateDir, "package.json"), "utf8"));
+  const packageJson = JSON.parse(
+    readFileSync(join(crateDir, "package.json"), "utf8"),
+  );
   delete packageJson.scripts;
-  writeFileSync(join(pkgDir, "package.json"), `${JSON.stringify(packageJson, null, 2)}\n`);
+  writeFileSync(
+    join(pkgDir, "package.json"),
+    `${JSON.stringify(packageJson, null, 2)}\n`,
+  );
 
   await copyFile(join(crateDir, "README.md"), join(pkgDir, "README.md"));
   await copyFile(join(rootDir, "LICENSE"), join(pkgDir, "LICENSE"));
@@ -116,8 +122,18 @@ async function main() {
 
   ensureWasmTarget();
 
-  if (process.env.OPENIPC_RS_USE_WASM_PACK === "1" && commandExists("wasm-pack")) {
-    run("wasm-pack", ["build", crateDir, "--target", "web", "--out-dir", "pkg"]);
+  if (
+    process.env.OPENIPC_RS_USE_WASM_PACK === "1" &&
+    commandExists("wasm-pack")
+  ) {
+    run("wasm-pack", [
+      "build",
+      crateDir,
+      "--target",
+      "web",
+      "--out-dir",
+      "pkg",
+    ]);
     await copyPackageMetadata();
     return;
   }
@@ -135,9 +151,22 @@ async function main() {
     ]);
   }
 
-  run("cargo", ["build", "-p", "openipc-web", "--target", "wasm32-unknown-unknown", "--release"]);
+  run("cargo", [
+    "build",
+    "-p",
+    "openipc-web",
+    "--target",
+    "wasm32-unknown-unknown",
+    "--release",
+  ]);
   run(wasmBindgen, [
-    join(rootDir, "target", "wasm32-unknown-unknown", "release", "openipc_web.wasm"),
+    join(
+      rootDir,
+      "target",
+      "wasm32-unknown-unknown",
+      "release",
+      "openipc_web.wasm",
+    ),
     "--target",
     "web",
     "--out-dir",

@@ -1,83 +1,45 @@
-import { AppHeader } from "@/components/openipc/app-header";
-import { SettingsPanel } from "@/components/openipc/settings-panel";
-import { VideoPanel } from "@/components/openipc/video-panel";
-import { useOpenIpcRuntime } from "@/hooks/use-openipc-runtime";
+import { CommandBar } from "@/components/station/command-bar";
+import { Inspector } from "@/components/station/inspector";
+import { VideoPanel } from "@/components/station/video-panel";
+import { useStation } from "@/lib/use-station";
 import { isTauriRuntime } from "@/runtime/tauri";
 
 export default function App() {
-    if (import.meta.env.MODE === "desktop" && !isTauriRuntime()) {
-        return (
-            <main className="grid min-h-svh place-items-center bg-background p-6 text-foreground">
-                <section className="max-w-md text-center">
-                    <h1 className="text-2xl font-semibold">
-                        OpenIPC Station Desktop
-                    </h1>
-                    <p className="mt-3 text-sm text-muted-foreground">
-                        This development server is reserved for the Tauri
-                        desktop window.
-                    </p>
-                </section>
-            </main>
-        );
-    }
+  if (import.meta.env.MODE === "desktop" && !isTauriRuntime()) {
+    return (
+      <main className="grid min-h-svh place-items-center bg-background p-6 text-foreground">
+        <section className="max-w-md text-center">
+          <h1 className="text-2xl font-semibold">OpenIPC Station Desktop</h1>
+          <p className="mt-3 text-sm text-muted-foreground">
+            This development server is reserved for the Tauri desktop window.
+          </p>
+        </section>
+      </main>
+    );
+  }
 
-    return <OpenIpcApp />;
+  return <OpenIpcStation />;
 }
 
-function OpenIpcApp() {
-    const openipc = useOpenIpcRuntime();
+function OpenIpcStation() {
+  const api = useStation();
 
-    return (
-        <main className="grid min-h-svh grid-rows-[auto_minmax(0,1fr)] bg-background text-foreground">
-            <AppHeader
-                canStart={openipc.canStart}
-                onConnect={openipc.actions.connectUsb}
-                onStart={openipc.actions.startRx}
-                onStop={openipc.actions.stopRx}
-                onToggleRecording={openipc.actions.toggleRecording}
-                recording={openipc.recording}
-                running={openipc.running}
-                runtime={openipc.runtime}
-                statusLabel={openipc.statusLabel}
-                wasmReady={openipc.wasmReady}
-            />
+  return (
+    <div className="flex min-h-svh flex-col bg-background text-foreground lg:h-svh lg:overflow-hidden">
+      <CommandBar api={api} />
 
-            <section className="grid min-h-0 grid-cols-1 lg:grid-cols-[minmax(420px,1fr)_300px] xl:grid-cols-[minmax(560px,1fr)_320px]">
-                <VideoPanel
-                    activeResolution={openipc.activeResolution}
-                    canvasRef={openipc.canvasRef}
-                    diagnostics={openipc.diagnostics}
-                    fecRecovered={openipc.fecRecovered}
-                    linkQuality={openipc.linkQuality}
-                    metrics={openipc.metrics}
-                    onResetCounters={openipc.actions.resetCounters}
-                    packetLoss={openipc.packetLoss}
-                    recording={openipc.recording}
-                    videoStats={openipc.videoStats}
-                    webCodecsSupported={openipc.webCodecsSupported}
-                />
+      <main className="flex min-h-0 flex-1 flex-col gap-3 p-3 lg:flex-row lg:items-start lg:overflow-hidden lg:p-4">
+        <section className="flex min-w-0 flex-1 flex-col lg:min-h-0 lg:overflow-y-auto">
+          <div id="video-region" className="bg-background">
+            <VideoPanel api={api} />
+          </div>
+        </section>
 
-                <SettingsPanel
-                    authorizedDevices={openipc.authorizedDevices}
-                    desktopRuntime={openipc.desktopRuntime}
-                    diagnostics={openipc.diagnostics}
-                    fullscreen={openipc.fullscreen}
-                    keyName={openipc.keyName}
-                    logs={openipc.logs}
-                    metrics={openipc.metrics}
-                    onCloseDecoder={openipc.actions.closeDecoder}
-                    onLoadKey={openipc.actions.loadKey}
-                    onRefreshDevices={openipc.actions.refreshAuthorizedDevices}
-                    onSetFullscreen={openipc.actions.setFullscreen}
-                    running={openipc.running}
-                    selectedDeviceKnown={openipc.selectedDeviceKnown}
-                    setSettings={openipc.setSettings}
-                    settings={openipc.settings}
-                    videoStats={openipc.videoStats}
-                    wasmReady={openipc.wasmReady}
-                    webUsbSupported={openipc.webUsbSupported}
-                />
-            </section>
-        </main>
-    );
+        <Inspector
+          api={api}
+          className="w-full shrink-0 lg:max-h-[calc(100svh-5rem)] lg:w-[400px] lg:self-start"
+        />
+      </main>
+    </div>
+  );
 }

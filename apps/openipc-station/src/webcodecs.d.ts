@@ -1,5 +1,6 @@
 type EncodedVideoChunkType = "key" | "delta";
-type HardwareAcceleration = "no-preference" | "prefer-hardware" | "prefer-software";
+type HardwareAcceleration =
+  "no-preference" | "prefer-hardware" | "prefer-software";
 type AvcBitstreamFormat = "annexb" | "avc";
 type HevcBitstreamFormat = "annexb" | "hevc";
 
@@ -44,7 +45,9 @@ interface VideoDecoderInit {
 
 declare class VideoDecoder {
   constructor(init: VideoDecoderInit);
-  static isConfigSupported(config: VideoDecoderConfig): Promise<VideoDecoderSupport>;
+  static isConfigSupported(
+    config: VideoDecoderConfig,
+  ): Promise<VideoDecoderSupport>;
   readonly decodeQueueSize: number;
   readonly state: "unconfigured" | "configured" | "closed";
   close(): void;

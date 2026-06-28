@@ -31,12 +31,18 @@ export function inspectAnnexBFrame(
   const codec = preference === "auto" ? detectCodec(frame, units) : preference;
   return {
     codec,
-    codecString: codec === "h264" ? h264CodecString(frame, units) : DEFAULT_H265_CODEC,
-    isKeyFrame: codec === "h264" ? isH264KeyFrame(frame, units) : isH265KeyFrame(frame, units),
+    codecString:
+      codec === "h264" ? h264CodecString(frame, units) : DEFAULT_H265_CODEC,
+    isKeyFrame:
+      codec === "h264"
+        ? isH264KeyFrame(frame, units)
+        : isH265KeyFrame(frame, units),
   };
 }
 
-export function frameInfoFromPacket(packet: OpenIpcVideoFrameLike): AnnexBFrameInfo {
+export function frameInfoFromPacket(
+  packet: OpenIpcVideoFrameLike,
+): AnnexBFrameInfo {
   return {
     codec: packet.codec,
     codecString: codecStringFor(packet.codec, packet.codecString),
@@ -61,7 +67,10 @@ export function formatBitrate(bitsPerSecond: number): string {
   return `${(bitsPerSecond / 1_000_000).toFixed(2)} Mbps`;
 }
 
-function codecStringFor(codec: DetectedVideoCodec, codecString: string): string {
+function codecStringFor(
+  codec: DetectedVideoCodec,
+  codecString: string,
+): string {
   if (codec === "h264") {
     return codecString.startsWith("avc1.") ? codecString : DEFAULT_H264_CODEC;
   }
@@ -131,9 +140,13 @@ function looksLikeH265Header(frame: Uint8Array, unit: NalUnit): boolean {
   const first = frame[unit.offset] ?? 0;
   const second = frame[unit.offset + 1] ?? 0;
   const nalType = (first >> 1) & 0x3f;
-  const layerIdHighBitClear = first === (nalType << 1);
+  const layerIdHighBitClear = first === nalType << 1;
   const temporalIdPlusOnePresent = (second & 0x07) > 0;
-  return unit.offset + 1 < unit.end && layerIdHighBitClear && temporalIdPlusOnePresent;
+  return (
+    unit.offset + 1 < unit.end &&
+    layerIdHighBitClear &&
+    temporalIdPlusOnePresent
+  );
 }
 
 function annexBUnits(frame: Uint8Array): NalUnit[] {

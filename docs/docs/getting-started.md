@@ -35,8 +35,8 @@ browser-gated, so the device picker must be opened from a user click.
 Run the same basic checks you will see in CI:
 
 ```sh
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --no-deps -- -D warnings
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets
 cargo check -p openipc-web --target wasm32-unknown-unknown
 ```

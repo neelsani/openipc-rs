@@ -40,6 +40,7 @@ flowchart TD
     G --> H["OpenIpcReceiver.pushRxTransferProfiled"]
     H --> I["OpenIpcVideoFrame[]"]
     I --> J["WebCodecs VideoDecoder"]
+    H --> K["raw payload bytes"]
 ```
 
 1. React calls `navigator.usb.requestDevice` from a user gesture.
@@ -48,7 +49,8 @@ flowchart TD
 4. Rust/WASM uses `nusb` to claim interface 0 and discover endpoints.
 5. The shared Rust Realtek HAL initializes monitor mode and channel settings.
 6. Bulk-IN transfer bytes feed the same Rust receiver pipeline used by native.
-7. Rust/WASM returns structured video frames, link metrics, and debug metrics.
+7. Rust/WASM returns structured video frames, recovered raw payload bytes for
+   the configured telemetry port, link metrics, and debug metrics.
 8. React sends frames to WebCodecs and renders the decoded output.
 
 ## What Crosses The JS/WASM Boundary
@@ -57,14 +59,19 @@ The browser path keeps high-volume protocol work in Rust:
 
 1. JavaScript passes one USB transfer buffer to `OpenIpcReceiver`.
 2. Rust parses Realtek descriptors, filters packets, decrypts WFB, performs FEC
-   recovery, parses RTP, and emits encoded video frames.
-3. JavaScript receives only frame objects and metrics, then feeds compressed
-   bytes to WebCodecs.
+   recovery, parses RTP for the video channel, and emits encoded video frames.
+3. Rust also watches a non-video payload channel and returns recovered bytes
+   without parsing the application protocol. The current SDK names this
+   convenience output `mavlinkPayloads` because it defaults to the observed
+   OpenIPC MAVLink downlink port.
+4. JavaScript receives frame objects, raw telemetry payloads, and metrics, then
+   feeds compressed video bytes to WebCodecs.
 
 The app does not pass every RTP packet back and forth. It does pass each USB
-transfer into WASM and each completed encoded frame back out. That is the right
-boundary for the current browser design because WebCodecs owns the decoded
-`VideoFrame` lifecycle.
+transfer into WASM, each completed encoded frame back out, and each recovered
+telemetry/data payload back out. That is the right boundary for the current
+browser design because WebCodecs owns the decoded `VideoFrame` lifecycle and
+telemetry parsing is left to application code.
 
 ## WebCodecs Boundary
 

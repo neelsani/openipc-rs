@@ -17,6 +17,9 @@ export type Metrics = {
   bytes: number;
   lastTransferBytes: number;
   lastFrameBytes: number;
+  mavlinkPayloads: number;
+  mavlinkBytes: number;
+  lastMavlinkBytes: number;
   errors: number;
   adaptiveTxFrames: number;
   adaptiveTxErrors: number;
@@ -34,6 +37,23 @@ export type VideoStats = {
   decodedFrames: number;
   decoderErrors: number;
   decoderQueueSize: number;
+};
+
+export type CodecCapability = {
+  supported: boolean | null;
+  codec: string;
+  config: string;
+  error?: string;
+};
+
+export type WebCodecsCapabilities = {
+  videoDecoder: boolean;
+  encodedVideoChunk: boolean;
+  secureContext: boolean;
+  h264: CodecCapability;
+  h265: CodecCapability;
+  userAgent: string;
+  checkedAt: string;
 };
 
 export type DiagnosticStageId =
@@ -74,6 +94,8 @@ export type DiagnosticTransferStats = {
   wfbPayloads: number;
   rtpPackets: number;
   videoFrames: number;
+  mavlinkPayloads: number;
+  mavlinkBytes: number;
 };
 
 export type DiagnosticEvent = {

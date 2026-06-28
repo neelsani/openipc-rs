@@ -23,7 +23,9 @@ type TauriApi = {
 };
 
 let tauriApiPromise: Promise<TauriApi> | null = null;
-let tauriWindowPromise: Promise<import("@tauri-apps/api/window").Window> | null = null;
+let tauriWindowPromise: Promise<
+  import("@tauri-apps/api/window").Window
+> | null = null;
 
 export function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && TAURI_INTERNALS_KEY in window;
@@ -44,8 +46,8 @@ async function tauriApi(): Promise<TauriApi> {
 
 async function tauriWindow(): Promise<import("@tauri-apps/api/window").Window> {
   if (!tauriWindowPromise) {
-    tauriWindowPromise = import("@tauri-apps/api/window").then(({ getCurrentWindow }) =>
-      getCurrentWindow(),
+    tauriWindowPromise = import("@tauri-apps/api/window").then(
+      ({ getCurrentWindow }) => getCurrentWindow(),
     );
   }
   return tauriWindowPromise;
@@ -57,6 +59,14 @@ export type TauriConnectRequest = {
   channelOffset: number;
   skipReset?: boolean;
   deviceId?: string;
+};
+
+export type TauriConnectFromFdRequest = TauriConnectRequest & {
+  fd: number;
+  vendorId?: number;
+  productId?: number;
+  product?: string;
+  manufacturer?: string;
 };
 
 export type TauriConnectReport = {
@@ -83,8 +93,18 @@ export type TauriVideoFramePayload = {
   timestamp: number;
 };
 
-export type TauriRxBatchPayload = Omit<OpenIpcRxTransferProfile, "frames"> & {
+export type TauriRawPayloadPayload = {
+  dataBase64: string;
+  packetSeq: string;
+  channelId: number;
+};
+
+export type TauriRxBatchPayload = Omit<
+  OpenIpcRxTransferProfile,
+  "frames" | "mavlinkPayloads"
+> & {
   frames: TauriVideoFramePayload[];
+  mavlinkPayloads: TauriRawPayloadPayload[];
   fecCounters: FecCounters;
   linkQuality: LinkQualityReport | null;
   adaptiveTxFrames: number;
@@ -111,12 +131,23 @@ export async function tauriListDevices(): Promise<AuthorizedUsbDevice[]> {
   return invoke("openipc_list_devices");
 }
 
-export async function tauriConnect(request: TauriConnectRequest): Promise<TauriConnectReport> {
+export async function tauriConnect(
+  request: TauriConnectRequest,
+): Promise<TauriConnectReport> {
   const { invoke } = await tauriApi();
   return invoke("openipc_connect", { request });
 }
 
-export async function tauriStartRx(request: TauriStartRxRequest): Promise<void> {
+export async function tauriConnectFromFd(
+  request: TauriConnectFromFdRequest,
+): Promise<TauriConnectReport> {
+  const { invoke } = await tauriApi();
+  return invoke("openipc_connect_from_fd", { request });
+}
+
+export async function tauriStartRx(
+  request: TauriStartRxRequest,
+): Promise<void> {
   const { invoke } = await tauriApi();
   await invoke("openipc_start_rx", { request });
 }

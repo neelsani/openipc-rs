@@ -9,6 +9,7 @@ pub enum RadioPort {
     Video,
     MavlinkRx,
     MavlinkTx,
+    DataRx,
     Custom(u8),
 }
 
@@ -16,8 +17,9 @@ impl RadioPort {
     pub const fn as_u8(self) -> u8 {
         match self {
             Self::Video => 0,
-            Self::MavlinkRx => 32,
+            Self::MavlinkRx => 0x10,
             Self::MavlinkTx => 160,
+            Self::DataRx => 32,
             Self::Custom(value) => value,
         }
     }
@@ -57,5 +59,13 @@ mod tests {
         let id = ChannelId::default_video();
         assert_eq!(id.raw(), (DEFAULT_LINK_ID << 8));
         assert_eq!(id.to_be_bytes(), id.raw().to_be_bytes());
+    }
+
+    #[test]
+    fn radio_ports_match_openipc_ground_station_conventions() {
+        assert_eq!(RadioPort::Video.as_u8(), 0x00);
+        assert_eq!(RadioPort::MavlinkRx.as_u8(), 0x10);
+        assert_eq!(RadioPort::DataRx.as_u8(), 0x20);
+        assert_eq!(RadioPort::MavlinkTx.as_u8(), 0xa0);
     }
 }

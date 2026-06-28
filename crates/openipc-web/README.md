@@ -13,6 +13,8 @@ JavaScript:
 - WFB session/decryption/FEC handling
 - RTP depacketization
 - H.264/H.265 Annex-B frame output for WebCodecs
+- Recovered raw payload bytes for the default MAVLink downlink convenience tap
+  via `mavlinkPayloads`
 - Adaptive-link feedback helpers
 - WebUSB Realtek device access
 - Realtek diagnostics and calibration hooks: false-alarm counters, PHYDM DIG
@@ -52,9 +54,18 @@ await init();
 const filters = JSON.parse(supportedUsbFilters());
 const usbDevice = await navigator.usb.requestDevice({ filters });
 const radio = await WebUsbRealtekDevice.fromWebUsbDevice(usbDevice);
-const receiver = OpenIpcReceiver.withKeypair(channelId, keypairBytes, minimumEpoch);
+const receiver = OpenIpcReceiver.withKeypair(
+  channelId,
+  keypairBytes,
+  minimumEpoch,
+);
 
-await radio.initializeMonitorWithOptions(channel, channelWidthMhz, channelOffset, false);
+await radio.initializeMonitorWithOptions(
+  channel,
+  channelWidthMhz,
+  channelOffset,
+  false,
+);
 
 while (running) {
   const transfers = await radio.readRxTransfers(32768, 4);
@@ -64,9 +75,21 @@ while (running) {
       // frame.data is encoded H.264/H.265 Annex-B data.
       // Feed it into WebCodecs as an EncodedVideoChunk.
     }
+
+    for (const payload of batch.mavlinkPayloads) {
+      // payload.data is raw recovered bytes from the OpenIPC MAVLink RX port.
+      // The SDK does not parse or forward MAVLink for you.
+      console.log(payload.channelId.toString(16), payload.data.byteLength);
+    }
   }
 }
 ```
+
+The `mavlinkPayloads` field is named for the default OpenIPC downlink port that
+the browser SDK watches. The underlying Rust core is generic: `PayloadPipeline`
+can recover bytes from `RadioPort::MavlinkRx`, `RadioPort::DataRx`, or
+`RadioPort::Custom(n)`. Parse MAVLink, MSP, CRSF, IP, or vendor data in your app
+layer.
 
 Use `fromWebUsbDeviceWithOptions(device, txEndpointOverride)` if a hardware
 variant needs a specific bulk-OUT endpoint. Pass `-1` for the default endpoint
@@ -81,12 +104,12 @@ await radio.initializeMonitorAdvanced(
   channel,
   channelWidthMhz,
   channelOffset,
-  false,     // acceptBadFcs
-  false,     // skipTxPower
-  false,     // forceIqk
-  false,     // disableIqk
-  "kernel",  // RTL8814 firmware path: "kernel" or "rtw88"
-  -1,        // RTL8814 chunk override; -1 means default
+  false, // acceptBadFcs
+  false, // skipTxPower
+  false, // forceIqk
+  false, // disableIqk
+  "kernel", // RTL8814 firmware path: "kernel" or "rtw88"
+  -1, // RTL8814 chunk override; -1 means default
 );
 ```
 
@@ -149,8 +172,18 @@ async function ensureDecoder(frame: OpenIpcVideoFrame): Promise<boolean> {
 
   const config: VideoDecoderConfig =
     frame.codec === "h264"
-      ? { codec, avc: { format: "annexb" }, hardwareAcceleration: "prefer-hardware", optimizeForLatency: true }
-      : { codec, hevc: { format: "annexb" }, hardwareAcceleration: "prefer-hardware", optimizeForLatency: true };
+      ? {
+          codec,
+          avc: { format: "annexb" },
+          hardwareAcceleration: "prefer-hardware",
+          optimizeForLatency: true,
+        }
+      : {
+          codec,
+          hevc: { format: "annexb" },
+          hardwareAcceleration: "prefer-hardware",
+          optimizeForLatency: true,
+        };
 
   const support = await VideoDecoder.isConfigSupported(config);
   if (!support.supported) {
@@ -194,7 +227,11 @@ await init();
 const filters = JSON.parse(supportedUsbFilters());
 const usbDevice = await navigator.usb.requestDevice({ filters });
 const radio = await WebUsbRealtekDevice.fromWebUsbDevice(usbDevice);
-const receiver = OpenIpcReceiver.withKeypair(channelId, keypairBytes, minimumEpoch);
+const receiver = OpenIpcReceiver.withKeypair(
+  channelId,
+  keypairBytes,
+  minimumEpoch,
+);
 
 await radio.initializeMonitor(channel, channelWidthMhz, channelOffset);
 

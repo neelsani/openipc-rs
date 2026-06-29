@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.18 - 2026-06-29
+
+### Changes
+- Ensure usb perms android (d362ecd)
+
+### Fixes
+- Fix fus (ea746bb)
+
+
 ## 0.1.17 - 2026-06-29
 
 

@@ -21,15 +21,16 @@ pushes to `master`, `v*` tags, and manual dispatch.
 | `Publish Crates.io Packages` | Publishes the workspace crates on `v*` tags.                                                                                                                                     |
 | `Publish WASM SDK To npm`    | Builds `@openipc-rs/web` with Bun and publishes it with npm trusted publishing on `v*` tags.                                                                                     |
 | `Desktop Release`            | Uses `tauri-apps/tauri-action` to build and upload desktop bundles to the GitHub Release on `v*` tags.                                                                           |
+| `Android Release`            | Builds unsigned aarch64 Android APK/AAB artifacts with the Tauri CLI and uploads them to the GitHub Release on `v*` tags.                                                        |
 
 ## Event Behavior
 
-| Event             | Validation      | Deploys                                | Publishes                                        |
-| ----------------- | --------------- | -------------------------------------- | ------------------------------------------------ |
-| Pull request      | yes             | no                                     | no                                               |
-| Push to `master`  | yes             | station and docs                       | no                                               |
-| Push tag `v0.2.0` | yes             | station and docs                       | crates.io, npm, GitHub Release desktop artifacts |
-| Manual dispatch   | validation jobs | no deploy unless it is also a push ref | no                                               |
+| Event             | Validation      | Deploys                                | Publishes                                                    |
+| ----------------- | --------------- | -------------------------------------- | ------------------------------------------------------------ |
+| Pull request      | yes             | no                                     | no                                                           |
+| Push to `master`  | yes             | station and docs                       | no                                                           |
+| Push tag `v0.2.0` | yes             | station and docs                       | crates.io, npm, GitHub Release desktop and Android artifacts |
+| Manual dispatch   | validation jobs | no deploy unless it is also a push ref | no                                                           |
 
 `cargo release` creates a release commit on `master` and a `v*` tag. GitHub
 sees those as separate push events. With the current workflow, the release
@@ -44,7 +45,9 @@ Pushes to tags like `v0.2.0` run the release publishing jobs after validation:
 - `@openipc-rs/web` builds with Bun and publishes to npm with npm trusted
   publishing,
 - Tauri builds desktop bundles and uploads them to the GitHub Release for that
-  tag.
+  tag,
+- Tauri builds unsigned Android aarch64 APK/AAB artifacts and uploads them to
+  the same GitHub Release after the desktop release job succeeds.
 
 Desktop release targets:
 
@@ -60,6 +63,12 @@ Desktop release targets:
 Linux releases are built on Ubuntu runners and use Tauri's Linux bundle targets
 from that host, such as AppImage, Debian package, and RPM package. This is not a
 separate build per Linux distribution.
+
+Android release target:
+
+| Release label   | GitHub runner   | Android/Rust target     | Artifacts        |
+| --------------- | --------------- | ----------------------- | ---------------- |
+| `android-arm64` | `ubuntu-latest` | `aarch64-linux-android` | unsigned APK/AAB |
 
 Required repository secret:
 
@@ -81,6 +90,15 @@ openipc-rs-station-[platform]-[arch]-[version].[ext]
 macOS bundles are ad-hoc signed with `signingIdentity = "-"`. Release bundles
 are not notarized unless Apple signing and notarization credentials are added
 later.
+
+The Android release job also uses the built-in `GITHUB_TOKEN`. It does not use
+Android signing credentials yet; uploaded APKs are unsigned and named like:
+
+```text
+openipc-rs-station-android-arm64-[version]-unsigned.apk
+openipc-rs-station-android-arm64-[version].aab
+SHA256SUMS-android-arm64.txt
+```
 
 The workspace also contains local `publish = false` crates, including the Tauri
 desktop shell and `tauri-plugin-openipc-usb`. They are checked, tested, and

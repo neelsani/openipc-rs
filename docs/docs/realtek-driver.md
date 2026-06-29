@@ -61,6 +61,15 @@ PixelPilot, and the RTL8821AU vendor IDs mirrored from devourer:
 The chip probe still reads hardware state after opening the device. The table is
 only the first filter used for discovery.
 
+Platform-specific filters are derived from this table:
+
+- the WASM package exports `supportedUsbFilters()` from `SUPPORTED_DEVICES` for
+  `navigator.usb.requestDevice`,
+- the desktop/Tauri backend reports devices through the same driver table and
+  runtime `nusb` discovery,
+- the Android Tauri plugin generates its USB attach XML and Kotlin runtime
+  filter from `SUPPORTED_DEVICES` during its Rust build script.
+
 ## Implemented Operations
 
 - descriptor-driven endpoint discovery,

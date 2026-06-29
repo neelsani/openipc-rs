@@ -62,7 +62,6 @@ import {
   isTauriRuntime,
   listenTauriEvent,
   tauriAndroidUsbCloseDevice,
-  tauriAndroidUsbListDevices,
   tauriAndroidUsbOpenDevice,
   tauriConnect,
   tauriConnectFromFd,
@@ -184,6 +183,15 @@ type FrameTimingContext = {
   loopStartMs: number;
 };
 
+type OpenIpcVideoDecoderConfig = VideoDecoderConfig & {
+  avc?: {
+    format?: "annexb" | "avc";
+  };
+  hevc?: {
+    format?: "annexb" | "hevc";
+  };
+};
+
 function emptyCodecCapability(codec: string): WebCodecsCapabilities["h264"] {
   return {
     supported: null,
@@ -204,7 +212,7 @@ function emptyWebCodecsCapabilities(): WebCodecsCapabilities {
   };
 }
 
-function describeDecoderConfig(config: VideoDecoderConfig): string {
+function describeDecoderConfig(config: OpenIpcVideoDecoderConfig): string {
   const format = config.avc?.format ?? config.hevc?.format ?? "default";
   const hardware = config.hardwareAcceleration ?? "no-preference";
   return `${config.codec} / ${format} / ${hardware}`;
@@ -212,7 +220,7 @@ function describeDecoderConfig(config: VideoDecoderConfig): string {
 
 async function probeCodecSupport(
   label: "h264" | "h265",
-  configs: VideoDecoderConfig[],
+  configs: OpenIpcVideoDecoderConfig[],
 ): Promise<WebCodecsCapabilities["h264"]> {
   let lastError = "";
   let lastUnsupported = configs[0];
@@ -220,7 +228,8 @@ async function probeCodecSupport(
   for (const config of configs) {
     try {
       const support = await VideoDecoder.isConfigSupported(config);
-      const checkedConfig = support.config ?? config;
+      const checkedConfig = (support.config ??
+        config) as OpenIpcVideoDecoderConfig;
       if (support.supported !== false) {
         return {
           supported: true,
@@ -701,15 +710,14 @@ export function useOpenIpcRuntime() {
 
   const refreshAuthorizedDevices = useCallback(async () => {
     if (desktopRuntime) {
-      if (androidTauriRuntime) {
-        const devices = await tauriAndroidUsbListDevices();
-        setAuthorizedDevices(devices);
-        appendLog("info", `Attached Android USB devices: ${devices.length}`);
-        return devices;
-      }
       const devices = await tauriListDevices();
       setAuthorizedDevices(devices);
-      appendLog("info", `Supported native USB devices: ${devices.length}`);
+      appendLog(
+        "info",
+        androidTauriRuntime
+          ? `Attached Android USB devices: ${devices.length}`
+          : `Supported native USB devices: ${devices.length}`,
+      );
       return devices;
     }
     if (!("usb" in navigator)) {
@@ -1004,8 +1012,8 @@ export function useOpenIpcRuntime() {
   function decoderConfigsFor(
     info: AnnexBFrameInfo,
     codecString: string,
-  ): VideoDecoderConfig[] {
-    const base: VideoDecoderConfig = {
+  ): OpenIpcVideoDecoderConfig[] {
+    const base: OpenIpcVideoDecoderConfig = {
       codec: codecString,
       hardwareAcceleration: "prefer-hardware",
       optimizeForLatency: true,
@@ -1022,7 +1030,7 @@ export function useOpenIpcRuntime() {
 
   function decoderConfigFormat(
     info: AnnexBFrameInfo,
-    config: VideoDecoderConfig,
+    config: OpenIpcVideoDecoderConfig,
   ): string {
     if (info.codec === "h264") {
       return config.avc?.format ?? "default";
@@ -1473,6 +1481,7 @@ export function useOpenIpcRuntime() {
             channelWidthMhz: currentSettings.channelWidthMhz,
             channelOffset: currentSettings.channelOffset,
             fd: opened.fd,
+            androidDeviceId: opened.id,
             vendorId: opened.vendorId,
             productId: opened.productId,
             product: opened.product,

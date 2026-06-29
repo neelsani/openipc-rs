@@ -15,4 +15,5 @@ tauri = { version = "2", features = [] }
 thiserror = "2"
 
 [build-dependencies]
+openipc-rtl88xx = { path = "../../crates/openipc-rtl88xx" }
 tauri-plugin = { version = "2", features = ["build"] }

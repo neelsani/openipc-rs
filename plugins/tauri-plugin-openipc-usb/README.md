@@ -21,5 +21,10 @@ Realtek adapters, while runtime access still goes through
 The Realtek driver still lives in `openipc-rtl88xx`. This plugin only bridges
 Android permission and file-descriptor handoff.
 
+Supported USB IDs are not maintained here by hand. `build.rs` generates the
+Android XML filter and Kotlin device list from
+`openipc_rtl88xx::SUPPORTED_DEVICES`, so the driver crate remains the source of
+truth.
+
 The crate is part of the workspace and is versioned with the rest of the repo,
 but it has `publish = false` and is not uploaded to crates.io.

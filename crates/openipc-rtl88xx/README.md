@@ -8,6 +8,11 @@ vendor-control register access, firmware/table loading, monitor-mode setup,
 bulk-IN receive, and bulk-OUT transmit. Packet parsing and WFB/RTP handling live
 in `openipc-core`.
 
+It also owns the supported USB ID table. Native discovery, WebUSB filters, and
+the Android USB attach filter all derive from `SUPPORTED_DEVICES`; other crates
+should call `is_supported_id` or consume that table instead of copying VID/PID
+lists.
+
 ## Supported Scope
 
 - Descriptor-driven endpoint discovery through `nusb`.

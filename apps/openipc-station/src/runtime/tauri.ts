@@ -67,6 +67,7 @@ export type TauriConnectRequest = {
 
 export type TauriConnectFromFdRequest = TauriConnectRequest & {
   fd: number;
+  androidDeviceId?: string;
   vendorId?: number;
   productId?: number;
   product?: string;

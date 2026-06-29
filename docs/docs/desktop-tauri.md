@@ -80,9 +80,23 @@ Android apps should discover devices through Android's own USB APIs:
 5. Call the Tauri command `openipc_connect_from_fd` with that fd plus the usual
    channel settings.
 
+OpenIPC Station includes this bridge as the local Tauri plugin
+`plugins/tauri-plugin-openipc-usb`. The plugin owns the Android library project,
+Kotlin `UsbManager` code, manifest USB-host feature, Rust command wrappers, and
+Tauri permissions. Tauri includes it during Android dev/build like any other
+mobile plugin; no generated `src-tauri/gen/android` source edits are required.
+
+```sh
+cd apps/openipc-station
+bun run android:init
+bun run android:dev
+```
+
 The Rust command duplicates the descriptor with `dup(2)`, then wraps the
-duplicate with `nusb::Device::from_fd`. Android/Kotlin keeps owning the original
-`UsbDeviceConnection`; Rust owns only the duplicate.
+duplicate with `nusb::Device::from_fd`. Android/Kotlin keeps the original
+`UsbDeviceConnection` open until React has called `openipc_connect_from_fd`;
+then React calls the Android close command for the original handle. Rust owns
+only the duplicate after that.
 
 The command shape is:
 
@@ -112,15 +126,13 @@ val connection = manager.openDevice(device)
 val fd = connection.fileDescriptor
 ```
 
-After `bun run android:init`, put the permission and picker code in the
-generated Android project or a small Tauri mobile plugin. The shared Rust
-receive path after `openipc_connect_from_fd` is the same Realtek HAL,
-OpenIPC/WFB/RTP pipeline, adaptive-link feedback path, and WebCodecs UI used by
-desktop Tauri.
+The shared Rust receive path after `openipc_connect_from_fd` is the same Realtek
+HAL, OpenIPC/WFB/RTP pipeline, adaptive-link feedback path, and WebCodecs UI
+used by desktop Tauri.
 
-On Android, `openipc_list_devices` returns the supported Realtek IDs as a
-compatibility hint rather than enumerating attached adapters. The attached-device
-list comes from `UsbManager`.
+On Android, the UI calls `plugin:openipc-usb|list_devices` for attached
+adapters. `openipc_list_devices` remains a compatibility fallback and returns
+the supported Realtek IDs rather than live Android enumeration.
 
 ## Signing
 

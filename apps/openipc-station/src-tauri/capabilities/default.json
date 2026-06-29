@@ -2,5 +2,9 @@
   "identifier": "default",
   "description": "Default OpenIPC Station desktop permissions",
   "windows": ["main"],
-  "permissions": ["core:default", "core:window:allow-set-fullscreen"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-set-fullscreen",
+    "openipc-usb:default"
+  ]
 }

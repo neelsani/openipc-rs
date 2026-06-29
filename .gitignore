@@ -5,6 +5,9 @@
 /apps/openipc-station/dist/
 /apps/openipc-station/.wrangler/
 /apps/openipc-station/src-tauri/gen/
+/plugins/*/android/.tauri/
+/plugins/*/android/build/
+/plugins/*/android/.gradle
 /docs/node_modules/
 /docs/build/
 /docs/.docusaurus/

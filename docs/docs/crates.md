@@ -8,14 +8,15 @@ sidebar_position: 4
 The UI app uses all of these pieces, but library users often only need one or
 two crates.
 
-| Name              | Published As                                          | Use It For                                                                                                                                                                                                                                                                  |
-| ----------------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `openipc-core`    | [crates.io](https://crates.io/crates/openipc-core)    | Parsing Realtek RX aggregates, filtering OpenIPC/WFB frames, decrypting WFB packets, recovering FEC blocks, extracting RTP, building Annex-B H.264/H.265 frames, exposing generic raw payload taps for telemetry/data channels, and creating adaptive-link uplink payloads. |
-| `openipc-rtl88xx` | [crates.io](https://crates.io/crates/openipc-rtl88xx) | Opening supported Realtek USB WiFi adapters, running monitor-mode initialization, reading bulk-IN transfers, sending adaptive-link bulk-OUT packets, and setting TX power overrides.                                                                                        |
-| `openipc-native`  | [crates.io](https://crates.io/crates/openipc-native)  | CLI utilities and a thin native-facing library adapter. This is useful for probes, capture decoding, and reference receive loops.                                                                                                                                           |
-| `openipc-web`     | [crates.io](https://crates.io/crates/openipc-web)     | Rust/WASM bindings. Downstream Rust users normally do not call this directly unless they are building the npm package from source.                                                                                                                                          |
-| `@openipc-rs/web` | [npm](https://www.npmjs.com/package/@openipc-rs/web)  | Browser SDK generated from `openipc-web`: WASM, JavaScript glue, and TypeScript definitions for WebUSB apps.                                                                                                                                                                |
-| `openipc-station` | Not published                                         | The React/Vite station app and Tauri desktop shell under `apps/openipc-station`.                                                                                                                                                                                            |
+| Name                       | Published As                                          | Use It For                                                                                                                                                                                                                                                                  |
+| -------------------------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `openipc-core`             | [crates.io](https://crates.io/crates/openipc-core)    | Parsing Realtek RX aggregates, filtering OpenIPC/WFB frames, decrypting WFB packets, recovering FEC blocks, extracting RTP, building Annex-B H.264/H.265 frames, exposing generic raw payload taps for telemetry/data channels, and creating adaptive-link uplink payloads. |
+| `openipc-rtl88xx`          | [crates.io](https://crates.io/crates/openipc-rtl88xx) | Opening supported Realtek USB WiFi adapters, running monitor-mode initialization, reading bulk-IN transfers, sending adaptive-link bulk-OUT packets, and setting TX power overrides.                                                                                        |
+| `openipc-native`           | [crates.io](https://crates.io/crates/openipc-native)  | CLI utilities and a thin native-facing library adapter. This is useful for probes, capture decoding, and reference receive loops.                                                                                                                                           |
+| `openipc-web`              | [crates.io](https://crates.io/crates/openipc-web)     | Rust/WASM bindings. Downstream Rust users normally do not call this directly unless they are building the npm package from source.                                                                                                                                          |
+| `@openipc-rs/web`          | [npm](https://www.npmjs.com/package/@openipc-rs/web)  | Browser SDK generated from `openipc-web`: WASM, JavaScript glue, and TypeScript definitions for WebUSB apps.                                                                                                                                                                |
+| `openipc-station`          | Not published                                         | The React/Vite station app and Tauri desktop shell under `apps/openipc-station`.                                                                                                                                                                                            |
+| `tauri-plugin-openipc-usb` | Not published                                         | Local Tauri plugin used by Station's Android build to request USB permission through `UsbManager` and hand a file descriptor to the Rust backend.                                                                                                                           |
 
 ## Choosing A Layer
 
@@ -35,13 +36,22 @@ WASM loading boundary and exposes TypeScript-friendly classes such as
 Use `openipc-native` when you want the existing CLI commands or a stable crate
 name that re-exports the native driver API.
 
+`tauri-plugin-openipc-usb` is an app-support crate, not a public SDK. It exists
+because Android apps cannot enumerate USB devices from the normal Linux sysfs
+path that `nusb` uses on desktop. The plugin owns the small Kotlin layer that
+asks Android for permission and opens the adapter; the driver still runs in Rust
+after Station receives the file descriptor.
+
 ## Versioning
 
 The repo uses one lockstep SemVer version across the Rust crates, the npm
 package metadata, the station app, and the docs package. `cargo release` updates
-the Rust manifests, uses `bun pm version --cwd ...` for JavaScript package
-versions, and refreshes `bun.lock` files before it creates the `v*` tag. CI
-publishes crates.io packages and the npm package from that tag.
+the Rust manifests, including the local Tauri plugin, uses
+`bun pm version --cwd ...` for JavaScript package versions, and refreshes
+`bun.lock` files before it creates the `v*` tag. CI publishes the crates.io
+packages and the npm package from that tag. Crates marked `publish = false`,
+such as the desktop shell and Android plugin, are versioned with the workspace
+but are not uploaded to crates.io.
 
 ## Dependency Notes
 

@@ -1,6 +1,6 @@
 use std::fmt;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
 use nusb::MaybeFuture;
 
 use crate::regs::{CHIP_VER_RTL_MASK, CHIP_VER_RTL_SHIFT, RF_TYPE_ID};
@@ -12,6 +12,8 @@ pub const SUPPORTED_DEVICES: &[SupportedDevice] = &[
         ChipFamily::Rtl8812,
         "RTL8812AU / RTL8811AU reference PID",
     ),
+    SupportedDevice::new(0x0bda, 0x881a, ChipFamily::Rtl8812, "RTL8812AU-VS"),
+    SupportedDevice::new(0x0bda, 0x881b, ChipFamily::Rtl8812, "RTL8812AU-VL"),
     SupportedDevice::new(0x0bda, 0x0811, ChipFamily::Rtl8812, "RTL8811AU"),
     SupportedDevice::new(0x0bda, 0xa811, ChipFamily::Rtl8812, "RTL8811AU"),
     SupportedDevice::new(
@@ -19,6 +21,34 @@ pub const SUPPORTED_DEVICES: &[SupportedDevice] = &[
         0xb811,
         ChipFamily::Rtl8812,
         "RTL8811AU / RTL8821AU variant",
+    ),
+    SupportedDevice::new(0x2357, 0x0101, ChipFamily::Rtl8812, "TP-Link Archer T4U"),
+    SupportedDevice::new(0x2357, 0x0103, ChipFamily::Rtl8812, "TP-Link Archer T4UH"),
+    SupportedDevice::new(0x2357, 0x010d, ChipFamily::Rtl8812, "TP-Link Archer T4U v2"),
+    SupportedDevice::new(
+        0x2357,
+        0x010e,
+        ChipFamily::Rtl8812,
+        "TP-Link Archer T4UH v2",
+    ),
+    SupportedDevice::new(
+        0x0b05,
+        0x17d2,
+        ChipFamily::Rtl8812,
+        "ASUS USB-AC56 / RTL8812AU",
+    ),
+    SupportedDevice::new(0x2604, 0x0012, ChipFamily::Rtl8812, "Tenda U12 / RTL8812AU"),
+    SupportedDevice::new(
+        0x0409,
+        0x0408,
+        ChipFamily::Rtl8812,
+        "NEC AtermWL900U / RTL8812AU",
+    ),
+    SupportedDevice::new(
+        0x0586,
+        0x3426,
+        ChipFamily::Rtl8812,
+        "ZyXEL NWD6605 / RTL8812AU",
     ),
     SupportedDevice::new(0x0bda, 0x8813, ChipFamily::Rtl8814, "RTL8814AU"),
     SupportedDevice::new(0x0bda, 0x0820, ChipFamily::Rtl8821, "RTL8821AU"),

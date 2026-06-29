@@ -62,9 +62,9 @@ video-only overlay in the Tauri app, so the OSD stays visible in both modes.
 
 Android uses the same Tauri app shell, but USB discovery is Android-owned. The
 Rust backend cannot enumerate USB adapters from the app sandbox with `nusb`
-today. A generated Android shell or Tauri plugin should use `UsbManager`, ask
-for permission, open the `UsbDeviceConnection`, and pass its file descriptor to
-the `openipc_connect_from_fd` Tauri command.
+today. This app uses the local `tauri-plugin-openipc-usb` plugin, which ships
+the Kotlin `UsbManager` bridge as a normal Tauri mobile plugin instead of
+modifying Tauri's generated Android project.
 
 ```sh
 bun run android:init
@@ -72,6 +72,8 @@ bun run android:dev
 bun run android:build
 ```
 
-The Rust command duplicates the descriptor before handing it to
-`nusb::Device::from_fd`, so Android can keep owning the original
-`UsbDeviceConnection`.
+The plugin uses Android `UsbManager` to list supported Realtek adapters, request
+permission, open a `UsbDeviceConnection`, and pass its file descriptor to the
+Rust `openipc_connect_from_fd` command. Rust duplicates that descriptor before
+handing it to `nusb::Device::from_fd`; the frontend then asks the plugin to
+close the original Android handle.

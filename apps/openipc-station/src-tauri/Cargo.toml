@@ -20,6 +20,7 @@ openipc-core = { path = "../../../crates/openipc-core" }
 openipc-rtl88xx = { path = "../../../crates/openipc-rtl88xx" }
 serde = { version = "1", features = ["derive"] }
 tauri = { version = "2", features = [] }
+tauri-plugin-openipc-usb = { path = "../../../plugins/tauri-plugin-openipc-usb" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 libc = "0.2"

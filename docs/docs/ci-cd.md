@@ -15,6 +15,7 @@ pushes to `master`, `v*` tags, and manual dispatch.
 | `WASM SDK Package`           | Installs app dependencies, builds the station web app, and dry-runs the generated `@openipc-rs/web` package.                                                                     |
 | `Docs Site`                  | Builds the Docusaurus site.                                                                                                                                                      |
 | `Desktop Check`              | Runs `bun run desktop:check` for Linux x64/arm64, macOS Apple Silicon/Intel, and Windows x64/arm64.                                                                              |
+| `Android Check`              | Initializes the generated Tauri Android project and builds an aarch64 debug APK, including the local Android USB plugin Kotlin/Gradle project.                                   |
 | `Deploy Station Site`        | Deploys `apps/openipc-station/dist` to Cloudflare Pages on pushes to `master` and `v*` tags.                                                                                     |
 | `Deploy Docs Site`           | Deploys `docs/build` to Cloudflare Pages on pushes to `master` and `v*` tags.                                                                                                    |
 | `Publish Crates.io Packages` | Publishes the workspace crates on `v*` tags.                                                                                                                                     |
@@ -38,7 +39,8 @@ commit runs the normal `master` path and the tag runs the release path.
 
 Pushes to tags like `v0.2.0` run the release publishing jobs after validation:
 
-- `openipc-*` Rust crates publish to crates.io with `cargo publish --workspace`,
+- publishable `openipc-*` Rust crates publish to crates.io with
+  `cargo publish --workspace`,
 - `@openipc-rs/web` builds with Bun and publishes to npm with npm trusted
   publishing,
 - Tauri builds desktop bundles and uploads them to the GitHub Release for that
@@ -79,6 +81,10 @@ openipc-rs-station-[platform]-[arch]-[version].[ext]
 macOS bundles are ad-hoc signed with `signingIdentity = "-"`. Release bundles
 are not notarized unless Apple signing and notarization credentials are added
 later.
+
+The workspace also contains local `publish = false` crates, including the Tauri
+desktop shell and `tauri-plugin-openipc-usb`. They are checked, tested, and
+versioned with the repo, but they are not crates.io packages.
 
 ## Cloudflare Deployments
 

@@ -14,6 +14,8 @@ crates/openipc-rtl88xx    Realtek rtl88xx USB WiFi driver
 crates/openipc-native     Native CLI and library adapter
 crates/openipc-web        wasm-bindgen package for browser/WebUSB apps
 apps/openipc-station      React/Vite browser app and Tauri desktop app
+plugins/tauri-plugin-openipc-usb
+                          Android USB permission bridge used by Station
 docs                      Docusaurus documentation site
 scripts                   cleanup helpers
 ```
@@ -62,11 +64,13 @@ Start the Tauri Android shell setup:
 ```sh
 cd apps/openipc-station
 bun run android:init
+bun run android:dev
 ```
 
-Android USB discovery must use Android `UsbManager`; the Rust backend accepts an
-authorized USB file descriptor through the Tauri `openipc_connect_from_fd`
-command.
+Android USB discovery uses the local `tauri-plugin-openipc-usb` plugin. The
+plugin asks for permission with Android `UsbManager`, opens the adapter, passes
+the file descriptor to Rust, and the Rust backend continues through
+`nusb::Device::from_fd`.
 
 Use the native CLI:
 

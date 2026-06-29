@@ -31,6 +31,10 @@ export function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && TAURI_INTERNALS_KEY in window;
 }
 
+export function isAndroidTauriRuntime(): boolean {
+  return isTauriRuntime() && /Android/i.test(navigator.userAgent);
+}
+
 async function tauriApi(): Promise<TauriApi> {
   if (!tauriApiPromise) {
     tauriApiPromise = Promise.all([
@@ -73,6 +77,20 @@ export type TauriConnectReport = {
   deviceId: string;
   usbInfo: UsbInfo;
   initReport: InitReport;
+};
+
+export type TauriAndroidUsbDevice = AuthorizedUsbDevice & {
+  id: string;
+};
+
+export type TauriAndroidUsbOpenRequest = {
+  deviceId?: string;
+  vendorId?: number;
+  productId?: number;
+};
+
+export type TauriAndroidUsbOpenedDevice = TauriAndroidUsbDevice & {
+  fd: number;
 };
 
 export type TauriStartRxRequest = {
@@ -143,6 +161,37 @@ export async function tauriConnectFromFd(
 ): Promise<TauriConnectReport> {
   const { invoke } = await tauriApi();
   return invoke("openipc_connect_from_fd", { request });
+}
+
+export async function tauriAndroidUsbListDevices(): Promise<
+  TauriAndroidUsbDevice[]
+> {
+  const { invoke } = await tauriApi();
+  const devices = await invoke<
+    Array<AuthorizedUsbDevice & { deviceId: string }>
+  >("plugin:openipc-usb|list_devices");
+  return devices.map(({ deviceId, ...device }) => ({
+    ...device,
+    id: deviceId,
+  }));
+}
+
+export async function tauriAndroidUsbOpenDevice(
+  request: TauriAndroidUsbOpenRequest,
+): Promise<TauriAndroidUsbOpenedDevice> {
+  const { invoke } = await tauriApi();
+  const { deviceId, ...device } = await invoke<
+    AuthorizedUsbDevice & { fd: number; deviceId: string }
+  >("plugin:openipc-usb|open_device", { request });
+  return {
+    ...device,
+    id: deviceId,
+  };
+}
+
+export async function tauriAndroidUsbCloseDevice(fd: number): Promise<void> {
+  const { invoke } = await tauriApi();
+  await invoke("plugin:openipc-usb|close_device", { request: { fd } });
 }
 
 export async function tauriStartRx(

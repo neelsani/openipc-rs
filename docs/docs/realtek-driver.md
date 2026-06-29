@@ -13,15 +13,25 @@ radio setup, RX parsing, TX descriptors, and TX power.
 ## Supported Device IDs
 
 The source of truth is `SUPPORTED_DEVICES` in the driver crate. The current
-table includes the Realtek reference IDs plus the RTL8821AU vendor IDs mirrored
-from devourer:
+table includes the Realtek reference IDs, common RTL8812AU OEM IDs used by
+PixelPilot, and the RTL8821AU vendor IDs mirrored from devourer:
 
 | VID:PID     | Family Hint | Label                               |
 | ----------- | ----------- | ----------------------------------- |
 | `0bda:8812` | RTL8812     | RTL8812AU / RTL8811AU reference PID |
+| `0bda:881a` | RTL8812     | RTL8812AU-VS                        |
+| `0bda:881b` | RTL8812     | RTL8812AU-VL                        |
 | `0bda:0811` | RTL8812     | RTL8811AU                           |
 | `0bda:a811` | RTL8812     | RTL8811AU                           |
 | `0bda:b811` | RTL8812     | RTL8811AU / RTL8821AU variant       |
+| `2357:0101` | RTL8812     | TP-Link Archer T4U                  |
+| `2357:0103` | RTL8812     | TP-Link Archer T4UH                 |
+| `2357:010d` | RTL8812     | TP-Link Archer T4U v2               |
+| `2357:010e` | RTL8812     | TP-Link Archer T4UH v2              |
+| `0b05:17d2` | RTL8812     | ASUS USB-AC56 / RTL8812AU           |
+| `2604:0012` | RTL8812     | Tenda U12 / RTL8812AU               |
+| `0409:0408` | RTL8812     | NEC AtermWL900U / RTL8812AU         |
+| `0586:3426` | RTL8812     | ZyXEL NWD6605 / RTL8812AU           |
 | `0bda:8813` | RTL8814     | RTL8814AU                           |
 | `0bda:0820` | RTL8821     | RTL8821AU                           |
 | `0bda:0821` | RTL8821     | RTL8821AU                           |
@@ -110,10 +120,11 @@ The browser still needs the same Realtek HAL work as native: WebUSB changes how
 control and bulk transfers are issued, not what registers or firmware steps the
 adapter needs.
 
-Android is another transport boundary. The Android app should use `UsbManager`
-for discovery and permission, then pass an already-open file descriptor to the
-Tauri command that wraps it with `nusb::Device::from_fd`. Once the descriptor is
-wrapped, the same Realtek initialization and RX/TX code runs.
+Android is another transport boundary. OpenIPC Station uses the local
+`tauri-plugin-openipc-usb` plugin for `UsbManager` discovery and permission,
+then passes an already-open file descriptor to the Rust Tauri command that wraps it with
+`nusb::Device::from_fd`. Once the descriptor is wrapped, the same Realtek
+initialization and RX/TX code runs.
 
 ## Runtime Options
 

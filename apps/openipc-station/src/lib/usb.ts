@@ -11,14 +11,17 @@ export function webUsbDeviceId(
 }
 
 export function authorizedDeviceId(device: AuthorizedUsbDevice): string {
-  return usbId(device.vendorId, device.productId);
+  return device.id ?? usbId(device.vendorId, device.productId);
 }
 
 export function authorizedDeviceLabel(device: AuthorizedUsbDevice): string {
   const name = [device.manufacturer, device.product].filter(Boolean).join(" ");
+  const hardwareId = usbId(device.vendorId, device.productId);
   return name
-    ? `${name} (${authorizedDeviceId(device)})`
-    : authorizedDeviceId(device);
+    ? `${name} (${hardwareId})`
+    : device.id
+      ? `${hardwareId} (${device.id})`
+      : hardwareId;
 }
 
 export function webUsbDeviceLabel(device: USBDevice): string {

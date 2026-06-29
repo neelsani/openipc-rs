@@ -169,8 +169,10 @@ Publish after logging in to crates.io or configuring `CARGO_REGISTRY_TOKEN`:
 cargo publish --workspace
 ```
 
-`openipc-rs-desktop` is marked `publish = false` because the Tauri desktop shell
-is released as bundled applications, not as a crates.io package.
+`openipc-rs-desktop` and `tauri-plugin-openipc-usb` are marked
+`publish = false`. The desktop shell is released as bundled applications, and
+the Android USB plugin is a local support crate for Station rather than a
+public SDK.
 
 ## Desktop Releases
 

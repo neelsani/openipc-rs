@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use nusb::transfer::{Bulk, Out};
+#[cfg(target_os = "android")]
+use nusb::MaybeFuture;
 use openipc_core::realtek::{parse_rx_aggregate, RxPacketAttrib, RxPacketType};
 use openipc_core::realtek_tx::RealtekTxOptions;
 use openipc_core::rtp::{Codec, DepacketizedFrame};
@@ -19,8 +21,6 @@ use openipc_core::{
 };
 #[cfg(target_os = "android")]
 use openipc_rtl88xx::SUPPORTED_DEVICES;
-#[cfg(target_os = "android")]
-use nusb::MaybeFuture;
 
 #[cfg(not(target_os = "android"))]
 use openipc_rtl88xx::{list_supported_devices, UsbDeviceSummary};
@@ -30,7 +30,6 @@ use openipc_rtl88xx::{
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
-
 
 #[cfg(target_os = "android")]
 #[tauri::mobile_entry_point]
@@ -279,13 +278,11 @@ impl AdaptiveRuntime {
     }
 }
 
-
-
 #[tauri::command]
 fn openipc_list_devices() -> Result<Vec<DesktopUsbDevice>, String> {
     #[cfg(target_os = "android")]
     {
-        return Ok(SUPPORTED_DEVICES
+        Ok(SUPPORTED_DEVICES
             .iter()
             .map(|device| DesktopUsbDevice {
                 vendor_id: device.vendor_id,
@@ -293,7 +290,7 @@ fn openipc_list_devices() -> Result<Vec<DesktopUsbDevice>, String> {
                 product: Some(device.label.to_owned()),
                 manufacturer: None,
             })
-            .collect());
+            .collect())
     }
 
     #[cfg(not(target_os = "android"))]
@@ -318,10 +315,10 @@ fn openipc_connect(
     {
         let _ = request;
         let _ = state;
-        return Err(
+        Err(
             "Android USB connections must use openipc_connect_from_fd after UsbManager permission"
                 .to_owned(),
-        );
+        )
     }
 
     #[cfg(not(target_os = "android"))]
@@ -523,6 +520,7 @@ fn openipc_stop_rx(state: State<'_, DesktopState>) -> Result<(), String> {
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_openipc_usb::init())
         .manage(DesktopState::default())
         .invoke_handler(tauri::generate_handler![
             openipc_list_devices,

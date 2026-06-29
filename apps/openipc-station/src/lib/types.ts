@@ -173,6 +173,7 @@ export type RtpClockState = {
 };
 
 export type AuthorizedUsbDevice = {
+  id?: string;
   vendorId: number;
   productId: number;
   product?: string;

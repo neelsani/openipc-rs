@@ -24,6 +24,8 @@ openipc-rs/
   crates/openipc-native/      native CLI utilities
   crates/openipc-web/         wasm-bindgen SDK
   apps/openipc-station/       browser and Tauri station UI
+  plugins/tauri-plugin-openipc-usb/
+                                Android USB permission plugin for Station
   docs/                       this Docusaurus site
   scripts/                    build, clean, release helpers
 ```
@@ -40,6 +42,8 @@ The platform boundary is kept at the edges:
 - native apps open USB devices through `nusb`,
 - browser apps ask JavaScript for WebUSB permission and then pass the granted
   `UsbDevice` into Rust/WASM,
+- Android Tauri builds use a local `tauri-plugin-openipc-usb` plugin to request
+  USB permission and pass an opened file descriptor to Rust,
 - playback is handled by WebCodecs in the React app,
 - desktop builds use Tauri only as the application shell around the same React
   UI and native Rust backend.

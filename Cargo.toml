@@ -6,6 +6,7 @@ members = [
     "crates/openipc-rtl88xx",
     "crates/openipc-web",
     "apps/openipc-station/src-tauri",
+    "plugins/tauri-plugin-openipc-usb",
 ]
 
 [workspace.package]

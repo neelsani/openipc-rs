@@ -135,9 +135,11 @@ gets a user-approved `UsbDevice` and Rust/WASM uses the WebUSB-capable `nusb`
 backend.
 
 On Android, apps should discover and permission USB devices with Android
-`UsbManager`, then pass an already-open file descriptor into Rust. The driver
-exposes `RealtekDevice::from_nusb_device`, which lets higher layers wrap that
-descriptor with `nusb::Device::from_fd` before running the normal Realtek HAL.
+`UsbManager`, then pass an already-open file descriptor into Rust. OpenIPC
+Station ships the local `tauri-plugin-openipc-usb` bridge for this, while the
+driver itself stays platform-neutral: higher layers wrap the descriptor with
+`nusb::Device::from_fd` and pass the resulting device into
+`RealtekDevice::from_nusb_device`.
 
 ## Diagnostics And Polling
 

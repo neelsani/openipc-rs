@@ -58,9 +58,14 @@ import {
   type AnnexBFrameInfo,
 } from "@/video";
 import {
+  isAndroidTauriRuntime,
   isTauriRuntime,
   listenTauriEvent,
+  tauriAndroidUsbCloseDevice,
+  tauriAndroidUsbListDevices,
+  tauriAndroidUsbOpenDevice,
   tauriConnect,
+  tauriConnectFromFd,
   tauriIsFullscreen,
   tauriListDevices,
   tauriSetFullscreen,
@@ -448,6 +453,7 @@ function clearStoredKeypair() {
 
 export function useOpenIpcRuntime() {
   const desktopRuntime = isTauriRuntime();
+  const androidTauriRuntime = isAndroidTauriRuntime();
   const receiverRef = useRef<OpenIpcReceiver | null>(null);
   const adaptiveRef = useRef<OpenIpcAdaptiveLink | null>(null);
   const usbRef = useRef<WebUsbRealtekDevice | null>(null);
@@ -640,6 +646,12 @@ export function useOpenIpcRuntime() {
 
   const refreshAuthorizedDevices = useCallback(async () => {
     if (desktopRuntime) {
+      if (androidTauriRuntime) {
+        const devices = await tauriAndroidUsbListDevices();
+        setAuthorizedDevices(devices);
+        appendLog("info", `Attached Android USB devices: ${devices.length}`);
+        return devices;
+      }
       const devices = await tauriListDevices();
       setAuthorizedDevices(devices);
       appendLog("info", `Supported native USB devices: ${devices.length}`);
@@ -653,7 +665,7 @@ export function useOpenIpcRuntime() {
     setAuthorizedDevices(devices);
     appendLog("info", `Authorized USB devices: ${devices.length}`);
     return devices;
-  }, [appendLog, desktopRuntime]);
+  }, [androidTauriRuntime, appendLog, desktopRuntime]);
 
   useEffect(() => {
     settingsRef.current = settings;
@@ -1367,6 +1379,49 @@ export function useOpenIpcRuntime() {
   async function connectUsb() {
     if (desktopRuntime) {
       const currentSettings = settingsRef.current;
+      if (androidTauriRuntime) {
+        const selectedDevice = authorizedDevices.find(
+          (device) => authorizedDeviceId(device) === currentSettings.wifiDevice,
+        );
+        const requestedDeviceId =
+          selectedDevice?.id ?? currentSettings.wifiDevice;
+        const opened = await tauriAndroidUsbOpenDevice({
+          deviceId: requestedDeviceId || undefined,
+          vendorId: selectedDevice?.vendorId,
+          productId: selectedDevice?.productId,
+        });
+        try {
+          const report = await tauriConnectFromFd({
+            channel: currentSettings.rfChannel,
+            channelWidthMhz: currentSettings.channelWidthMhz,
+            channelOffset: currentSettings.channelOffset,
+            fd: opened.fd,
+            vendorId: opened.vendorId,
+            productId: opened.productId,
+            product: opened.product,
+            manufacturer: opened.manufacturer,
+          });
+          usbRef.current = null;
+          appliedTxPowerRef.current = null;
+          setUsbInfo(report.usbInfo);
+          setSettings((current) => ({ ...current, wifiDevice: opened.id }));
+          void refreshAuthorizedDevices().catch((error) =>
+            appendLog("warn", messageFrom(error)),
+          );
+          appendLog(
+            "info",
+            `Initialized ${report.initReport.chip} on Android USB channel ${currentSettings.rfChannel}/${currentSettings.channelWidthMhz} MHz (${report.initReport.status})`,
+          );
+          return;
+        } finally {
+          await tauriAndroidUsbCloseDevice(opened.fd).catch((error) =>
+            appendLog(
+              "warn",
+              `Android USB handle close failed: ${messageFrom(error)}`,
+            ),
+          );
+        }
+      }
       const report = await tauriConnect({
         channel: currentSettings.rfChannel,
         channelWidthMhz: currentSettings.channelWidthMhz,

@@ -1,0 +1,85 @@
+use serde::de::DeserializeOwned;
+use tauri::{plugin::PluginApi, AppHandle, Runtime};
+
+use crate::models::*;
+
+#[cfg(target_os = "ios")]
+tauri::ios_plugin_binding!(init_plugin_openipc_usb);
+
+pub fn init<R: Runtime, C: DeserializeOwned>(
+    _app: &AppHandle<R>,
+    api: PluginApi<R, C>,
+) -> crate::Result<OpenIpcUsb<R>> {
+    #[cfg(target_os = "android")]
+    {
+        let handle = api.register_android_plugin("dev.openipc.usb", "OpenIpcUsbPlugin")?;
+        Ok(OpenIpcUsb {
+            #[cfg(target_os = "android")]
+            handle,
+        })
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = api;
+        Ok(OpenIpcUsb { _app: _app.clone() })
+    }
+}
+
+pub struct OpenIpcUsb<R: Runtime> {
+    #[cfg(target_os = "android")]
+    handle: tauri::plugin::PluginHandle<R>,
+    #[cfg(not(target_os = "android"))]
+    _app: AppHandle<R>,
+}
+
+impl<R: Runtime> OpenIpcUsb<R> {
+    pub fn list_devices(&self) -> crate::Result<Vec<AndroidUsbDevice>> {
+        #[cfg(target_os = "android")]
+        {
+            self.handle
+                .run_mobile_plugin("listDevices", ())
+                .map_err(Into::into)
+        }
+
+        #[cfg(not(target_os = "android"))]
+        Err(crate::Error::Message(
+            "Android USB discovery is only available in the Android Tauri runtime".to_owned(),
+        ))
+    }
+
+    pub fn open_device(
+        &self,
+        request: AndroidUsbOpenRequest,
+    ) -> crate::Result<AndroidUsbOpenedDevice> {
+        #[cfg(target_os = "android")]
+        {
+            self.handle
+                .run_mobile_plugin("openDevice", request)
+                .map_err(Into::into)
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = request;
+            Err(crate::Error::Message(
+                "Android USB open is only available in the Android Tauri runtime".to_owned(),
+            ))
+        }
+    }
+
+    pub fn close_device(&self, request: AndroidUsbCloseRequest) -> crate::Result<()> {
+        #[cfg(target_os = "android")]
+        {
+            self.handle
+                .run_mobile_plugin("closeDevice", request)
+                .map_err(Into::into)
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = request;
+            Ok(())
+        }
+    }
+}

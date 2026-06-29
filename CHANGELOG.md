@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.15 - 2026-06-29
+
+### Changes
+- Add telem to libs, start android support (13b7e56)
+- Android build with usb work! (1f078ad)
+- Add android release (5e7ce22)
+
+
 ## 0.1.14 - 2026-06-28
 
 ### Changes

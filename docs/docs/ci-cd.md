@@ -21,7 +21,7 @@ pushes to `master`, `v*` tags, and manual dispatch.
 | `Publish Crates.io Packages` | Publishes the workspace crates on `v*` tags.                                                                                                                                     |
 | `Publish WASM SDK To npm`    | Builds `@openipc-rs/web` with Bun and publishes it with npm trusted publishing on `v*` tags.                                                                                     |
 | `Desktop Release`            | Uses `tauri-apps/tauri-action` to build and upload desktop bundles to the GitHub Release on `v*` tags.                                                                           |
-| `Android Release`            | Builds unsigned aarch64 Android APK/AAB artifacts with the Tauri CLI and uploads them to the GitHub Release on `v*` tags.                                                        |
+| `Android Release`            | Builds unsigned universal Android APK/AAB artifacts with the Tauri CLI and uploads them to the GitHub Release on `v*` tags.                                                      |
 
 ## Event Behavior
 
@@ -46,7 +46,7 @@ Pushes to tags like `v0.2.0` run the release publishing jobs after validation:
   publishing,
 - Tauri builds desktop bundles and uploads them to the GitHub Release for that
   tag,
-- Tauri builds unsigned Android aarch64 APK/AAB artifacts and uploads them to
+- Tauri builds unsigned Android APK/AAB artifacts and uploads them to
   the same GitHub Release after the desktop release job succeeds.
 
 Desktop release targets:
@@ -64,11 +64,11 @@ Linux releases are built on Ubuntu runners and use Tauri's Linux bundle targets
 from that host, such as AppImage, Debian package, and RPM package. This is not a
 separate build per Linux distribution.
 
-Android release target:
+Android release artifacts:
 
-| Release label   | GitHub runner   | Android/Rust target     | Artifacts        |
-| --------------- | --------------- | ----------------------- | ---------------- |
-| `android-arm64` | `ubuntu-latest` | `aarch64-linux-android` | unsigned APK/AAB |
+| Release label       | GitHub runner   | Android/Rust target         | Artifacts        |
+| ------------------- | --------------- | --------------------------- | ---------------- |
+| `android-universal` | `ubuntu-latest` | Tauri default Android build | unsigned APK/AAB |
 
 Required repository secret:
 
@@ -95,9 +95,9 @@ The Android release job also uses the built-in `GITHUB_TOKEN`. It does not use
 Android signing credentials yet; uploaded APKs are unsigned and named like:
 
 ```text
-openipc-rs-station-android-arm64-[version]-unsigned.apk
-openipc-rs-station-android-arm64-[version].aab
-SHA256SUMS-android-arm64.txt
+openipc-rs-station-android-universal-[version]-unsigned.apk
+openipc-rs-station-android-universal-[version].aab
+SHA256SUMS-android-universal.txt
 ```
 
 The workspace also contains local `publish = false` crates, including the Tauri

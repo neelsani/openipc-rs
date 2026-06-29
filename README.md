@@ -67,6 +67,17 @@ bun run android:init
 bun run android:dev
 ```
 
+On macOS with the Android SDK installed in the default location, Tauri also
+needs Java and the NDK on the environment:
+
+```sh
+export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
+export ANDROID_HOME=$HOME/Library/Android/sdk
+export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018
+export NDK_HOME=$ANDROID_NDK_HOME
+export PATH="$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/bin:$ANDROID_HOME/platform-tools:$PATH"
+```
+
 Android USB discovery uses the local `tauri-plugin-openipc-usb` plugin. The
 plugin asks for permission with Android `UsbManager`, opens the adapter, passes
 the file descriptor to Rust, and the Rust backend continues through

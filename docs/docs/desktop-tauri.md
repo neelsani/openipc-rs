@@ -92,6 +92,28 @@ bun run android:init
 bun run android:dev
 ```
 
+For local builds, set the Android toolchain environment before running the
+Tauri commands:
+
+```sh
+export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
+export ANDROID_HOME=$HOME/Library/Android/sdk
+export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018
+export NDK_HOME=$ANDROID_NDK_HOME
+export PATH="$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/bin:$ANDROID_HOME/platform-tools:$PATH"
+```
+
+If `bun tauri android init --ci` reports `Android NDK not found`, install the
+same SDK packages used by CI:
+
+```sh
+sdkmanager --sdk_root="$ANDROID_HOME" --install \
+  "platform-tools" \
+  "platforms;android-36" \
+  "build-tools;36.0.0" \
+  "ndk;27.2.12479018"
+```
+
 The Rust command duplicates the descriptor with `dup(2)`, then wraps the
 duplicate with `nusb::Device::from_fd`. Android/Kotlin keeps the original
 `UsbDeviceConnection` open until React has called `openipc_connect_from_fd`;

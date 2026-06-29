@@ -72,6 +72,27 @@ bun run android:dev
 bun run android:build
 ```
 
+Local Android builds need Java, the Android SDK, and an NDK. On macOS with
+Homebrew OpenJDK and the default Android SDK path:
+
+```sh
+export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
+export ANDROID_HOME=$HOME/Library/Android/sdk
+export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018
+export NDK_HOME=$ANDROID_NDK_HOME
+export PATH="$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/bin:$ANDROID_HOME/platform-tools:$PATH"
+```
+
+If the NDK is missing, install the same packages CI uses:
+
+```sh
+sdkmanager --sdk_root="$ANDROID_HOME" --install \
+  "platform-tools" \
+  "platforms;android-36" \
+  "build-tools;36.0.0" \
+  "ndk;27.2.12479018"
+```
+
 The plugin uses Android `UsbManager` to list supported Realtek adapters, request
 permission, open a `UsbDeviceConnection`, and pass its file descriptor to the
 Rust `openipc_connect_from_fd` command. Rust duplicates that descriptor before

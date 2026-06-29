@@ -13,16 +13,6 @@ import {
 import { cn } from "@/lib/utils";
 import type { StationApi } from "@/lib/use-station";
 
-type FullscreenDocument = Document & {
-  webkitExitFullscreen?: () => Promise<void> | void;
-  webkitFullscreenElement?: Element | null;
-  webkitFullscreenEnabled?: boolean;
-};
-
-type FullscreenElement = HTMLElement & {
-  webkitRequestFullscreen?: () => Promise<void> | void;
-};
-
 function EmptyState({ state }: { state: StationApi["state"] }) {
   let icon = <RadioTower className="h-8 w-8" />;
   let title = "Receiver not started";
@@ -129,36 +119,7 @@ export function VideoPanel({ api }: { api: StationApi }) {
   const { state } = api;
 
   async function toggleVideoFullscreen() {
-    if (state.usbMode === "native") {
-      api.actions.setFullscreen(!state.fullscreen);
-      return;
-    }
-
-    const fullscreenDocument = document as FullscreenDocument;
-    const region = document.getElementById(
-      "video-region",
-    ) as FullscreenElement | null;
-    const fullscreenElement =
-      document.fullscreenElement ?? fullscreenDocument.webkitFullscreenElement;
-    const fullscreenEnabled =
-      document.fullscreenEnabled || fullscreenDocument.webkitFullscreenEnabled;
-
-    if (!region || !fullscreenEnabled) {
-      return;
-    }
-    if (fullscreenElement) {
-      if (document.exitFullscreen) {
-        await document.exitFullscreen();
-        return;
-      }
-      await fullscreenDocument.webkitExitFullscreen?.();
-      return;
-    }
-    if (region.requestFullscreen) {
-      await region.requestFullscreen();
-      return;
-    }
-    await region.webkitRequestFullscreen?.();
+    api.actions.setFullscreen(!state.fullscreen);
   }
 
   return (

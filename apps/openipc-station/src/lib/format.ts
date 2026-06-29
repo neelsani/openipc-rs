@@ -2,6 +2,16 @@ export function messageFrom(error: unknown): string {
   if (error instanceof Error) {
     return error.message;
   }
+  if (typeof error === "object" && error !== null) {
+    if ("message" in error && typeof error.message === "string") {
+      return error.message;
+    }
+    try {
+      return JSON.stringify(error);
+    } catch {
+      // Fall through to the generic formatter.
+    }
+  }
   return String(error);
 }
 

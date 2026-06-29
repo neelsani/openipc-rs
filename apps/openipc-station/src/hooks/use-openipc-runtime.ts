@@ -88,6 +88,15 @@ const KEYPAIR_STORAGE_KEY = "openipc-rs.station.keypair.v1";
 const DEFAULT_KEYPAIR_URL = "/gs.key";
 const WEBUSB_RX_TRANSFERS_IN_FLIGHT = 4;
 
+type FullscreenDocument = Document & {
+  webkitExitFullscreen?: () => Promise<void> | void;
+  webkitFullscreenElement?: Element | null;
+};
+
+type FullscreenElement = HTMLElement & {
+  webkitRequestFullscreen?: () => Promise<void> | void;
+};
+
 const EMPTY_METRICS: Metrics = {
   transfers: 0,
   frames: 0,
@@ -451,6 +460,51 @@ function clearStoredKeypair() {
   }
 }
 
+function fullscreenDocument(): FullscreenDocument {
+  return document as FullscreenDocument;
+}
+
+function currentFullscreenElement(): Element | null {
+  const fullscreenDoc = fullscreenDocument();
+  return (
+    document.fullscreenElement ?? fullscreenDoc.webkitFullscreenElement ?? null
+  );
+}
+
+function videoFullscreenTarget(): FullscreenElement {
+  return (
+    (document.getElementById("video-region") as FullscreenElement | null) ??
+    document.documentElement
+  );
+}
+
+async function requestVideoFullscreen() {
+  const target = videoFullscreenTarget();
+  if (target.requestFullscreen) {
+    await target.requestFullscreen();
+    return;
+  }
+  if (target.webkitRequestFullscreen) {
+    await target.webkitRequestFullscreen();
+    return;
+  }
+  throw new Error("Fullscreen API is unavailable");
+}
+
+async function exitVideoFullscreen() {
+  const fullscreenDoc = fullscreenDocument();
+  if (document.fullscreenElement && document.exitFullscreen) {
+    await document.exitFullscreen();
+    return;
+  }
+  if (
+    fullscreenDoc.webkitFullscreenElement &&
+    fullscreenDoc.webkitExitFullscreen
+  ) {
+    await fullscreenDoc.webkitExitFullscreen();
+  }
+}
+
 export function useOpenIpcRuntime() {
   const desktopRuntime = isTauriRuntime();
   const androidTauriRuntime = isAndroidTauriRuntime();
@@ -471,6 +525,7 @@ export function useOpenIpcRuntime() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
   const lastRecordingUrlRef = useRef<string | null>(null);
+  const fullscreenFallbackRef = useRef(false);
   const keyBytesRef = useRef<Uint8Array | null>(null);
   const appliedTxPowerRef = useRef<string | null>(null);
   const frameCountRef = useRef(0);
@@ -688,11 +743,19 @@ export function useOpenIpcRuntime() {
 
   useEffect(() => {
     const onFullscreenChange = () => {
-      setFullscreen(document.fullscreenElement !== null);
+      setFullscreen(
+        currentFullscreenElement() !== null || fullscreenFallbackRef.current,
+      );
     };
     document.addEventListener("fullscreenchange", onFullscreenChange);
-    return () =>
+    document.addEventListener("webkitfullscreenchange", onFullscreenChange);
+    return () => {
       document.removeEventListener("fullscreenchange", onFullscreenChange);
+      document.removeEventListener(
+        "webkitfullscreenchange",
+        onFullscreenChange,
+      );
+    };
   }, []);
 
   useEffect(() => {
@@ -719,7 +782,7 @@ export function useOpenIpcRuntime() {
   }, [desktopRuntime, fullscreen]);
 
   useEffect(() => {
-    if (!desktopRuntime) {
+    if (!desktopRuntime || androidTauriRuntime) {
       return;
     }
     let cancelled = false;
@@ -738,7 +801,7 @@ export function useOpenIpcRuntime() {
     return () => {
       cancelled = true;
     };
-  }, [appendLog, desktopRuntime]);
+  }, [androidTauriRuntime, appendLog, desktopRuntime]);
 
   useEffect(() => {
     return () => {
@@ -1345,14 +1408,28 @@ export function useOpenIpcRuntime() {
 
   async function setFullscreenMode(enabled: boolean) {
     try {
-      if (desktopRuntime) {
+      if (desktopRuntime && !androidTauriRuntime) {
+        fullscreenFallbackRef.current = false;
         setFullscreen(await tauriSetFullscreen(enabled));
         return;
       }
       if (enabled) {
-        await document.documentElement.requestFullscreen();
-      } else if (document.fullscreenElement) {
-        await document.exitFullscreen();
+        try {
+          await requestVideoFullscreen();
+          fullscreenFallbackRef.current = false;
+        } catch (error) {
+          if (!androidTauriRuntime) {
+            throw error;
+          }
+          fullscreenFallbackRef.current = true;
+          appendLog(
+            "info",
+            `Using Android video fullscreen fallback: ${messageFrom(error)}`,
+          );
+        }
+      } else {
+        fullscreenFallbackRef.current = false;
+        await exitVideoFullscreen();
       }
       setFullscreen(enabled);
     } catch (error) {

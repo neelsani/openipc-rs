@@ -10,6 +10,7 @@ import { OpusAudioPlayer, parseRtpPacket } from "@/audio";
 import initWasm, {
   OpenIpcAdaptiveLink,
   OpenIpcReceiver,
+  WebUsbPowerTracking8822c,
   WebUsbRealtekDevice,
   listAuthorizedUsbDevices,
   supportedUsbFilters,
@@ -467,7 +468,9 @@ function payloadTypesForRtpPayloadTaps(
   );
 }
 
-function rawPayloadsFromProfile(profile: OpenIpcRouteProfile): OpenIpcRawPayload[] {
+function rawPayloadsFromProfile(
+  profile: OpenIpcRouteProfile,
+): OpenIpcRawPayload[] {
   return profile.rawPayloads ?? profile.mavlinkPayloads ?? [];
 }
 
@@ -634,7 +637,9 @@ export function useOpenIpcRuntime() {
   const receiverRef = useRef<OpenIpcReceiver | null>(null);
   const adaptiveRef = useRef<OpenIpcAdaptiveLink | null>(null);
   const usbRef = useRef<WebUsbRealtekDevice | null>(null);
+  const jaguar3PowerTrackingRef = useRef<WebUsbPowerTracking8822c | null>(null);
   const runningRef = useRef(false);
+  const lastJaguar3CoexKeepaliveRef = useRef(0);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const decoderRef = useRef<VideoDecoder | null>(null);
   const decoderKeyRef = useRef("");
@@ -859,7 +864,10 @@ export function useOpenIpcRuntime() {
         const lastLog = routeLogThrottleRef.current.get(route.id) ?? 0;
         if (now - lastLog > 5000) {
           routeLogThrottleRef.current.set(route.id, now);
-          appendLog("warn", `UDP route "${route.name}" requires native/Tauri mode`);
+          appendLog(
+            "warn",
+            `UDP route "${route.name}" requires native/Tauri mode`,
+          );
         }
       }
     }
@@ -1492,6 +1500,12 @@ export function useOpenIpcRuntime() {
     }
   }
 
+  function applyRxDescriptorKind(kind?: "jaguar1" | "jaguar3") {
+    const selected = kind ?? usbRef.current?.rxDescriptorKind() ?? "jaguar1";
+    receiverRef.current?.setRxDescriptorKind(selected);
+    adaptiveRef.current?.setRxDescriptorKind(selected);
+  }
+
   const rebuildReceiver = useCallback(() => {
     const channelId = parseInteger(settings.channelId, "Channel ID");
     const minimumEpoch = parseEpoch(settings.minimumEpoch);
@@ -1507,6 +1521,7 @@ export function useOpenIpcRuntime() {
     if (!keyBytes) {
       receiverRef.current = new OpenIpcReceiver();
       adaptiveRef.current = null;
+      applyRxDescriptorKind();
       rtpClockRef.current = null;
       setLinkQuality(null);
       setKeyReady(false);
@@ -1538,6 +1553,7 @@ export function useOpenIpcRuntime() {
       1,
       5,
     );
+    applyRxDescriptorKind();
     rtpClockRef.current = null;
     setLinkQuality(null);
     setKeyReady(true);
@@ -1772,6 +1788,7 @@ export function useOpenIpcRuntime() {
             manufacturer: opened.manufacturer,
           });
           usbRef.current = null;
+          jaguar3PowerTrackingRef.current = null;
           appliedTxPowerRef.current = null;
           setUsbInfo(report.usbInfo);
           setSettings((current) => ({ ...current, wifiDevice: opened.id }));
@@ -1799,6 +1816,7 @@ export function useOpenIpcRuntime() {
         deviceId: currentSettings.wifiDevice || undefined,
       });
       usbRef.current = null;
+      jaguar3PowerTrackingRef.current = null;
       appliedTxPowerRef.current = null;
       setUsbInfo(report.usbInfo);
       setSettings((current) => ({ ...current, wifiDevice: report.deviceId }));
@@ -1824,6 +1842,12 @@ export function useOpenIpcRuntime() {
       currentSettings.channelOffset,
     )) as InitReport;
     usbRef.current = realtek;
+    jaguar3PowerTrackingRef.current =
+      realtek.rxDescriptorKind() === "jaguar3"
+        ? new WebUsbPowerTracking8822c()
+        : null;
+    lastJaguar3CoexKeepaliveRef.current = 0;
+    applyRxDescriptorKind(realtek.rxDescriptorKind());
     appliedTxPowerRef.current = null;
     const deviceId = webUsbDeviceId(webUsbDevice);
     setUsbInfo({
@@ -1880,7 +1904,9 @@ export function useOpenIpcRuntime() {
     };
   }
 
-  function tauriBatchToProfile(batch: TauriRxBatchPayload): OpenIpcRouteProfile {
+  function tauriBatchToProfile(
+    batch: TauriRxBatchPayload,
+  ): OpenIpcRouteProfile {
     const rawPayloads = (batch.rawPayloads ?? batch.mavlinkPayloads).map(
       tauriPayloadToOpenIpcPayload,
     );
@@ -2116,6 +2142,39 @@ export function useOpenIpcRuntime() {
 
           const loopStart = performance.now();
           const nowMs = Date.now();
+          if (
+            device.rxDescriptorKind() === "jaguar3" &&
+            nowMs - lastJaguar3CoexKeepaliveRef.current >= 2000
+          ) {
+            lastJaguar3CoexKeepaliveRef.current = nowMs;
+            void device
+              .runJaguar3CoexKeepalive()
+              .catch((error) =>
+                appendLog(
+                  "warn",
+                  `Jaguar3 coex keepalive failed: ${messageFrom(error)}`,
+                ),
+              );
+            const powerTracking = jaguar3PowerTrackingRef.current;
+            if (powerTracking) {
+              void powerTracking
+                .tick(device)
+                .then((report) => {
+                  if (report.lckRan) {
+                    appendLog(
+                      "info",
+                      `Jaguar3 LCK ran after thermal drift (A=${report.thermalA}, B=${report.thermalB})`,
+                    );
+                  }
+                })
+                .catch((error) =>
+                  appendLog(
+                    "warn",
+                    `Jaguar3 thermal tracking failed: ${messageFrom(error)}`,
+                  ),
+                );
+            }
+          }
           const adaptiveTracker = adaptiveRef.current;
           if (adaptiveTracker) {
             const adaptiveRxStart = performance.now();
@@ -2128,9 +2187,18 @@ export function useOpenIpcRuntime() {
           const profile = receiver.pushRxTransferProfiledWithRouteIdsAndRtpTaps(
             transfer,
             false,
-            routeIdsForRawPayloads(currentSettings.payloadRoutes, desktopRuntime),
-            routeIdsForRtpPayloadTaps(currentSettings.payloadRoutes, desktopRuntime),
-            payloadTypesForRtpPayloadTaps(currentSettings.payloadRoutes, desktopRuntime),
+            routeIdsForRawPayloads(
+              currentSettings.payloadRoutes,
+              desktopRuntime,
+            ),
+            routeIdsForRtpPayloadTaps(
+              currentSettings.payloadRoutes,
+              desktopRuntime,
+            ),
+            payloadTypesForRtpPayloadTaps(
+              currentSettings.payloadRoutes,
+              desktopRuntime,
+            ),
           ) as OpenIpcRouteProfile;
           recordDiagnosticStage("realtekParse", profile.parseMs);
           recordDiagnosticStage("openipcPipeline", profile.pipelineMs);

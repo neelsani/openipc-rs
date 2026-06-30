@@ -104,14 +104,21 @@ impl RealtekDevice {
             ChipFamily::Rtl8812 | ChipFamily::Rtl8821 => {
                 Some(self.read_efuse_info_async(chip).await?)
             }
-            ChipFamily::Rtl8814 => None,
+            ChipFamily::Rtl8814 | ChipFamily::Rtl8822c => None,
         };
 
         let fw_state = self.read_u32_async(REG_MCUFWDL).await.unwrap_or(0);
         let fw_already_running = match chip.family {
             ChipFamily::Rtl8814 => (fw_state & 0xff) == 0x78 || (fw_state & BIT15) != 0,
+            ChipFamily::Rtl8822c => (fw_state & 0xffff) == 0xc078,
             _ => (fw_state & WINTINI_RDY) != 0,
         };
+
+        if chip.family == ChipFamily::Rtl8822c {
+            return self
+                .initialize_monitor_jaguar3_async(chip, radio, options, fw_already_running)
+                .await;
+        }
 
         if fw_already_running {
             status = InitStatus::AlreadyRunning;
@@ -136,6 +143,7 @@ impl RealtekDevice {
                     .await?;
                     firmware_downloaded = true;
                 }
+                ChipFamily::Rtl8822c => unreachable!("Jaguar3 is handled before generic init"),
             }
         }
 

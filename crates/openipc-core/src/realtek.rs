@@ -3,6 +3,20 @@ pub const RX_DESC_SIZE: usize = 24;
 /// Default native USB bulk-IN transfer size used by the receiver.
 pub const DEFAULT_RX_TRANSFER_SIZE: usize = 32 * 1024;
 
+/// Realtek USB RX descriptor layout family.
+///
+/// Jaguar1 is used by RTL8812AU/RTL8821AU and the existing RTL8814AU path in
+/// this project. Jaguar3 is used by RTL8812CU/RTL8822CU and keeps the 24-byte
+/// descriptor size while moving several descriptor fields.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RxDescriptorKind {
+    /// RTL8812AU/RTL8821AU/RTL8814AU-style descriptor layout.
+    #[default]
+    Jaguar1,
+    /// RTL8812CU/RTL8822CU-style descriptor layout.
+    Jaguar3,
+}
+
 /// Type of packet carried by a Realtek RX descriptor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RxPacketType {
@@ -178,6 +192,14 @@ impl std::error::Error for AggregateError {}
 
 /// Parse a single Realtek RX descriptor.
 pub fn parse_rx_descriptor(desc: &[u8]) -> Result<RxPacketAttrib, AggregateError> {
+    parse_rx_descriptor_with_kind(desc, RxDescriptorKind::Jaguar1)
+}
+
+/// Parse a single Realtek RX descriptor using an explicit layout.
+pub fn parse_rx_descriptor_with_kind(
+    desc: &[u8],
+    kind: RxDescriptorKind,
+) -> Result<RxPacketAttrib, AggregateError> {
     if desc.len() < RX_DESC_SIZE {
         return Err(AggregateError::DescriptorTooShort);
     }
@@ -189,35 +211,40 @@ pub fn parse_rx_descriptor(desc: &[u8]) -> Result<RxPacketAttrib, AggregateError
     let d4 = le32(desc, 16);
     let d5 = le32(desc, 20);
 
-    Ok(RxPacketAttrib {
+    let mut attrib = RxPacketAttrib {
         pkt_len: bits(d0, 0, 14) as u16,
         crc_err: bits(d0, 14, 1) != 0,
         icv_err: bits(d0, 15, 1) != 0,
         drvinfo_sz: (bits(d0, 16, 4) * 8) as u8,
-        encrypt: bits(d0, 20, 3) as u8,
-        qos: bits(d0, 23, 1) != 0,
         shift_sz: bits(d0, 24, 2) as u8,
         physt: bits(d0, 26, 1) != 0,
-        bdecrypted: bits(d0, 27, 1) == 0,
-        priority: bits(d1, 8, 4) as u8,
-        mdata: bits(d1, 26, 1) != 0,
-        mfrag: bits(d1, 27, 1) != 0,
-        seq_num: bits(d2, 0, 12) as u16,
-        frag_num: bits(d2, 12, 4) as u8,
+        data_rate: bits(d3, 0, 7) as u8,
         pkt_rpt_type: if bits(d2, 28, 1) != 0 {
             RxPacketType::C2hPacket
         } else {
             RxPacketType::NormalRx
         },
-        data_rate: bits(d3, 0, 7) as u8,
-        sgi: bits(d4, 0, 1) as u8,
-        ldpc: bits(d4, 1, 1) as u8,
-        stbc: bits(d4, 2, 1) as u8,
-        bw: bits(d4, 4, 2) as u8,
-        scrambler: bits(d4, 9, 7) as u8,
-        tsfl: d5,
         ..Default::default()
-    })
+    };
+
+    if kind == RxDescriptorKind::Jaguar1 {
+        attrib.encrypt = bits(d0, 20, 3) as u8;
+        attrib.qos = bits(d0, 23, 1) != 0;
+        attrib.bdecrypted = bits(d0, 27, 1) == 0;
+        attrib.priority = bits(d1, 8, 4) as u8;
+        attrib.mdata = bits(d1, 26, 1) != 0;
+        attrib.mfrag = bits(d1, 27, 1) != 0;
+        attrib.seq_num = bits(d2, 0, 12) as u16;
+        attrib.frag_num = bits(d2, 12, 4) as u8;
+        attrib.sgi = bits(d4, 0, 1) as u8;
+        attrib.ldpc = bits(d4, 1, 1) as u8;
+        attrib.stbc = bits(d4, 2, 1) as u8;
+        attrib.bw = bits(d4, 4, 2) as u8;
+        attrib.scrambler = bits(d4, 9, 7) as u8;
+        attrib.tsfl = d5;
+    }
+
+    Ok(attrib)
 }
 
 /// Split a Realtek USB bulk-IN transfer into packet descriptors and payloads.
@@ -226,6 +253,14 @@ pub fn parse_rx_descriptor(desc: &[u8]) -> Result<RxPacketAttrib, AggregateError
 /// Each returned packet borrows from `buf`, so callers can parse metadata without
 /// copying frame bytes.
 pub fn parse_rx_aggregate(buf: &[u8]) -> Result<Vec<RealtekRxPacket<'_>>, AggregateError> {
+    parse_rx_aggregate_with_kind(buf, RxDescriptorKind::Jaguar1)
+}
+
+/// Split a Realtek USB bulk-IN transfer using an explicit RX descriptor layout.
+pub fn parse_rx_aggregate_with_kind(
+    buf: &[u8],
+    kind: RxDescriptorKind,
+) -> Result<Vec<RealtekRxPacket<'_>>, AggregateError> {
     let mut packets = Vec::new();
     let mut offset = 0usize;
 
@@ -236,7 +271,7 @@ pub fn parse_rx_aggregate(buf: &[u8]) -> Result<Vec<RealtekRxPacket<'_>>, Aggreg
         }
 
         let desc = &buf[offset..offset + RX_DESC_SIZE];
-        let mut attrib = parse_rx_descriptor(desc)?;
+        let mut attrib = parse_rx_descriptor_with_kind(desc, kind)?;
         let data_start =
             offset + RX_DESC_SIZE + attrib.drvinfo_sz as usize + attrib.shift_sz as usize;
         let pkt_offset = RX_DESC_SIZE

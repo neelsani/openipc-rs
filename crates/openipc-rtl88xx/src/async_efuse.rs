@@ -346,6 +346,7 @@ fn mac_from_efuse_map(chip: ChipInfo, map: &[u8; EFUSE_MAP_LEN_JAGUAR]) -> Optio
         ChipFamily::Rtl8812 => EEPROM_MAC_ADDR_8812AU,
         ChipFamily::Rtl8814 => EEPROM_MAC_ADDR_8814AU,
         ChipFamily::Rtl8821 => EEPROM_MAC_ADDR_8821AU,
+        ChipFamily::Rtl8822c => return None,
     };
     let bytes = map.get(offset..offset + 6)?;
 
@@ -365,6 +366,13 @@ fn rfe_type_from_efuse_map(
 ) -> u8 {
     let rfe_option = map[EEPROM_RFE_OPTION_8812];
     match chip.family {
+        ChipFamily::Rtl8822c => {
+            if rfe_option == 0xff {
+                0
+            } else {
+                rfe_option
+            }
+        }
         ChipFamily::Rtl8814 => {
             if rfe_option == 0xff || (rfe_option & BIT7 as u8) != 0 {
                 1
@@ -628,6 +636,7 @@ fn tx_power_index_base_with_policy(
         return None;
     }
     let bandwidth_idx = match bandwidth {
+        ChannelWidth::Mhz5 | ChannelWidth::Mhz10 => 0,
         ChannelWidth::Mhz20 => 0,
         ChannelWidth::Mhz40 => 1,
         ChannelWidth::Mhz80 => 2,
@@ -798,6 +807,7 @@ fn tx_power_limit(
     channel: u8,
 ) -> Option<i8> {
     let bandwidth = match bandwidth {
+        ChannelWidth::Mhz5 | ChannelWidth::Mhz10 => TxPowerLimitBandwidth::Mhz20,
         ChannelWidth::Mhz20 => TxPowerLimitBandwidth::Mhz20,
         ChannelWidth::Mhz40 => TxPowerLimitBandwidth::Mhz40,
         ChannelWidth::Mhz80 => TxPowerLimitBandwidth::Mhz80,
@@ -1027,6 +1037,7 @@ mod tests {
                 ChipFamily::Rtl8812 => RfType::TwoTTwoR,
                 ChipFamily::Rtl8814 => RfType::FourTFourR,
                 ChipFamily::Rtl8821 => RfType::OneTOneR,
+                ChipFamily::Rtl8822c => RfType::TwoTTwoR,
             },
             cut_version: 0,
             sys_cfg: 0,

@@ -157,9 +157,14 @@ export function MetricsPanel({ api }: { api: StationApi }) {
             <table className="w-full font-mono text-[11px]">
               <tbody>
                 {state.routeStats.map((route) => (
-                  <tr key={route.routeId} className="border-t border-border first:border-t-0">
+                  <tr
+                    key={route.routeId}
+                    className="border-t border-border first:border-t-0"
+                  >
                     <td className="px-2 py-1 text-foreground">{route.name}</td>
-                    <td className="px-2 py-1 text-muted-foreground">{route.action}</td>
+                    <td className="px-2 py-1 text-muted-foreground">
+                      {route.action}
+                    </td>
                     <td className="px-2 py-1 text-right text-muted-foreground">
                       {route.packets.toLocaleString()} pkt
                     </td>

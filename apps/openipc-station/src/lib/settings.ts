@@ -132,7 +132,9 @@ export function formatLinkIdHex(value: string | number): string {
 
 export function formatRadioPortHex(value: string | number): string {
   const parsed = parseRadioPort(value);
-  return parsed === null ? "invalid" : `0x${parsed.toString(16).padStart(2, "0")}`;
+  return parsed === null
+    ? "invalid"
+    : `0x${parsed.toString(16).padStart(2, "0")}`;
 }
 
 export function formatChannelIdHex(value: string | number): string {
@@ -144,7 +146,9 @@ export function formatChannelIdHex(value: string | number): string {
 
 export function channelPresetForPort(port: number): ChannelIdPreset | null {
   const normalized = normalizeRadioPort(port);
-  return CHANNEL_ID_PRESETS.find((preset) => preset.port === normalized) ?? null;
+  return (
+    CHANNEL_ID_PRESETS.find((preset) => preset.port === normalized) ?? null
+  );
 }
 
 export function channelPresetForId(
@@ -235,8 +239,11 @@ export const AVIATEUR_CHANNELS = [
 ] as const;
 
 export const AVIATEUR_CHANNEL_WIDTHS: Array<[ChannelWidthMhz, string]> = [
+  [5, "5 MHz"],
+  [10, "10 MHz"],
   [20, "20 MHz"],
   [40, "40 MHz"],
+  [80, "80 MHz"],
 ];
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -366,12 +373,11 @@ export function sanitizePayloadRoutes(value: unknown): PayloadRouteConfig[] {
       return {
         id,
         enabled: isOldDefaultAudioRoute ? true : source.enabled === true,
-        name:
-          isOldDefaultAudioRoute
-            ? "Mixed RTP audio"
-            : typeof source.name === "string" && source.name.trim()
-              ? source.name.trim().slice(0, 32)
-              : `Route ${id}`,
+        name: isOldDefaultAudioRoute
+          ? "Mixed RTP audio"
+          : typeof source.name === "string" && source.name.trim()
+            ? source.name.trim().slice(0, 32)
+            : `Route ${id}`,
         channelId: isOldDefaultAudioRoute
           ? channelIdForRadioPort(0x00)
           : typeof source.channelId === "string" && source.channelId.trim()

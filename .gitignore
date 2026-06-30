@@ -1,5 +1,6 @@
 /target/
 /.cargo-tools/
+/.bun-cache/
 /crates/openipc-web/pkg/
 /apps/openipc-station/node_modules/
 /apps/openipc-station/dist/

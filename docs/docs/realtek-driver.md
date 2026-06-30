@@ -14,7 +14,8 @@ radio setup, RX parsing, TX descriptors, and TX power.
 
 The source of truth is `SUPPORTED_DEVICES` in the driver crate. The current
 table includes the Realtek reference IDs, common RTL8812AU OEM IDs used by
-PixelPilot, and the RTL8821AU vendor IDs mirrored from devourer:
+PixelPilot, the RTL8821AU vendor IDs mirrored from devourer, and the new
+Jaguar3 RTL8812CU/RTL8822CU IDs from devourer:
 
 | VID:PID     | Family Hint | Label                               |
 | ----------- | ----------- | ----------------------------------- |
@@ -57,6 +58,9 @@ PixelPilot, and the RTL8821AU vendor IDs mirrored from devourer:
 | `7392:a812` | RTL8821     | Edimax RTL8821AU                    |
 | `7392:a813` | RTL8821     | Edimax RTL8821AU                    |
 | `7392:b611` | RTL8821     | Edimax RTL8821AU                    |
+| `0bda:c812` | RTL8822C    | RTL8812CU / RTL8822CU default PID   |
+| `0bda:c82c` | RTL8822C    | RTL8822CU                           |
+| `0bda:c82e` | RTL8822C    | RTL8812CU / RTL8822CU WiFi-only PID |
 
 The chip probe still reads hardware state after opening the device. The table is
 only the first filter used for discovery.
@@ -75,13 +79,17 @@ Platform-specific filters are derived from this table:
 - descriptor-driven endpoint discovery,
 - vendor-control register reads and writes through request `0x05`,
 - firmware download for supported Jaguar-family chips,
+- Jaguar3 RTL8812CU/RTL8822CU firmware download, MAC/USB setup, RFE-aware
+  BB/AGC/RF tables, 24-byte RX descriptor parsing, 48-byte checksummed TX
+  descriptor construction, 5/10 MHz narrowband channel setup, and WiFi-only
+  coex/H2C keepalive hooks,
 - EFUSE logical-map parsing for MAC address, RFE type, amplifier flags, TX BB
   swing bytes, thermal baseline, and TX-power PG blocks,
 - LLT/page setup and queue/FIFO setup,
 - RFE-aware MAC/BB/RF table loading, including conditional RF table opcodes,
 - monitor filters,
 - channel, channel-width, band-switch, RFE pinmux, and BB-swing setup for
-  RTL8812/RTL8821/RTL8814,
+  RTL8812/RTL8821/RTL8814 plus Jaguar3 5/10/20 MHz tuning,
 - RX bulk reads, including multi-transfer in-flight reads mirroring newer
   devourer's always-posted bulk-IN model,
 - C2H packet surfacing, RTL8814 TX-status parsing, and optional corrupted-FCS
@@ -93,8 +101,9 @@ Platform-specific filters are derived from this table:
   RTL8814 legacy-descriptor escape hatch,
 - EFUSE-backed per-rate TXAGC programming, including the newer devourer 8812A
   PG table and regulatory limit table,
-- RTL8812 thermal power tracking, RTL8812/RTL8814 IQK paths, and a monitor-mode
-  PHYDM false-alarm/DIG watchdog,
+- RTL8812 thermal power tracking, RTL8812/RTL8814 IQK paths, Jaguar3 DACK/IQK
+  plus thermal-power/LCK tracking, and a monitor-mode PHYDM false-alarm/DIG
+  watchdog,
 - thermal meter, false-alarm counters, RTL8814 queue-depth, BB-register, and
   BB-dbgport diagnostics.
 
@@ -187,7 +196,8 @@ Applications should schedule diagnostics at the app boundary:
 
 Available explicit hooks include thermal status, false-alarm counters, RTL8814
 queue-depth registers, BB register/dbgport reads, PHYDM DIG watchdog ticks,
-IQK, RTL8812 power tracking ticks, C2H payloads, and RTL8814 TX-status parsing.
+IQK, RTL8812 power tracking ticks, Jaguar3 coex keepalive, C2H payloads, and
+RTL8814 TX-status parsing.
 
 ## Validation Boundary
 
@@ -208,14 +218,22 @@ Current status:
 - RTL8812 thermal power tracking, RTL8812 IQK, RTL8814 IQK, and the PHYDM
   false-alarm/DIG watchdog have Rust implementations. They are exposed natively
   and through WASM, but still need register-trace comparison on real adapters.
+- RTL8812CU/RTL8822CU Jaguar3 support has been ported from devourer's new path:
+  supported PIDs, descriptor layouts, firmware download, MAC/USB setup,
+  generated BB/AGC/RF/cal-init tables, 5/10 MHz narrowband retiming, monitor
+  filters, TX descriptor checksum, TX power override, DACK, IQK,
+  thermal-power/LCK tracking, and coex/H2C keepalive are implemented. This is
+  still not a substitute for hardware proof: RTL8812CU/RTL8822CU should only be
+  called on-air validated after cold-plug register traces and sustained TX/RX
+  runs match devourer on real adapters.
 - Newer devourer runtime TX-mode behavior is mirrored: radiotap RATE/MCS/VHT
   wins, a programmatic default can fill rate-less packets, 5 GHz CCK TX is
   clamped to OFDM, and the newer 8812/8821/8814 descriptor differences are
   reflected in `openipc-core`.
 - Newer devourer diagnostics are available in native Rust and through the WASM
   wrapper: thermal bucket, false-alarm counters, 8814 queue-depth registers,
-  BB register reads, BB dbgport snapshots, C2H payloads, and RTL8814 TX-status
-  reports.
+  BB register reads, BB dbgport snapshots, Jaguar3 thermal tracking ticks, C2H
+  payloads, and RTL8814 TX-status reports.
 - The remaining work is hardware proof: cold-plug runs, register-trace
   comparison, and a fixture matrix across adapter models and operating systems.
 

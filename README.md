@@ -109,11 +109,11 @@ sh scripts/clean-generated.sh
 The Rust protocol pipeline, Realtek driver path, WebUSB/WASM bindings,
 WebCodecs station UI, adaptive-link feedback, native VPN tunnel bridging, and
 CI/release automation are implemented. The driver tracks newer devourer
-behavior for TX modes,
-multi-transfer RX, RTL8814 firmware bring-up, EFUSE/per-rate TX power, PHYDM,
-power tracking, IQK, C2H/TX-status packets, and hardware diagnostics. Driver
-diagnostics are explicit APIs that apps schedule themselves; the library does
-not create hidden polling threads.
+behavior for TX modes, multi-transfer RX, RTL8814 firmware bring-up,
+RTL8812CU/RTL8822CU Jaguar3 descriptors/firmware/tables, EFUSE/per-rate TX
+power, PHYDM, power tracking, IQK, C2H/TX-status packets, and hardware
+diagnostics. Driver diagnostics are explicit APIs that apps schedule
+themselves; the library does not create hidden polling threads.
 
 More live adapter testing is still needed: cold-plug runs, register-trace
 comparison, and browser WebUSB behavior across platforms.

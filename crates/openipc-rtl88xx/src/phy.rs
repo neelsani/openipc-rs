@@ -65,7 +65,9 @@ pub(crate) fn phy_context(chip: ChipInfo, efuse: EfuseInfo) -> PhyContext {
     PhyContext {
         condition_mode: match chip.family {
             ChipFamily::Rtl8812 => PhyConditionMode::BoardAmplifier,
-            ChipFamily::Rtl8814 | ChipFamily::Rtl8821 => PhyConditionMode::RfeType,
+            ChipFamily::Rtl8814 | ChipFamily::Rtl8821 | ChipFamily::Rtl8822c => {
+                PhyConditionMode::RfeType
+            }
         },
         cut_version: chip.cut_version,
         support_interface: 0x02,

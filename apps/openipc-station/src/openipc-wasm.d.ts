@@ -78,6 +78,7 @@ declare module "@openipc/wasm" {
     ): void;
     pushRtpPacket(data: Uint8Array): Uint8Array | undefined;
     pushRtpPacketDetailed(data: Uint8Array): OpenIpcVideoFrame | null;
+    setRxDescriptorKind(kind: "jaguar1" | "jaguar3"): void;
     pushRxTransfer(data: Uint8Array): Uint8Array[];
     pushRxTransferDetailed(data: Uint8Array): OpenIpcVideoFrame[];
     pushRxTransferDetailedWithOptions(
@@ -120,6 +121,7 @@ declare module "@openipc/wasm" {
       snr1: number,
     ): void;
     recordRxTransfer(data: Uint8Array, nowMs: number): void;
+    setRxDescriptorKind(kind: "jaguar1" | "jaguar3"): void;
     recordReceiverCounters(receiver: OpenIpcReceiver, nowMs: number): void;
     recordFec(
       nowMs: number,
@@ -211,6 +213,16 @@ declare module "@openipc/wasm" {
     readonly applied: boolean;
   }
 
+  export class WebJaguar3PowerTrackingReport {
+    readonly thermalA: number;
+    readonly thermalB: number;
+    readonly referenceA: number;
+    readonly referenceB: number;
+    readonly compensationA: number;
+    readonly compensationB: number;
+    readonly lckRan: boolean;
+  }
+
   export class WebIqkReport {
     readonly chip: string;
     readonly channel: number;
@@ -231,6 +243,7 @@ declare module "@openipc/wasm" {
     ): Promise<WebUsbRealtekDevice>;
     bulkInEndpoint(): number;
     bulkOutEndpoint(): number;
+    rxDescriptorKind(): "jaguar1" | "jaguar3";
     initializeMonitor(
       channel: number,
       channelWidthMhz: number,
@@ -266,6 +279,7 @@ declare module "@openipc/wasm" {
       legacy8812Descriptor: boolean,
     ): Promise<number>;
     setTxPowerOverride(currentChannel: number, power: number): Promise<void>;
+    runJaguar3CoexKeepalive(): Promise<void>;
     readThermalStatus(): Promise<WebThermalStatus>;
     readQueueDepth8814(): Promise<WebQueueDepth8814>;
     readBbReg(register: number, mask: number): Promise<number>;
@@ -290,6 +304,11 @@ declare module "@openipc/wasm" {
       channel: number,
       channelWidthMhz: number,
     ): Promise<WebPowerTrackingReport>;
+  }
+
+  export class WebUsbPowerTracking8822c {
+    constructor();
+    tick(device: WebUsbRealtekDevice): Promise<WebJaguar3PowerTrackingReport>;
   }
 
   export function listAuthorizedUsbDevices(): Promise<unknown[]>;

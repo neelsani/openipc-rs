@@ -12,6 +12,8 @@ mod async_firmware;
 mod async_firmware_8814;
 mod async_iqk;
 mod async_iqk_8812;
+mod async_jaguar3;
+mod async_jaguar3_iqk;
 mod async_mac;
 mod async_phydm;
 mod async_power_tracking;
@@ -30,14 +32,19 @@ mod types;
 
 pub use async_diagnostics::{BbDbgportRead, ThermalBucket, ThermalStatus};
 pub use async_iqk::IqkReport;
+pub use async_jaguar3_iqk::{Jaguar3PowerTrackingReport, Jaguar3PowerTrackingState};
 pub use async_phydm::{FalseAlarmCounters, PhydmDigState, PhydmWatchdogReport};
 pub use async_power_tracking::{PowerTrackingReport, PowerTrackingState};
 pub use device::RealtekDevice;
-pub use tx::{build_usb_tx_frame, RealtekTxError, RealtekTxOptions, TX_DESC_SIZE};
+pub use tx::{
+    build_usb_tx_frame, RealtekTxDescriptor, RealtekTxError, RealtekTxOptions, TX_DESC_SIZE,
+    TX_DESC_SIZE_8822C,
+};
 pub use types::{
-    is_supported_id, list_devices, list_supported_devices, ChannelWidth, ChipFamily, ChipInfo,
-    DriverError, DriverOptions, Firmware8814Mode, InitReport, InitStatus, MonitorOptions,
-    RadioConfig, RfType, SupportedDevice, UsbDeviceSummary, SUPPORTED_DEVICES,
+    is_supported_id, list_devices, list_supported_devices, supported_device, supported_family_hint,
+    ChannelWidth, ChipFamily, ChipInfo, DriverError, DriverOptions, Firmware8814Mode, InitReport,
+    InitStatus, MonitorOptions, RadioConfig, RfType, SupportedDevice, UsbDeviceSummary,
+    SUPPORTED_DEVICES,
 };
 
 /// Default native USB bulk-IN transfer size used for RX reads.
@@ -62,5 +69,16 @@ mod tests {
     fn detects_8821_pid() {
         assert!(types::is_rtl8821a_pid(0x2357, 0x0120));
         assert!(!types::is_rtl8821a_pid(0x0bda, 0x8812));
+    }
+
+    #[test]
+    fn detects_jaguar3_pids_from_devourer() {
+        assert!(types::is_rtl8822c_pid(0x0bda, 0xc812));
+        assert!(types::is_rtl8822c_pid(0x0bda, 0xc82c));
+        assert!(types::is_rtl8822c_pid(0x0bda, 0xc82e));
+        assert_eq!(
+            supported_family_hint(0x0bda, 0xc812),
+            Some(ChipFamily::Rtl8822c)
+        );
     }
 }

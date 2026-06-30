@@ -22,8 +22,8 @@ export function VpnPanel({ api }: { api: StationApi }) {
     : status
       ? "text-primary"
       : enabled
-      ? "text-primary"
-      : "text-muted-foreground";
+        ? "text-primary"
+        : "text-muted-foreground";
 
   return (
     <div className="space-y-3 p-3">

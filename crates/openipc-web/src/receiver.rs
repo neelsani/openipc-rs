@@ -1,5 +1,5 @@
 use js_sys::{Array, Object, Reflect, Uint8Array};
-use openipc_core::realtek::parse_rx_aggregate;
+use openipc_core::realtek::{parse_rx_aggregate_with_kind, RxDescriptorKind};
 use openipc_core::{
     ChannelId, FrameLayout, PayloadRouteId, RadioPort, ReceiverBatchOptions, ReceiverRuntime,
     RtpPayloadTap, WfbKeypair,
@@ -17,6 +17,7 @@ const DEFAULT_KEY_SLOT: u64 = 0;
 /// Browser/WASM receiver for OpenIPC RX transfers and RTP packets.
 pub struct OpenIpcReceiver {
     pub(crate) runtime: ReceiverRuntime,
+    rx_descriptor_kind: RxDescriptorKind,
 }
 
 impl OpenIpcReceiver {
@@ -49,7 +50,10 @@ impl OpenIpcReceiver {
             fec_n,
         )
         .map_err(|err| JsValue::from_str(&format!("invalid receiver config: {err}")))?;
-        Ok(Self { runtime })
+        Ok(Self {
+            runtime,
+            rx_descriptor_kind: RxDescriptorKind::Jaguar1,
+        })
     }
 
     #[wasm_bindgen(js_name = withKeypair)]
@@ -89,7 +93,17 @@ impl OpenIpcReceiver {
             minimum_epoch,
         )
         .map_err(|err| JsValue::from_str(&format!("invalid encrypted receiver config: {err}")))?;
-        Ok(OpenIpcReceiver { runtime })
+        Ok(OpenIpcReceiver {
+            runtime,
+            rx_descriptor_kind: RxDescriptorKind::Jaguar1,
+        })
+    }
+
+    #[wasm_bindgen(js_name = setRxDescriptorKind)]
+    /// Select the Realtek USB RX descriptor layout for future bulk-IN transfers.
+    pub fn set_rx_descriptor_kind(&mut self, kind: &str) -> Result<(), JsValue> {
+        self.rx_descriptor_kind = parse_rx_descriptor_kind(kind)?;
+        Ok(())
     }
 
     #[wasm_bindgen(js_name = withKeypairAndMavlinkChannel)]
@@ -358,7 +372,7 @@ impl OpenIpcReceiver {
     ) -> Result<Object, JsValue> {
         let total_start = now_ms();
         let parse_start = now_ms();
-        let packets = parse_rx_aggregate(transfer)
+        let packets = parse_rx_aggregate_with_kind(transfer, self.rx_descriptor_kind)
             .map_err(|err| JsValue::from_str(&format!("Realtek RX aggregate rejected: {err}")))?;
         let parse_ms = elapsed_ms(parse_start);
 
@@ -447,7 +461,20 @@ fn openipc_receiver_with_keypair_and_telemetry_channel_inner(
             minimum_epoch,
         )
         .map_err(|err| JsValue::from_str(&format!("invalid MAVLink receiver config: {err}")))?;
-    Ok(OpenIpcReceiver { runtime })
+    Ok(OpenIpcReceiver {
+        runtime,
+        rx_descriptor_kind: RxDescriptorKind::Jaguar1,
+    })
+}
+
+pub(crate) fn parse_rx_descriptor_kind(kind: &str) -> Result<RxDescriptorKind, JsValue> {
+    match kind {
+        "jaguar1" | "rtl8812" | "rtl8821" | "rtl8814" => Ok(RxDescriptorKind::Jaguar1),
+        "jaguar3" | "rtl8812cu" | "rtl8822c" | "rtl8822cu" => Ok(RxDescriptorKind::Jaguar3),
+        _ => Err(JsValue::from_str(
+            "unsupported RX descriptor kind; expected jaguar1 or jaguar3",
+        )),
+    }
 }
 
 fn frame_bytes_array(frames: Vec<openipc_core::DepacketizedFrame>) -> Array {

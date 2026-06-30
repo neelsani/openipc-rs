@@ -51,4 +51,7 @@ internal val supportedRealtekDevices =
     SupportedRealtekDevice(0x7392, 0xa812, "Edimax RTL8821AU"),
     SupportedRealtekDevice(0x7392, 0xa813, "Edimax RTL8821AU"),
     SupportedRealtekDevice(0x7392, 0xb611, "Edimax RTL8821AU"),
+    SupportedRealtekDevice(0x0bda, 0xc812, "RTL8812CU / RTL8822CU WiFi-only default PID"),
+    SupportedRealtekDevice(0x0bda, 0xc82c, "RTL8822CU multi-function default PID"),
+    SupportedRealtekDevice(0x0bda, 0xc82e, "RTL8822CU multi-function default PID"),
   )

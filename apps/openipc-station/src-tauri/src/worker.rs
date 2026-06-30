@@ -1,4 +1,5 @@
 use super::*;
+use openipc_core::realtek::RxDescriptorKind;
 
 const VIDEO_ROUTE_ID: PayloadRouteId = PayloadRouteId::new(1);
 // Internal only: keep the fixed VPN bridge out of user-defined route ids.
@@ -6,6 +7,7 @@ const VPN_ROUTE_ID: PayloadRouteId = PayloadRouteId::new(u64::MAX);
 const DEFAULT_KEY_SLOT: u64 = 0;
 const TUN_TX_SESSION_INTERVAL_MS: u64 = 1000;
 const TUN_TX_DRAIN_LIMIT: usize = 32;
+const JAGUAR3_COEX_TICK_MS: u64 = 2000;
 
 pub(crate) struct UdpRouteSink {
     route_id: PayloadRouteId,
@@ -190,9 +192,18 @@ fn udp_route_sinks(routes: &[PayloadRouteRequest]) -> Result<Vec<UdpRouteSink>, 
 fn realtek_tx_options(chip_family: ChipFamily, rf_channel: u8) -> RealtekTxOptions {
     RealtekTxOptions {
         current_channel: rf_channel,
-        is_8814a: chip_family == ChipFamily::Rtl8814,
+        descriptor: openipc_rtl88xx::RealtekTxDescriptor::for_chip_family(chip_family),
         legacy_8812_descriptor: std::env::var_os("DEVOURER_TX_LEGACY_8812_DESC").is_some(),
         ..RealtekTxOptions::default()
+    }
+}
+
+fn rx_descriptor_kind(chip_family: ChipFamily) -> RxDescriptorKind {
+    match chip_family {
+        ChipFamily::Rtl8822c => RxDescriptorKind::Jaguar3,
+        ChipFamily::Rtl8812 | ChipFamily::Rtl8814 | ChipFamily::Rtl8821 => {
+            RxDescriptorKind::Jaguar1
+        }
     }
 }
 
@@ -342,11 +353,21 @@ pub(crate) fn run_rx_worker(
         format!("Native RX loop started ({RX_TRANSFERS_IN_FLIGHT} bulk-IN transfers in flight)"),
     );
 
+    let mut last_jaguar3_coex_tick_ms = 0u64;
+    let mut jaguar3_power_tracking = Jaguar3PowerTrackingState::default();
     while !stop.load(Ordering::Relaxed) {
         let loop_start = Instant::now();
         let read_start = Instant::now();
         let Some(completion) = ep_in.wait_next_complete(Duration::from_millis(1000)) else {
             let now_ms = unix_time_ms();
+            tick_jaguar3_coex(
+                &app,
+                &device,
+                chip_family,
+                &mut last_jaguar3_coex_tick_ms,
+                &mut jaguar3_power_tracking,
+                now_ms,
+            );
             tick_tx_idle(&mut adaptive, &mut tun, ep_out.as_mut(), now_ms);
             continue;
         };
@@ -361,6 +382,14 @@ pub(crate) fn run_rx_worker(
         {
             let bytes = &completion.buffer[..actual_len];
             let now_ms = unix_time_ms();
+            tick_jaguar3_coex(
+                &app,
+                &device,
+                chip_family,
+                &mut last_jaguar3_coex_tick_ms,
+                &mut jaguar3_power_tracking,
+                now_ms,
+            );
             match build_rx_batch(
                 bytes,
                 RxBatchContext {
@@ -368,6 +397,7 @@ pub(crate) fn run_rx_worker(
                     adaptive: adaptive.as_mut(),
                     ep_out: ep_out.as_mut(),
                     now_ms,
+                    rx_descriptor_kind: rx_descriptor_kind(chip_family),
                     usb_read_ms,
                     loop_start,
                     raw_payload_routes: raw_payload_routes.as_slice(),
@@ -389,6 +419,41 @@ pub(crate) fn run_rx_worker(
 
     emit_stopped(&app, "stopped", "Native RX loop stopped".to_owned());
     Ok(())
+}
+
+fn tick_jaguar3_coex(
+    app: &AppHandle,
+    device: &RealtekDevice,
+    chip_family: ChipFamily,
+    last_tick_ms: &mut u64,
+    power_tracking: &mut Jaguar3PowerTrackingState,
+    now_ms: u64,
+) {
+    if chip_family != ChipFamily::Rtl8822c
+        || now_ms.saturating_sub(*last_tick_ms) < JAGUAR3_COEX_TICK_MS
+    {
+        return;
+    }
+    *last_tick_ms = now_ms;
+    if let Err(err) = device.run_jaguar3_coex_keepalive() {
+        emit_log(app, "warn", format!("Jaguar3 coex keepalive failed: {err}"));
+    }
+    match device.tick_power_tracking_8822c(power_tracking) {
+        Ok(report) if report.lck_ran => emit_log(
+            app,
+            "info",
+            format!(
+                "Jaguar3 LCK ran after thermal drift (A={}, B={})",
+                report.thermal_raw[0], report.thermal_raw[1]
+            ),
+        ),
+        Ok(_) => {}
+        Err(err) => emit_log(
+            app,
+            "warn",
+            format!("Jaguar3 thermal tracking failed: {err}"),
+        ),
+    }
 }
 
 pub(crate) fn tick_tx_idle(
@@ -413,8 +478,8 @@ pub(crate) fn build_rx_batch(
     mut context: RxBatchContext<'_>,
 ) -> Result<RxBatchPayload, String> {
     let parse_start = Instant::now();
-    let packets =
-        parse_rx_aggregate(bytes).map_err(|err| format!("RX aggregate parse failed: {err}"))?;
+    let packets = parse_rx_aggregate_with_kind(bytes, context.rx_descriptor_kind)
+        .map_err(|err| format!("RX aggregate parse failed: {err}"))?;
     let parse_ms = elapsed_ms(parse_start);
     let mut adaptive_rx_ms = 0.0;
 

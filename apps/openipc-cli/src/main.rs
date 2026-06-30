@@ -7,7 +7,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use nusb::transfer::{Bulk, Out};
 use openipc_core::channel::DEFAULT_LINK_ID;
-use openipc_core::realtek::{parse_rx_aggregate, RxPacketType};
+use openipc_core::realtek::{
+    parse_rx_aggregate, parse_rx_aggregate_with_kind, RxDescriptorKind, RxPacketType,
+};
 use openipc_core::realtek::{RxPacketAttrib, DEFAULT_RX_TRANSFER_SIZE};
 use openipc_core::{
     AdaptiveLinkSender, ChannelId, FecCounters, FrameLayout, PayloadRouteId, RadioPort,
@@ -118,8 +120,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 &mut sinks,
                 &mut stats,
                 None,
-                0,
-                config.monitor_options.accept_bad_fcs,
+                ProcessRxOptions {
+                    now_ms: 0,
+                    rx_descriptor_kind: RxDescriptorKind::Jaguar1,
+                    accept_bad_fcs: config.monitor_options.accept_bad_fcs,
+                },
             )?;
             eprintln!("{}", stats.summary());
         }
@@ -475,7 +480,7 @@ impl RecvConfig {
             last_counters: counters,
             tx_options: RealtekTxOptions {
                 current_channel: self.radio.channel,
-                is_8814a: chip_family == ChipFamily::Rtl8814,
+                descriptor: openipc_rtl88xx::RealtekTxDescriptor::for_chip_family(chip_family),
                 legacy_8812_descriptor: self.tx_legacy_8812_descriptor,
                 ..RealtekTxOptions::default()
             },
@@ -570,8 +575,11 @@ fn run_recv(config: RecvConfig) -> Result<(), Box<dyn std::error::Error>> {
                 &mut sinks,
                 &mut stats,
                 adaptive.as_mut(),
-                now_ms,
-                config.monitor_options.accept_bad_fcs,
+                ProcessRxOptions {
+                    now_ms,
+                    rx_descriptor_kind: rx_descriptor_kind(chip.family),
+                    accept_bad_fcs: config.monitor_options.accept_bad_fcs,
+                },
             )?;
             if let Some(runtime) = adaptive.as_mut() {
                 runtime.record_pipeline(now_ms, receiver.video_fec_counters());
@@ -592,11 +600,10 @@ fn process_rx_transfer(
     sinks: &mut StreamSinks,
     stats: &mut StreamStats,
     mut adaptive: Option<&mut AdaptiveRuntime>,
-    now_ms: u64,
-    accept_bad_fcs: bool,
+    options: ProcessRxOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     stats.transfers += 1;
-    let packets = match parse_rx_aggregate(bytes) {
+    let packets = match parse_rx_aggregate_with_kind(bytes, options.rx_descriptor_kind) {
         Ok(packets) => packets,
         Err(err) => {
             stats.bad_transfers += 1;
@@ -610,12 +617,12 @@ fn process_rx_transfer(
         if packet.attrib.pkt_rpt_type != RxPacketType::NormalRx {
             continue;
         }
-        if !accept_bad_fcs && (packet.attrib.crc_err || packet.attrib.icv_err) {
+        if !options.accept_bad_fcs && (packet.attrib.crc_err || packet.attrib.icv_err) {
             continue;
         }
         if receiver.accepts_video_frame(packet.data) {
             if let Some(runtime) = adaptive.as_deref_mut() {
-                runtime.record_rx(now_ms, &packet.attrib);
+                runtime.record_rx(options.now_ms, &packet.attrib);
             }
         }
     }
@@ -628,7 +635,7 @@ fn process_rx_transfer(
     let batch = receiver.push_rx_packets(
         packets,
         &ReceiverBatchOptions {
-            accept_corrupted: accept_bad_fcs,
+            accept_corrupted: options.accept_bad_fcs,
             raw_payload_routes,
             ..ReceiverBatchOptions::default()
         },
@@ -647,6 +654,21 @@ fn process_rx_transfer(
         sinks.video.write_all(&frame.data)?;
     }
     Ok(())
+}
+
+struct ProcessRxOptions {
+    now_ms: u64,
+    rx_descriptor_kind: RxDescriptorKind,
+    accept_bad_fcs: bool,
+}
+
+fn rx_descriptor_kind(chip_family: ChipFamily) -> RxDescriptorKind {
+    match chip_family {
+        ChipFamily::Rtl8822c => RxDescriptorKind::Jaguar3,
+        ChipFamily::Rtl8812 | ChipFamily::Rtl8814 | ChipFamily::Rtl8821 => {
+            RxDescriptorKind::Jaguar1
+        }
+    }
 }
 
 fn tick_adaptive(
@@ -745,9 +767,13 @@ fn parse_fec_pair(value: &str) -> Result<(usize, usize), Box<dyn std::error::Err
 fn parse_channel_width(value: &str) -> Result<ChannelWidth, Box<dyn std::error::Error>> {
     match value {
         "20" => Ok(ChannelWidth::Mhz20),
+        "5" => Ok(ChannelWidth::Mhz5),
+        "10" => Ok(ChannelWidth::Mhz10),
         "40" => Ok(ChannelWidth::Mhz40),
         "80" => Ok(ChannelWidth::Mhz80),
-        _ => Err(format!("unsupported channel width {value}; expected 20, 40, or 80").into()),
+        _ => {
+            Err(format!("unsupported channel width {value}; expected 5, 10, 20, 40, or 80").into())
+        }
     }
 }
 

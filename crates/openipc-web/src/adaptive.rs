@@ -1,13 +1,13 @@
 use js_sys::{Array, Uint8Array};
 use openipc_core::ieee80211::WifiFrame;
-use openipc_core::realtek::{parse_rx_aggregate, RxPacketType};
+use openipc_core::realtek::{parse_rx_aggregate_with_kind, RxDescriptorKind, RxPacketType};
 use openipc_core::{
     AdaptiveLinkSender, ChannelId, FecCounters, FrameLayout, RadioPort, WfbTxKeypair,
 };
 use wasm_bindgen::prelude::*;
 
 use crate::js::{counters_json, escape_json_str, ms_from_js};
-use crate::receiver::OpenIpcReceiver;
+use crate::receiver::{parse_rx_descriptor_kind, OpenIpcReceiver};
 #[cfg(target_arch = "wasm32")]
 use crate::webusb::WebUsbRealtekDevice;
 
@@ -20,6 +20,7 @@ pub struct OpenIpcAdaptiveLink {
     sender: AdaptiveLinkSender,
     last_counters: FecCounters,
     rx_channel_id: ChannelId,
+    rx_descriptor_kind: RxDescriptorKind,
 }
 
 #[wasm_bindgen]
@@ -41,7 +42,15 @@ impl OpenIpcAdaptiveLink {
             sender,
             last_counters: FecCounters::default(),
             rx_channel_id: ChannelId::from_link_port(link_id, RadioPort::Video),
+            rx_descriptor_kind: RxDescriptorKind::Jaguar1,
         })
+    }
+
+    #[wasm_bindgen(js_name = setRxDescriptorKind)]
+    /// Select the Realtek USB RX descriptor layout for future RSSI/SNR sampling.
+    pub fn set_rx_descriptor_kind(&mut self, kind: &str) -> Result<(), JsValue> {
+        self.rx_descriptor_kind = parse_rx_descriptor_kind(kind)?;
+        Ok(())
     }
 
     #[wasm_bindgen(js_name = recordRx)]
@@ -55,7 +64,7 @@ impl OpenIpcAdaptiveLink {
     #[wasm_bindgen(js_name = recordRxTransfer)]
     /// Parse one RX transfer and record RSSI/SNR for matching video frames.
     pub fn record_rx_transfer(&mut self, transfer: &[u8], now_ms: f64) -> Result<(), JsValue> {
-        let packets = parse_rx_aggregate(transfer)
+        let packets = parse_rx_aggregate_with_kind(transfer, self.rx_descriptor_kind)
             .map_err(|err| JsValue::from_str(&format!("Realtek RX aggregate rejected: {err}")))?;
         let now_ms = ms_from_js(now_ms);
         for packet in packets {

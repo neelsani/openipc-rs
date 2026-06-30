@@ -6,8 +6,9 @@ use openipc_rtl88xx::SUPPORTED_DEVICES;
 #[cfg(target_arch = "wasm32")]
 use openipc_rtl88xx::{
     BbDbgportRead, ChannelWidth, DriverOptions, FalseAlarmCounters, Firmware8814Mode, InitReport,
-    InitStatus, IqkReport, MonitorOptions, PhydmDigState, PhydmWatchdogReport, PowerTrackingReport,
-    PowerTrackingState, RadioConfig, RealtekDevice, RealtekTxOptions, ThermalBucket, ThermalStatus,
+    InitStatus, IqkReport, Jaguar3PowerTrackingReport, Jaguar3PowerTrackingState, MonitorOptions,
+    PhydmDigState, PhydmWatchdogReport, PowerTrackingReport, PowerTrackingState, RadioConfig,
+    RealtekDevice, RealtekTxDescriptor, RealtekTxOptions, ThermalBucket, ThermalStatus,
 };
 use wasm_bindgen::prelude::*;
 
@@ -401,6 +402,60 @@ impl WebPowerTrackingReport {
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
+/// RTL8822C/RTL8812CU thermal power-tracking report.
+#[derive(Clone, Copy)]
+pub struct WebJaguar3PowerTrackingReport {
+    report: Jaguar3PowerTrackingReport,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl From<Jaguar3PowerTrackingReport> for WebJaguar3PowerTrackingReport {
+    fn from(report: Jaguar3PowerTrackingReport) -> Self {
+        Self { report }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+impl WebJaguar3PowerTrackingReport {
+    #[wasm_bindgen(getter, js_name = thermalA)]
+    pub fn thermal_a(&self) -> u8 {
+        self.report.thermal_raw[0]
+    }
+
+    #[wasm_bindgen(getter, js_name = thermalB)]
+    pub fn thermal_b(&self) -> u8 {
+        self.report.thermal_raw[1]
+    }
+
+    #[wasm_bindgen(getter, js_name = referenceA)]
+    pub fn reference_a(&self) -> i16 {
+        self.report.thermal_ref[0]
+    }
+
+    #[wasm_bindgen(getter, js_name = referenceB)]
+    pub fn reference_b(&self) -> i16 {
+        self.report.thermal_ref[1]
+    }
+
+    #[wasm_bindgen(getter, js_name = compensationA)]
+    pub fn compensation_a(&self) -> i8 {
+        self.report.compensation_index[0]
+    }
+
+    #[wasm_bindgen(getter, js_name = compensationB)]
+    pub fn compensation_b(&self) -> i8 {
+        self.report.compensation_index[1]
+    }
+
+    #[wasm_bindgen(getter, js_name = lckRan)]
+    pub fn lck_ran(&self) -> bool {
+        self.report.lck_ran
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
 /// IQK calibration report returned to JavaScript.
 #[derive(Clone, Copy)]
 pub struct WebIqkReport {
@@ -488,6 +543,16 @@ impl WebUsbRealtekDevice {
     /// Return the selected bulk-OUT endpoint address.
     pub fn bulk_out_endpoint(&self) -> u8 {
         self.driver.bulk_out_ep
+    }
+
+    #[wasm_bindgen(js_name = rxDescriptorKind)]
+    /// Return the Realtek RX descriptor layout needed by `OpenIpcReceiver`.
+    pub fn rx_descriptor_kind(&self) -> String {
+        match self.driver.rx_descriptor_kind() {
+            openipc_core::realtek::RxDescriptorKind::Jaguar3 => "jaguar3",
+            openipc_core::realtek::RxDescriptorKind::Jaguar1 => "jaguar1",
+        }
+        .to_owned()
     }
 
     #[wasm_bindgen(js_name = initializeMonitor)]
@@ -630,7 +695,7 @@ impl WebUsbRealtekDevice {
                 radiotap_packet,
                 RealtekTxOptions {
                     current_channel,
-                    is_8814a: chip.family == openipc_rtl88xx::ChipFamily::Rtl8814,
+                    descriptor: RealtekTxDescriptor::for_chip_family(chip.family),
                     legacy_8812_descriptor,
                     ..RealtekTxOptions::default()
                 },
@@ -648,6 +713,15 @@ impl WebUsbRealtekDevice {
     ) -> Result<(), JsValue> {
         self.driver
             .set_tx_power_override_async(current_channel, power)
+            .await
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = runJaguar3CoexKeepalive)]
+    /// Re-assert RTL8822C/RTL8812CU coex state and firmware keepalives.
+    pub async fn run_jaguar3_coex_keepalive(&self) -> Result<(), JsValue> {
+        self.driver
+            .run_jaguar3_coex_keepalive_async()
             .await
             .map_err(driver_error)
     }
@@ -823,6 +897,37 @@ impl WebUsbPowerTracking8812 {
 }
 
 #[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Stateful RTL8822C/RTL8812CU power-tracking helper for WebUSB apps.
+pub struct WebUsbPowerTracking8822c {
+    state: Jaguar3PowerTrackingState,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+impl WebUsbPowerTracking8822c {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self {
+            state: Jaguar3PowerTrackingState::default(),
+        }
+    }
+
+    #[wasm_bindgen(js_name = tick)]
+    pub async fn tick(
+        &mut self,
+        device: &WebUsbRealtekDevice,
+    ) -> Result<WebJaguar3PowerTrackingReport, JsValue> {
+        let report = device
+            .driver
+            .tick_power_tracking_8822c_async(&mut self.state)
+            .await
+            .map_err(driver_error)?;
+        Ok(report.into())
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
 fn thermal_bucket_name(bucket: ThermalBucket) -> &'static str {
     match bucket {
         ThermalBucket::Unknown => "unknown",
@@ -836,11 +941,13 @@ fn thermal_bucket_name(bucket: ThermalBucket) -> &'static str {
 #[cfg(target_arch = "wasm32")]
 fn parse_channel_width(width_mhz: u16) -> Result<ChannelWidth, JsValue> {
     match width_mhz {
+        5 => Ok(ChannelWidth::Mhz5),
+        10 => Ok(ChannelWidth::Mhz10),
         20 => Ok(ChannelWidth::Mhz20),
         40 => Ok(ChannelWidth::Mhz40),
         80 => Ok(ChannelWidth::Mhz80),
         _ => Err(JsValue::from_str(
-            "unsupported channel width; expected 20, 40, or 80 MHz",
+            "unsupported channel width; expected 5, 10, 20, 40, or 80 MHz",
         )),
     }
 }

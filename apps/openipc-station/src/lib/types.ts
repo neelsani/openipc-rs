@@ -2,7 +2,7 @@ import type { VideoCodecPreference } from "@/video";
 
 export type RuntimeState = "loading" | "ready" | "running" | "error";
 export type LogLevel = "debug" | "info" | "rx" | "warn" | "error";
-export type ChannelWidthMhz = 20 | 40;
+export type ChannelWidthMhz = 5 | 10 | 20 | 40 | 80;
 
 export type LogEntry = {
   id: number;

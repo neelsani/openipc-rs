@@ -266,7 +266,10 @@ export function DiagnosticsPanel({ api }: { api: StationApi }) {
             <Stat label="Video frames" value={v.videoFrames.toLocaleString()} />
             <Stat label="Raw payloads" value={v.rawPayloads.toLocaleString()} />
             <Stat label="Raw bytes" value={fmtBytes(v.rawPayloadBytes)} />
-            <Stat label="Audio packets" value={v.audioPackets.toLocaleString()} />
+            <Stat
+              label="Audio packets"
+              value={v.audioPackets.toLocaleString()}
+            />
             <Stat
               label="Audio decoded"
               value={v.audioDecodedFrames.toLocaleString()}

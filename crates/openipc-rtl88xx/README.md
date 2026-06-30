@@ -19,6 +19,10 @@ lists.
 - Interface claim/reset handling.
 - Realtek vendor request `0x05` register reads and writes.
 - Firmware download and MAC/BB/RF setup for supported rtl88xx families.
+- Jaguar3 RTL8812CU/RTL8822CU support from devourer: PIDs `0bda:c812`,
+  `0bda:c82c`, `0bda:c82e`, 48-byte TX descriptors with checksum, Jaguar3 RX
+  descriptor parsing, firmware/table loading, 5/10 MHz channel widths, and
+  WiFi-only coex keepalive hooks.
 - EFUSE logical-map parsing for MAC address, RFE type, amplifier flags, TX BB
   swing values, thermal baseline, and TX-power PG blocks.
 - RFE-aware MAC/BB/RF table loading, including conditional RF table entries.
@@ -29,8 +33,9 @@ lists.
   overrides for adaptive-link feedback frames.
 - EFUSE-backed per-rate TXAGC programming, including the devourer 8812A
   by-rate and regulatory limit tables.
-- RTL8812 thermal power tracking, RTL8812/RTL8814 IQK, and monitor-mode PHYDM
-  false-alarm/DIG watchdog helpers.
+- RTL8812 thermal power tracking, RTL8812/RTL8814 IQK, Jaguar3 DACK/IQK and
+  thermal-power/LCK tracking, and monitor-mode PHYDM false-alarm/DIG watchdog
+  helpers.
 - Thermal, false-alarm counter, RTL8814 queue-depth, BB-register, C2H/TX-status,
   and BB-dbgport diagnostics.
 
@@ -139,6 +144,12 @@ directly. Browser applications go through `openipc-web`, where JavaScript first
 gets a user-approved `UsbDevice` and Rust/WASM uses the WebUSB-capable `nusb`
 backend.
 
+Jaguar3 note: the Rust driver tracks devourer's RTL8812CU/RTL8822CU cold-start
+path for firmware, tables, descriptors, narrowband tuning, TX power override,
+DACK/IQK, thermal-power/LCK tracking, and coex keepalive. That still needs
+cold-plug register-trace comparison and sustained on-air testing before this
+family should be called fully validated on real hardware.
+
 One naming caveat: the native `*_async` methods are async-shaped compatibility
 APIs around blocking `nusb` calls (`wait` and blocking bulk transfers). They are
 useful for sharing HAL sequences with WebUSB, but native apps should run them on
@@ -157,10 +168,10 @@ driver itself stays platform-neutral: higher layers wrap the descriptor with
 
 The crate exposes diagnostics as explicit calls: thermal meter reads, false
 alarm counters, RTL8814 queue depth, BB register/dbgport reads, PHYDM watchdog
-ticks, IQK, and RTL8812 power tracking ticks. It does not start hidden polling
-threads. Applications should schedule these from their own event loop or worker
-so RX/TX timing, browser WebUSB constraints, and UI responsiveness stay under
-the application's control.
+ticks, IQK, RTL8812 power tracking ticks, and Jaguar3 thermal tracking ticks. It
+does not start hidden polling threads. Applications should schedule these from
+their own event loop or worker so RX/TX timing, browser WebUSB constraints, and
+UI responsiveness stay under the application's control.
 
 ## Validation Notes
 

@@ -1,23 +1,24 @@
 #[cfg(not(target_arch = "wasm32"))]
-use crate::tx::{build_usb_tx_frame, RealtekTxOptions};
+use crate::tx::{build_usb_tx_frame, RealtekTxDescriptor, RealtekTxOptions};
 use nusb::descriptors::TransferType;
 #[cfg(not(target_arch = "wasm32"))]
 use nusb::transfer::{Buffer, Bulk, ControlIn, ControlOut, ControlType, In, Out, Recipient};
 #[cfg(not(target_arch = "wasm32"))]
 use nusb::MaybeFuture;
-use openipc_core::realtek::{parse_rx_aggregate, RealtekRxPacket};
+use openipc_core::realtek::{parse_rx_aggregate_with_kind, RealtekRxPacket, RxDescriptorKind};
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::regs::*;
-use crate::types::DriverError;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::types::{
-    is_supported_id, ChipFamily, ChipInfo, DriverOptions, InitReport, MonitorOptions, RadioConfig,
+    is_supported_id, ChipInfo, DriverOptions, InitReport, MonitorOptions, RadioConfig,
 };
+use crate::types::{supported_family_hint, ChipFamily, DriverError};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::{
-    BbDbgportRead, FalseAlarmCounters, IqkReport, PhydmDigState, PhydmWatchdogReport,
-    PowerTrackingReport, PowerTrackingState, ThermalStatus,
+    BbDbgportRead, FalseAlarmCounters, IqkReport, Jaguar3PowerTrackingReport,
+    Jaguar3PowerTrackingState, PhydmDigState, PhydmWatchdogReport, PowerTrackingReport,
+    PowerTrackingState, ThermalStatus,
 };
 
 /// Claimed Realtek rtl88xx USB adapter.
@@ -189,7 +190,7 @@ impl RealtekDevice {
             radiotap_packet,
             RealtekTxOptions {
                 current_channel,
-                is_8814a: chip.family == ChipFamily::Rtl8814,
+                descriptor: RealtekTxDescriptor::for_chip_family(chip.family),
                 legacy_8812_descriptor: std::env::var_os("DEVOURER_TX_LEGACY_8812_DESC").is_some(),
                 ..RealtekTxOptions::default()
             },
@@ -203,6 +204,12 @@ impl RealtekDevice {
     /// Override the Realtek TXAGC index used for adaptive-link uplink packets.
     pub fn set_tx_power_override(&self, current_channel: u8, power: u8) -> Result<(), DriverError> {
         block_on_ready(self.set_tx_power_override_async(current_channel, power))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Re-assert RTL8822C/RTL8812CU coex state and firmware keepalives.
+    pub fn run_jaguar3_coex_keepalive(&self) -> Result<(), DriverError> {
+        block_on_ready(self.run_jaguar3_coex_keepalive_async())
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -290,6 +297,15 @@ impl RealtekDevice {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Run one RTL8822C/RTL8812CU thermal power tracking update tick.
+    pub fn tick_power_tracking_8822c(
+        &self,
+        state: &mut Jaguar3PowerTrackingState,
+    ) -> Result<Jaguar3PowerTrackingReport, DriverError> {
+        block_on_ready(self.tick_power_tracking_8822c_async(state))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     /// Send a radiotap+802.11 packet using an already-open bulk-OUT endpoint.
     pub fn send_packet_on(
         ep: &mut nusb::Endpoint<Bulk, Out>,
@@ -319,7 +335,16 @@ impl RealtekDevice {
         &self,
         transfer: &'a [u8],
     ) -> Result<Vec<RealtekRxPacket<'a>>, DriverError> {
-        parse_rx_aggregate(transfer).map_err(DriverError::InvalidTransfer)
+        parse_rx_aggregate_with_kind(transfer, self.rx_descriptor_kind())
+            .map_err(DriverError::InvalidTransfer)
+    }
+
+    /// Return the RX descriptor layout implied by this adapter's VID/PID.
+    pub fn rx_descriptor_kind(&self) -> RxDescriptorKind {
+        match supported_family_hint(self.vendor_id, self.product_id) {
+            Some(ChipFamily::Rtl8822c) => RxDescriptorKind::Jaguar3,
+            _ => RxDescriptorKind::Jaguar1,
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]

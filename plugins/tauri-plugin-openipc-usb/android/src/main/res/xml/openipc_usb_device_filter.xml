@@ -40,4 +40,7 @@
     <usb-device vendor-id="7392" product-id="A812" />
     <usb-device vendor-id="7392" product-id="A813" />
     <usb-device vendor-id="7392" product-id="B611" />
+    <usb-device vendor-id="0BDA" product-id="C812" />
+    <usb-device vendor-id="0BDA" product-id="C82C" />
+    <usb-device vendor-id="0BDA" product-id="C82E" />
 </resources>

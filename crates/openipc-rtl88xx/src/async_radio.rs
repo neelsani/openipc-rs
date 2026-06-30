@@ -469,6 +469,7 @@ impl RealtekDevice {
 
     async fn set_bw_reg_adc_8814_async(&self, width: ChannelWidth) -> Result<(), DriverError> {
         let value = match width {
+            ChannelWidth::Mhz5 | ChannelWidth::Mhz10 => 0,
             ChannelWidth::Mhz20 => 0,
             ChannelWidth::Mhz40 => 1,
             ChannelWidth::Mhz80 => 2,
@@ -483,6 +484,7 @@ impl RealtekDevice {
         width: ChannelWidth,
     ) -> Result<(), DriverError> {
         let value = match width {
+            ChannelWidth::Mhz5 | ChannelWidth::Mhz10 => 6,
             ChannelWidth::Mhz20 => 6,
             ChannelWidth::Mhz40 if is_2g => 7,
             ChannelWidth::Mhz40 => 8,
@@ -610,6 +612,7 @@ impl RealtekDevice {
     ) -> Result<(), DriverError> {
         let mut trx = self.read_u16_async(REG_WMAC_TRXPTCL_CTL).await.unwrap_or(0);
         trx = match width {
+            ChannelWidth::Mhz5 | ChannelWidth::Mhz10 => trx & 0xfe7f,
             ChannelWidth::Mhz20 => trx & 0xfe7f,
             ChannelWidth::Mhz40 => (trx | BIT7 as u16) & 0xfeff,
             ChannelWidth::Mhz80 => (trx | BIT8 as u16) & 0xff7f,
@@ -619,6 +622,12 @@ impl RealtekDevice {
             .await?;
 
         match width {
+            ChannelWidth::Mhz5 | ChannelWidth::Mhz10 => {
+                if chip.family != ChipFamily::Rtl8814 {
+                    self.set_bb_reg_async(R_RFMOD_JAGUAR, 0x003003c3, 0x00300200)
+                        .await?;
+                }
+            }
             ChannelWidth::Mhz20 => {
                 if chip.family != ChipFamily::Rtl8814 {
                     self.set_bb_reg_async(R_RFMOD_JAGUAR, 0x003003c3, 0x00300200)
@@ -781,6 +790,7 @@ fn bb_swing_value(swing: u8, path_index: usize) -> u32 {
 
 fn center_channel(channel: u8, width: ChannelWidth, offset: u8) -> u8 {
     match width {
+        ChannelWidth::Mhz5 | ChannelWidth::Mhz10 => channel,
         ChannelWidth::Mhz20 => channel,
         ChannelWidth::Mhz40 => center_channel_40(channel),
         ChannelWidth::Mhz80 => match channel {

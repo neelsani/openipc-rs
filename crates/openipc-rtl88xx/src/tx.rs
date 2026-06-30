@@ -2,8 +2,12 @@ use openipc_core::radiotap::{
     parse_radiotap_tx_mode, radiotap_len, RadiotapError, TxMode, TxModeKind,
 };
 
+use crate::types::ChipFamily;
+
 /// Size of the Realtek USB TX descriptor prepended before injected frames.
 pub const TX_DESC_SIZE: usize = 40;
+/// Size of the Jaguar3/RTL8822C USB TX descriptor.
+pub const TX_DESC_SIZE_8822C: usize = 48;
 
 const MGN_1M: u8 = 0x02;
 const MGN_2M: u8 = 0x04;
@@ -20,13 +24,36 @@ const MGN_54M: u8 = 0x6c;
 const MGN_MCS0: u8 = 0x80;
 const MGN_VHT1SS_MCS0: u8 = 0xa0;
 
+/// Realtek TX descriptor layout to prepend before an injected 802.11 frame.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RealtekTxDescriptor {
+    /// RTL8812AU/RTL8821AU-style 40-byte descriptor.
+    #[default]
+    Jaguar1,
+    /// RTL8814AU 40-byte descriptor variant.
+    Rtl8814,
+    /// RTL8812CU/RTL8822CU 48-byte Jaguar3 descriptor with descriptor checksum.
+    Jaguar3,
+}
+
+impl RealtekTxDescriptor {
+    /// Select the USB TX descriptor layout used by a supported chip family.
+    pub const fn for_chip_family(family: ChipFamily) -> Self {
+        match family {
+            ChipFamily::Rtl8814 => Self::Rtl8814,
+            ChipFamily::Rtl8822c => Self::Jaguar3,
+            ChipFamily::Rtl8812 | ChipFamily::Rtl8821 => Self::Jaguar1,
+        }
+    }
+}
+
 /// Options used while building a Realtek USB TX frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RealtekTxOptions {
     /// Current RF channel, used to avoid CCK rates on 5 GHz channels.
     pub current_channel: u8,
-    /// Whether to use RTL8814-specific descriptor behavior.
-    pub is_8814a: bool,
+    /// TX descriptor layout to emit.
+    pub descriptor: RealtekTxDescriptor,
     /// Force the legacy RTL8812 descriptor shape for compatibility testing.
     pub legacy_8812_descriptor: bool,
     /// Default TX mode when the radiotap header does not provide one.
@@ -37,7 +64,7 @@ impl Default for RealtekTxOptions {
     fn default() -> Self {
         Self {
             current_channel: 36,
-            is_8814a: false,
+            descriptor: RealtekTxDescriptor::Jaguar1,
             legacy_8812_descriptor: false,
             tx_mode_default: None,
         }
@@ -89,6 +116,10 @@ pub fn build_usb_tx_frame(
         fixed_rate = MGN_6M;
     }
 
+    if options.descriptor == RealtekTxDescriptor::Jaguar3 {
+        return build_usb_tx_frame_jaguar3(payload, tx_mode, fixed_rate);
+    }
+
     let mut out = vec![0; TX_DESC_SIZE + payload.len()];
     set_bits_le32(
         &mut out,
@@ -97,7 +128,8 @@ pub fn build_usb_tx_frame(
         2,
         tx_mode.bandwidth.realtek_desc_bits() as u32,
     );
-    let use_8814_descriptor_exceptions = options.is_8814a && !options.legacy_8812_descriptor;
+    let use_8814_descriptor_exceptions =
+        options.descriptor == RealtekTxDescriptor::Rtl8814 && !options.legacy_8812_descriptor;
 
     set_bits_le32(&mut out, 0, 26, 1, 1);
     if !use_8814_descriptor_exceptions {
@@ -143,6 +175,51 @@ pub fn build_usb_tx_frame(
     Ok(out)
 }
 
+fn build_usb_tx_frame_jaguar3(
+    payload: &[u8],
+    tx_mode: TxMode,
+    fixed_rate: u8,
+) -> Result<Vec<u8>, RealtekTxError> {
+    let mut out = vec![0; TX_DESC_SIZE_8822C + payload.len()];
+    set_bits_le32(&mut out, 0, 0, 16, payload.len() as u32);
+    set_bits_le32(&mut out, 0, 16, 8, TX_DESC_SIZE_8822C as u32);
+    set_bits_le32(&mut out, 0, 26, 1, 1);
+    set_bits_le32(&mut out, 4, 0, 7, 0x01);
+    set_bits_le32(&mut out, 4, 8, 5, 0x12);
+    set_bits_le32(
+        &mut out,
+        4,
+        16,
+        5,
+        if tx_mode.kind == TxModeKind::Vht {
+            9
+        } else {
+            8
+        },
+    );
+    set_bits_le32(&mut out, 12, 8, 1, 1);
+    set_bits_le32(&mut out, 12, 10, 1, 1);
+    set_bits_le32(&mut out, 16, 0, 7, mrate_to_hw_rate(fixed_rate) as u32);
+    if tx_mode.short_gi {
+        set_bits_le32(&mut out, 20, 4, 1, 1);
+    }
+    set_bits_le32(
+        &mut out,
+        20,
+        5,
+        2,
+        tx_mode.bandwidth.realtek_desc_bits() as u32,
+    );
+    if tx_mode.ldpc {
+        set_bits_le32(&mut out, 20, 7, 1, 1);
+    }
+    set_bits_le32(&mut out, 20, 8, 2, u32::from(tx_mode.stbc));
+    set_bits_le32(&mut out, 32, 15, 1, 1);
+    tx_desc_checksum_8822c(&mut out[..TX_DESC_SIZE_8822C]);
+    out[TX_DESC_SIZE_8822C..].copy_from_slice(payload);
+    Ok(out)
+}
+
 fn tx_mode_fixed_rate(mode: TxMode) -> u8 {
     match mode.kind {
         TxModeKind::Legacy => mode.legacy_rate_500kbps,
@@ -178,6 +255,17 @@ fn tx_desc_checksum(desc: &mut [u8]) {
     set_bits_le32(desc, 28, 0, 16, checksum as u32);
 }
 
+fn tx_desc_checksum_8822c(desc: &mut [u8]) {
+    set_bits_le32(desc, 28, 0, 16, 0);
+    let pkt_offset = bits(le32(desc, 4), 24, 5) as usize;
+    let pairs = (pkt_offset + (TX_DESC_SIZE_8822C >> 3)) << 1;
+    let mut checksum = 0u16;
+    for idx in 0..pairs {
+        checksum ^= le16(desc, 2 * idx) ^ le16(desc, 2 * idx + 1);
+    }
+    set_bits_le32(desc, 28, 0, 16, checksum as u32);
+}
+
 const fn is_cck_rate(rate: u8) -> bool {
     matches!(rate, MGN_1M | MGN_2M | MGN_5_5M | MGN_11M)
 }
@@ -202,6 +290,23 @@ const fn mrate_to_hw_rate(rate: u8) -> u8 {
     }
 }
 
+fn le16(bytes: &[u8], word: usize) -> u16 {
+    let offset = word * 2;
+    u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
+}
+
+fn le32(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(
+        bytes[offset..offset + 4]
+            .try_into()
+            .expect("descriptor offset is in range"),
+    )
+}
+
+fn bits(word: u32, offset: u8, len: u8) -> u32 {
+    (word >> offset) & ((1u32 << len) - 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,11 +316,11 @@ mod tests {
     };
     use openipc_core::ChannelId;
 
-    fn le32(bytes: &[u8], offset: usize) -> u32 {
+    fn read_le32(bytes: &[u8], offset: usize) -> u32 {
         u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
     }
 
-    fn bits(word: u32, offset: u8, len: u8) -> u32 {
+    fn test_bits(word: u32, offset: u8, len: u8) -> u32 {
         (word >> offset) & ((1u32 << len) - 1)
     }
 
@@ -232,17 +337,17 @@ mod tests {
 
         let usb = build_usb_tx_frame(&packet, RealtekTxOptions::default()).unwrap();
         assert_eq!(usb.len(), TX_DESC_SIZE + 27);
-        assert_eq!(bits(le32(&usb, 0), 0, 16), 27);
-        assert_eq!(bits(le32(&usb, 0), 16, 8), TX_DESC_SIZE as u32);
-        assert_eq!(bits(le32(&usb, 0), 26, 1), 1);
-        assert_eq!(bits(le32(&usb, 0), 27, 1), 0);
-        assert_eq!(bits(le32(&usb, 0), 31, 1), 1);
-        assert_eq!(bits(le32(&usb, 4), 16, 5), 8);
-        assert_eq!(bits(le32(&usb, 8), 24, 6), 0x3f);
-        assert_eq!(bits(le32(&usb, 16), 18, 6), 12);
-        assert_eq!(bits(le32(&usb, 16), 0, 7), 0x0c);
-        assert_eq!(bits(le32(&usb, 24), 0, 12), 1);
-        assert_eq!(bits(le32(&usb, 32), 15, 1), 1);
+        assert_eq!(test_bits(read_le32(&usb, 0), 0, 16), 27);
+        assert_eq!(test_bits(read_le32(&usb, 0), 16, 8), TX_DESC_SIZE as u32);
+        assert_eq!(test_bits(read_le32(&usb, 0), 26, 1), 1);
+        assert_eq!(test_bits(read_le32(&usb, 0), 27, 1), 0);
+        assert_eq!(test_bits(read_le32(&usb, 0), 31, 1), 1);
+        assert_eq!(test_bits(read_le32(&usb, 4), 16, 5), 8);
+        assert_eq!(test_bits(read_le32(&usb, 8), 24, 6), 0x3f);
+        assert_eq!(test_bits(read_le32(&usb, 16), 18, 6), 12);
+        assert_eq!(test_bits(read_le32(&usb, 16), 0, 7), 0x0c);
+        assert_eq!(test_bits(read_le32(&usb, 24), 0, 12), 1);
+        assert_eq!(test_bits(read_le32(&usb, 32), 15, 1), 1);
         assert_eq!(
             &usb[TX_DESC_SIZE..TX_DESC_SIZE + 2],
             &[FRAME_TYPE_RTS, 0x01]
@@ -263,8 +368,8 @@ mod tests {
         packet.extend_from_slice(&frame);
 
         let usb = build_usb_tx_frame(&packet, RealtekTxOptions::default()).unwrap();
-        assert_eq!(bits(le32(&usb, 36), 12, 12), 0);
-        assert_eq!(bits(le32(&usb, 32), 15, 1), 1);
+        assert_eq!(test_bits(read_le32(&usb, 36), 12, 12), 0);
+        assert_eq!(test_bits(read_le32(&usb, 32), 15, 1), 1);
     }
 
     #[test]
@@ -280,17 +385,17 @@ mod tests {
         let usb = build_usb_tx_frame(
             &packet,
             RealtekTxOptions {
-                is_8814a: true,
+                descriptor: RealtekTxDescriptor::Rtl8814,
                 ..RealtekTxOptions::default()
             },
         )
         .unwrap();
-        assert_eq!(bits(le32(&usb, 0), 27, 1), 0);
-        assert_eq!(bits(le32(&usb, 0), 31, 1), 0);
-        assert_eq!(bits(le32(&usb, 24), 0, 12), 1);
-        assert_eq!(bits(le32(&usb, 32), 15, 1), 1);
-        assert_eq!(bits(le32(&usb, 8), 24, 6), 0);
-        assert_eq!(bits(le32(&usb, 16), 18, 6), 0);
+        assert_eq!(test_bits(read_le32(&usb, 0), 27, 1), 0);
+        assert_eq!(test_bits(read_le32(&usb, 0), 31, 1), 0);
+        assert_eq!(test_bits(read_le32(&usb, 24), 0, 12), 1);
+        assert_eq!(test_bits(read_le32(&usb, 32), 15, 1), 1);
+        assert_eq!(test_bits(read_le32(&usb, 8), 24, 6), 0);
+        assert_eq!(test_bits(read_le32(&usb, 16), 18, 6), 0);
     }
 
     #[test]
@@ -306,15 +411,15 @@ mod tests {
         let usb = build_usb_tx_frame(
             &packet,
             RealtekTxOptions {
-                is_8814a: true,
+                descriptor: RealtekTxDescriptor::Rtl8814,
                 legacy_8812_descriptor: true,
                 ..RealtekTxOptions::default()
             },
         )
         .unwrap();
-        assert_eq!(bits(le32(&usb, 0), 31, 1), 1);
-        assert_eq!(bits(le32(&usb, 8), 24, 6), 0x3f);
-        assert_eq!(bits(le32(&usb, 16), 18, 6), 12);
+        assert_eq!(test_bits(read_le32(&usb, 0), 31, 1), 1);
+        assert_eq!(test_bits(read_le32(&usb, 8), 24, 6), 0x3f);
+        assert_eq!(test_bits(read_le32(&usb, 16), 18, 6), 12);
     }
 
     #[test]
@@ -339,8 +444,43 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(bits(le32(&usb, 16), 0, 7), 0x0c + 5);
-        assert_eq!(bits(le32(&usb, 20), 5, 2), 1);
-        assert_eq!(bits(le32(&usb, 20), 4, 1), 1);
+        assert_eq!(test_bits(read_le32(&usb, 16), 0, 7), 0x0c + 5);
+        assert_eq!(test_bits(read_le32(&usb, 20), 5, 2), 1);
+        assert_eq!(test_bits(read_le32(&usb, 20), 4, 1), 1);
+    }
+
+    #[test]
+    fn jaguar3_descriptor_matches_devourer_offsets() {
+        let params = TxRadioParams::default();
+        let mut packet = build_radiotap_header(params);
+        packet.extend_from_slice(&build_wfb_header_with_frame_type(
+            ChannelId::default_video(),
+            [0x10, 0x00],
+            FRAME_TYPE_RTS,
+        ));
+
+        let usb = build_usb_tx_frame(
+            &packet,
+            RealtekTxOptions {
+                descriptor: RealtekTxDescriptor::Jaguar3,
+                ..RealtekTxOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(usb.len(), TX_DESC_SIZE_8822C + 24);
+        assert_eq!(test_bits(read_le32(&usb, 0), 0, 16), 24);
+        assert_eq!(
+            test_bits(read_le32(&usb, 0), 16, 8),
+            TX_DESC_SIZE_8822C as u32
+        );
+        assert_eq!(test_bits(read_le32(&usb, 0), 26, 1), 1);
+        assert_eq!(test_bits(read_le32(&usb, 4), 0, 7), 1);
+        assert_eq!(test_bits(read_le32(&usb, 4), 8, 5), 0x12);
+        assert_eq!(test_bits(read_le32(&usb, 4), 16, 5), 8);
+        assert_eq!(test_bits(read_le32(&usb, 12), 8, 1), 1);
+        assert_eq!(test_bits(read_le32(&usb, 12), 10, 1), 1);
+        assert_eq!(test_bits(read_le32(&usb, 16), 0, 7), 0x0c);
+        assert_eq!(test_bits(read_le32(&usb, 32), 15, 1), 1);
+        assert_ne!(test_bits(read_le32(&usb, 28), 0, 16), 0);
     }
 }

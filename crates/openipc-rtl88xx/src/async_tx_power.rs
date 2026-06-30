@@ -155,6 +155,7 @@ impl RealtekDevice {
                 self.set_tx_power_override_8814_async(chip, current_channel, power)
                     .await
             }
+            ChipFamily::Rtl8822c => self.set_tx_power_override_8822c_async(power).await,
             ChipFamily::Rtl8812 | ChipFamily::Rtl8821 => {
                 self.set_tx_power_override_8812_family_async(chip, current_channel, power)
                     .await
@@ -176,6 +177,7 @@ impl RealtekDevice {
                 self.set_tx_power_override_8814_async(chip, current_channel, power)
                     .await
             }
+            ChipFamily::Rtl8822c => self.set_tx_power_override_8822c_async(power).await,
             ChipFamily::Rtl8812 | ChipFamily::Rtl8821 => {
                 self.set_tx_power_override_8812_family_async(chip, current_channel, power)
                     .await
@@ -202,6 +204,7 @@ impl RealtekDevice {
                 self.set_tx_power_from_efuse_8814_async(chip, current_channel, width, efuse)
                     .await
             }
+            ChipFamily::Rtl8822c => self.set_tx_power_override_8822c_async(fallback_power).await,
             ChipFamily::Rtl8812 | ChipFamily::Rtl8821 => {
                 self.set_tx_power_from_efuse_8812_family_async(
                     chip,
@@ -376,6 +379,24 @@ impl RealtekDevice {
                 .await?;
             self.write_txagc_table_rates_8814_async(path, RATES_VHT_3SS, power)
                 .await?;
+        }
+        Ok(())
+    }
+
+    async fn set_tx_power_override_8822c_async(&self, power: u8) -> Result<(), DriverError> {
+        let power = power.min(0x7f);
+        for (register, mask) in [
+            (0x18e8, 0x0001_fc00),
+            (0x41e8, 0x0001_fc00),
+            (0x18a0, 0x007f_0000),
+            (0x41a0, 0x007f_0000),
+        ] {
+            self.set_bb_reg_async(0x1c90, 1 << 15, 0).await?;
+            self.set_bb_reg_async(register, mask, power as u32).await?;
+        }
+        for register in (0x3a00..=0x3a7c).step_by(4) {
+            self.set_bb_reg_async(0x1c90, 1 << 15, 0).await?;
+            self.set_bb_reg_async(register, B_MASK_DWORD, 0).await?;
         }
         Ok(())
     }

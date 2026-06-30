@@ -1,6 +1,6 @@
 use crate::device::RealtekDevice;
 use crate::phy::RfPath;
-use crate::types::{ChipFamily, ChipInfo, DriverError};
+use crate::types::{ChannelWidth, ChipFamily, ChipInfo, DriverError};
 
 const RF_REG_MASK: u32 = 0x000f_ffff;
 
@@ -25,6 +25,10 @@ impl RealtekDevice {
         match chip.family {
             ChipFamily::Rtl8812 => self.run_iqk_8812_async(chip, channel).await,
             ChipFamily::Rtl8814 => self.run_iqk_8814_async(chip, channel).await,
+            ChipFamily::Rtl8822c => {
+                self.run_iqk_8822c_async(chip, ChannelWidth::Mhz20, channel)
+                    .await
+            }
             ChipFamily::Rtl8821 => Err(DriverError::UnsupportedIqkPath(chip.family)),
         }
     }

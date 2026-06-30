@@ -16,6 +16,7 @@ impl RealtekDevice {
             ChipFamily::Rtl8812 => rtl_data::RTL8812_MAC_REG,
             ChipFamily::Rtl8814 => rtl_data::RTL8814_MAC_REG,
             ChipFamily::Rtl8821 => rtl_data::RTL8821_MAC_REG,
+            ChipFamily::Rtl8822c => return Err(DriverError::UnsupportedFirmwarePath(chip.family)),
         };
         load_phy_table_async(table, phy_context(chip, efuse), |addr, value| async move {
             self.write_u8_async(addr as u16, value as u8).await
@@ -32,6 +33,7 @@ impl RealtekDevice {
             ChipFamily::Rtl8812 => (rtl_data::RTL8812_PHY_REG, rtl_data::RTL8812_AGC_TAB),
             ChipFamily::Rtl8814 => (rtl_data::RTL8814_PHY_REG, rtl_data::RTL8814_AGC_TAB),
             ChipFamily::Rtl8821 => (rtl_data::RTL8821_PHY_REG, rtl_data::RTL8821_AGC_TAB),
+            ChipFamily::Rtl8822c => return Err(DriverError::UnsupportedFirmwarePath(chip.family)),
         };
         load_phy_table_async(phy, phy_context(chip, efuse), |addr, value| async move {
             self.config_bb_phy_async(addr, value).await
@@ -119,6 +121,7 @@ impl RealtekDevice {
                     .await?;
                 }
             }
+            ChipFamily::Rtl8822c => return Err(DriverError::UnsupportedFirmwarePath(chip.family)),
         }
         Ok(())
     }

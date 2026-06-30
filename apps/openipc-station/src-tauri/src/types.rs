@@ -228,6 +228,7 @@ pub(crate) struct RxBatchContext<'a> {
     pub(crate) adaptive: Option<&'a mut AdaptiveRuntime>,
     pub(crate) ep_out: Option<&'a mut nusb::Endpoint<Bulk, Out>>,
     pub(crate) now_ms: u64,
+    pub(crate) rx_descriptor_kind: openipc_core::realtek::RxDescriptorKind,
     pub(crate) usb_read_ms: f64,
     pub(crate) loop_start: Instant,
     pub(crate) raw_payload_routes: &'a [PayloadRouteId],

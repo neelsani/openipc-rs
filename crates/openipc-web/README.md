@@ -19,8 +19,9 @@ JavaScript:
 - Adaptive-link feedback helpers
 - WebUSB Realtek device access
 - Realtek diagnostics and calibration hooks: false-alarm counters, PHYDM DIG
-  watchdog ticks, RTL8812 power tracking, RTL8812/RTL8814 IQK, C2H packets,
-  RTL8814 TX-status reports, and optional bad-FCS packet retention
+  watchdog ticks, RTL8812 power tracking, Jaguar3 thermal tracking,
+  RTL8812/RTL8814/Jaguar3 IQK, C2H packets, RTL8814 TX-status reports, and
+  optional bad-FCS packet retention
 
 It does not include a UI or video renderer. Applications are expected to feed
 the encoded frames into WebCodecs, MSE, a worker pipeline, or another renderer.
@@ -46,6 +47,7 @@ openipc-web = "0.1"
 ```ts
 import init, {
   OpenIpcReceiver,
+  WebUsbPowerTracking8822c,
   WebUsbRealtekDevice,
   supportedUsbFilters,
 } from "@openipc-rs/web";
@@ -61,7 +63,12 @@ const receiver = OpenIpcReceiver.withKeypairOnly(
   keypairBytes,
   minimumEpoch,
 );
+receiver.setRxDescriptorKind(radio.rxDescriptorKind());
 receiver.addKeyedRoute(2, telemetryChannelId, keypairBytes, minimumEpoch);
+const jaguar3Power =
+  radio.rxDescriptorKind() === "jaguar3"
+    ? new WebUsbPowerTracking8822c()
+    : undefined;
 
 const initReport = await radio.initializeMonitorWithOptions(
   channel,
@@ -72,6 +79,10 @@ const initReport = await radio.initializeMonitorWithOptions(
 console.log(initReport.chip, initReport.status);
 
 while (running) {
+  if (radio.rxDescriptorKind() === "jaguar3") {
+    await radio.runJaguar3CoexKeepalive();
+    await jaguar3Power?.tick(radio);
+  }
   const transfers = await radio.readRxTransfers(32768, 4);
   for (const transfer of transfers) {
     const batch = receiver.pushRxTransferProfiledWithRouteIds(

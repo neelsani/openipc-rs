@@ -6,6 +6,8 @@ pub(crate) fn radio_config(
     channel_offset: u8,
 ) -> Result<RadioConfig, String> {
     let channel_width = match channel_width_mhz {
+        5 => ChannelWidth::Mhz5,
+        10 => ChannelWidth::Mhz10,
         20 => ChannelWidth::Mhz20,
         40 => ChannelWidth::Mhz40,
         80 => ChannelWidth::Mhz80,

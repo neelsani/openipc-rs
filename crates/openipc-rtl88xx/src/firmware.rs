@@ -8,6 +8,7 @@ pub(crate) fn strip_firmware_header(family: ChipFamily, firmware: &[u8]) -> &[u8
     let has_header = match family {
         ChipFamily::Rtl8821 => signature & 0xfff0 == 0x2100,
         ChipFamily::Rtl8814 => signature & 0xfff0 == 0x8810,
+        ChipFamily::Rtl8822c => signature & 0xfff0 == 0x8820,
         ChipFamily::Rtl8812 => signature & 0xfff0 == 0x9500,
     };
     if has_header {

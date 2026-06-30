@@ -15,7 +15,7 @@ use nusb::transfer::{Bulk, Out};
 #[cfg(target_os = "android")]
 use nusb::MaybeFuture;
 use openipc_core::radiotap::TxRadioParams;
-use openipc_core::realtek::{parse_rx_aggregate, RxPacketAttrib, RxPacketType};
+use openipc_core::realtek::{parse_rx_aggregate_with_kind, RxPacketAttrib, RxPacketType};
 use openipc_core::rtp::{Codec, DepacketizedFrame, RTP_PAYLOAD_TYPE_OPUS};
 use openipc_core::{
     AdaptiveLinkSender, ChannelId, FecCounters, FrameLayout, PayloadRouteId, RadioPort,
@@ -24,8 +24,8 @@ use openipc_core::{
 #[cfg(not(target_os = "android"))]
 use openipc_rtl88xx::{list_supported_devices, UsbDeviceSummary};
 use openipc_rtl88xx::{
-    ChannelWidth, ChipFamily, DriverOptions, InitReport, InitStatus, MonitorOptions, RadioConfig,
-    RealtekDevice, RealtekTxOptions,
+    ChannelWidth, ChipFamily, DriverOptions, InitReport, InitStatus, Jaguar3PowerTrackingState,
+    MonitorOptions, RadioConfig, RealtekDevice, RealtekTxOptions,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};

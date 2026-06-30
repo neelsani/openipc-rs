@@ -62,7 +62,7 @@ export interface Settings {
   wifiDevice: string;
   channelMhz: number;
   channelNum: number;
-  channelWidth: 20 | 40;
+  channelWidth: 5 | 10 | 20 | 40 | 80;
   channelOffset: number;
   codec: CodecPref;
   adaptiveLink: boolean;
@@ -323,7 +323,9 @@ export function useStation() {
       const audioPacketRate = current.running
         ? Math.max(
             0,
-            Math.round((current.audio.packets - previous.audioPackets) / seconds),
+            Math.round(
+              (current.audio.packets - previous.audioPackets) / seconds,
+            ),
           )
         : 0;
       const clientP95 = current.diagnostics.bottleneck?.p95Ms ?? 0;
@@ -384,10 +386,7 @@ export function useStation() {
           packetRate: pushSample(sample.series.packetRate, packetRate),
           dropRate: pushSample(sample.series.dropRate, dropRate),
           clientP95: pushSample(sample.series.clientP95, clientP95),
-          audioPackets: pushSample(
-            sample.series.audioPackets,
-            audioPacketRate,
-          ),
+          audioPackets: pushSample(sample.series.audioPackets, audioPacketRate),
           audioQueue: pushSample(
             sample.series.audioQueue,
             current.audio.queuedMs,

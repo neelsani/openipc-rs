@@ -84,6 +84,24 @@ pub const SUPPORTED_DEVICES: &[SupportedDevice] = &[
     SupportedDevice::new(0x7392, 0xa812, ChipFamily::Rtl8821, "Edimax RTL8821AU"),
     SupportedDevice::new(0x7392, 0xa813, ChipFamily::Rtl8821, "Edimax RTL8821AU"),
     SupportedDevice::new(0x7392, 0xb611, ChipFamily::Rtl8821, "Edimax RTL8821AU"),
+    SupportedDevice::new(
+        0x0bda,
+        0xc812,
+        ChipFamily::Rtl8822c,
+        "RTL8812CU / RTL8822CU WiFi-only default PID",
+    ),
+    SupportedDevice::new(
+        0x0bda,
+        0xc82c,
+        ChipFamily::Rtl8822c,
+        "RTL8822CU multi-function default PID",
+    ),
+    SupportedDevice::new(
+        0x0bda,
+        0xc82e,
+        ChipFamily::Rtl8822c,
+        "RTL8822CU multi-function default PID",
+    ),
 ];
 
 /// Static metadata for one supported USB VID/PID pair.
@@ -125,6 +143,8 @@ pub enum ChipFamily {
     Rtl8814,
     /// RTL8821AU class.
     Rtl8821,
+    /// RTL8812CU / RTL8822CU Jaguar3 class.
+    Rtl8822c,
 }
 
 impl ChipFamily {
@@ -134,7 +154,13 @@ impl ChipFamily {
             Self::Rtl8812 => "RTL8812/RTL8811",
             Self::Rtl8814 => "RTL8814",
             Self::Rtl8821 => "RTL8821",
+            Self::Rtl8822c => "RTL8812CU/RTL8822CU",
         }
+    }
+
+    /// Return true for Jaguar3 devices with the 8822C descriptor/HAL layout.
+    pub const fn is_jaguar3(self) -> bool {
+        matches!(self, Self::Rtl8822c)
     }
 }
 
@@ -166,6 +192,8 @@ impl ChipInfo {
     pub(crate) fn from_probe(vendor_id: u16, product_id: u16, sys_cfg: u32) -> Self {
         let family = if product_id == 0x8813 {
             ChipFamily::Rtl8814
+        } else if is_rtl8822c_pid(vendor_id, product_id) {
+            ChipFamily::Rtl8822c
         } else if is_rtl8821a_pid(vendor_id, product_id) {
             ChipFamily::Rtl8821
         } else {
@@ -174,6 +202,7 @@ impl ChipInfo {
         let rf_type = match family {
             ChipFamily::Rtl8814 => RfType::FourTFourR,
             ChipFamily::Rtl8821 => RfType::OneTOneR,
+            ChipFamily::Rtl8822c => RfType::TwoTTwoR,
             ChipFamily::Rtl8812 => {
                 if sys_cfg & RF_TYPE_ID != 0 {
                     RfType::OneTOneR
@@ -183,7 +212,7 @@ impl ChipInfo {
             }
         };
         let raw_cut = ((sys_cfg & CHIP_VER_RTL_MASK) >> CHIP_VER_RTL_SHIFT) as u8;
-        let cut_version = if family == ChipFamily::Rtl8814 {
+        let cut_version = if matches!(family, ChipFamily::Rtl8814 | ChipFamily::Rtl8822c) {
             raw_cut
         } else {
             raw_cut.saturating_add(1)
@@ -209,6 +238,10 @@ impl ChipInfo {
 /// Configured WiFi channel width for monitor mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelWidth {
+    /// 5 MHz narrowband mode on Jaguar3 devices.
+    Mhz5,
+    /// 10 MHz narrowband mode on Jaguar3 devices.
+    Mhz10,
     /// 20 MHz channel.
     Mhz20,
     /// 40 MHz channel.
@@ -220,6 +253,7 @@ pub enum ChannelWidth {
 impl ChannelWidth {
     pub(crate) const fn rf_bw_bits(self) -> u32 {
         match self {
+            Self::Mhz5 | Self::Mhz10 => 3,
             Self::Mhz20 => 3,
             Self::Mhz40 => 1,
             Self::Mhz80 => 0,
@@ -389,6 +423,7 @@ impl MonitorOptions {
             ChipFamily::Rtl8812 => true,
             ChipFamily::Rtl8814 => self.force_iqk,
             ChipFamily::Rtl8821 => false,
+            ChipFamily::Rtl8822c => self.force_iqk,
         }
     }
 }
@@ -538,9 +573,19 @@ impl std::error::Error for DriverError {}
 
 /// Return true if a USB VID/PID pair exists in [`SUPPORTED_DEVICES`].
 pub fn is_supported_id(vendor_id: u16, product_id: u16) -> bool {
+    supported_device(vendor_id, product_id).is_some()
+}
+
+/// Return static metadata for a supported USB VID/PID pair.
+pub fn supported_device(vendor_id: u16, product_id: u16) -> Option<&'static SupportedDevice> {
     SUPPORTED_DEVICES
         .iter()
-        .any(|dev| dev.vendor_id == vendor_id && dev.product_id == product_id)
+        .find(|dev| dev.vendor_id == vendor_id && dev.product_id == product_id)
+}
+
+/// Return the chip-family hint associated with a supported USB VID/PID pair.
+pub fn supported_family_hint(vendor_id: u16, product_id: u16) -> Option<ChipFamily> {
+    supported_device(vendor_id, product_id).map(|device| device.family_hint)
 }
 
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
@@ -634,5 +679,12 @@ pub(crate) fn is_rtl8821a_pid(vid: u16, pid: u16) -> bool {
             | 0x7392A812
             | 0x7392A813
             | 0x7392B611
+    )
+}
+
+pub(crate) fn is_rtl8822c_pid(vid: u16, pid: u16) -> bool {
+    matches!(
+        ((vid as u32) << 16) | pid as u32,
+        0x0BDAC812 | 0x0BDAC82C | 0x0BDAC82E
     )
 }

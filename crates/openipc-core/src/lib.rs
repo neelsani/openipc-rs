@@ -39,7 +39,10 @@ pub use radiotap::{
     build_stream_radiotap, parse_tx_mode_str, ChannelBandwidth, TxMode, TxModeKind, TxRadioParams,
     FRAME_TYPE_DATA, FRAME_TYPE_RTS,
 };
-pub use realtek::{parse_rx_aggregate, RealtekRxPacket, RxPacketAttrib};
+pub use realtek::{
+    parse_rx_aggregate, parse_rx_aggregate_with_kind, RealtekRxPacket, RxDescriptorKind,
+    RxPacketAttrib,
+};
 pub use receiver::{
     ReceiverBatch, ReceiverBatchCounters, ReceiverBatchOptions, ReceiverRuntime, RoutePayload,
     RtpPayloadTap,

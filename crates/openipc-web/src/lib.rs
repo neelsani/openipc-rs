@@ -16,8 +16,9 @@ pub use webusb::supported_usb_filters;
 #[cfg(target_arch = "wasm32")]
 pub use webusb::{
     list_authorized_usb_devices, WebBbDbgportRead, WebFalseAlarmCounters, WebInitReport,
-    WebIqkReport, WebPhydmWatchdogReport, WebPowerTrackingReport, WebQueueDepth8814,
-    WebThermalStatus, WebUsbPhydmWatchdog, WebUsbPowerTracking8812, WebUsbRealtekDevice,
+    WebIqkReport, WebJaguar3PowerTrackingReport, WebPhydmWatchdogReport, WebPowerTrackingReport,
+    WebQueueDepth8814, WebThermalStatus, WebUsbPhydmWatchdog, WebUsbPowerTracking8812,
+    WebUsbPowerTracking8822c, WebUsbRealtekDevice,
 };
 
 use wasm_bindgen::prelude::*;

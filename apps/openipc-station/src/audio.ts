@@ -40,7 +40,8 @@ export function parseRtpPacket(packet: Uint8Array): RtpPacketView | null {
     if (packet.byteLength < headerLength + 4) {
       return null;
     }
-    const extensionWords = (packet[headerLength + 2] << 8) | packet[headerLength + 3];
+    const extensionWords =
+      (packet[headerLength + 2] << 8) | packet[headerLength + 3];
     headerLength += 4 + extensionWords * 4;
     if (packet.byteLength < headerLength) {
       return null;
@@ -104,7 +105,11 @@ export class OpusAudioPlayer {
     const volume = Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
     this.volumeValue = volume;
     if (this.gainNode && this.context) {
-      this.gainNode.gain.setTargetAtTime(volume, this.context.currentTime, 0.01);
+      this.gainNode.gain.setTargetAtTime(
+        volume,
+        this.context.currentTime,
+        0.01,
+      );
     }
   }
 
@@ -170,7 +175,11 @@ export class OpusAudioPlayer {
       return true;
     }
 
-    const configured = await this.configure(codec, options.sampleRate, options.channels);
+    const configured = await this.configure(
+      codec,
+      options.sampleRate,
+      options.channels,
+    );
     if (!configured || !this.decoder) {
       this.publish();
       return true;
@@ -252,7 +261,8 @@ export class OpusAudioPlayer {
     let context = this.context;
     if (!context) {
       const AudioContextCtor =
-        window.AudioContext ?? (window as WindowWithLegacyAudio).webkitAudioContext;
+        window.AudioContext ??
+        (window as WindowWithLegacyAudio).webkitAudioContext;
       if (!AudioContextCtor) {
         this.statsValue.decoderName = "AudioContext unavailable";
         return null;
@@ -330,13 +340,18 @@ export class OpusAudioPlayer {
       return nowUs;
     }
 
-    if (timestamp < clock.lastRtp && clock.lastRtp - timestamp > RTP_TIMESTAMP_HALF_WRAP) {
+    if (
+      timestamp < clock.lastRtp &&
+      clock.lastRtp - timestamp > RTP_TIMESTAMP_HALF_WRAP
+    ) {
       clock.wrapOffset += RTP_TIMESTAMP_WRAP;
     }
     const extendedTimestamp = clock.wrapOffset + timestamp;
     let timestampUs =
       clock.baseUs +
-      Math.round(((extendedTimestamp - clock.baseRtp) * 1_000_000) / sampleRate);
+      Math.round(
+        ((extendedTimestamp - clock.baseRtp) * 1_000_000) / sampleRate,
+      );
     if (!Number.isFinite(timestampUs) || timestampUs <= clock.lastUs) {
       timestampUs = clock.lastUs + 1;
     }

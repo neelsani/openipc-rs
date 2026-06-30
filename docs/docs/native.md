@@ -4,7 +4,7 @@ sidebar_position: 4
 
 # Native
 
-The native CLI lives in `crates/openipc-native` and builds a binary named
+The native CLI lives in `apps/openipc-cli` and builds a binary named
 `openipc-rs`.
 
 For embedding the crates directly in your own Rust application, see
@@ -22,15 +22,15 @@ For embedding the crates directly in your own Rust application, see
 ## List Devices
 
 ```sh
-cargo run -p openipc-native -- list
-cargo run -p openipc-native -- list-supported
+cargo run -p openipc-cli -- list
+cargo run -p openipc-cli -- list-supported
 ```
 
 ## Probe A Realtek Adapter
 
 ```sh
-cargo run -p openipc-native -- probe
-OPENIPC_RS_SKIP_RESET=1 cargo run -p openipc-native -- probe
+cargo run -p openipc-cli -- probe
+OPENIPC_RS_SKIP_RESET=1 cargo run -p openipc-cli -- probe
 ```
 
 `probe` claims the first supported adapter, reads chip information, and prints
@@ -41,13 +41,13 @@ the selected bulk endpoints. It does not run full monitor-mode initialization.
 Parse a captured Realtek RX bulk transfer:
 
 ```sh
-cargo run -p openipc-native -- parse-aggregate capture.bin
+cargo run -p openipc-cli -- parse-aggregate capture.bin
 ```
 
 Decode a captured transfer through WFB/FEC/RTP and write Annex-B video:
 
 ```sh
-cargo run -p openipc-native -- decode-aggregate capture.bin --key gs.key --out video.annexb
+cargo run -p openipc-cli -- decode-aggregate capture.bin --key gs.key --out video.annexb
 ```
 
 Use this path when debugging protocol changes. It lets you test parser, WFB,
@@ -56,7 +56,7 @@ FEC, and RTP behavior without live USB timing in the loop.
 ## Receive Live Video
 
 ```sh
-cargo run -p openipc-native -- recv \
+cargo run -p openipc-cli -- recv \
   --key gs.key \
   --rf-channel 161 \
   --rf-width 20 \
@@ -81,7 +81,7 @@ Important receive options:
 ## Adaptive Link
 
 ```sh
-cargo run -p openipc-native -- recv \
+cargo run -p openipc-cli -- recv \
   --key gs.key \
   --rf-channel 161 \
   --adaptive-link \

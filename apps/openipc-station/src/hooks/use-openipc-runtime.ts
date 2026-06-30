@@ -6,6 +6,7 @@ import {
   useState,
   type ChangeEvent,
 } from "react";
+import { OpusAudioPlayer, parseRtpPacket } from "@/audio";
 import initWasm, {
   OpenIpcAdaptiveLink,
   OpenIpcReceiver,
@@ -25,10 +26,12 @@ import {
 } from "@/lib/format";
 import {
   DEFAULT_VIDEO_STATS,
+  RTP_PAYLOAD_TYPE_OPUS,
   SETTINGS_STORAGE_KEY,
   loadStoredSettings,
 } from "@/lib/settings";
 import type {
+  AudioStats,
   AuthorizedUsbDevice,
   DiagnosticEvent,
   DiagnosticStageId,
@@ -41,6 +44,8 @@ import type {
   LogEntry,
   LogLevel,
   Metrics,
+  PayloadRouteConfig,
+  PayloadRouteStats,
   RtpClockState,
   RuntimeState,
   UsbInfo,
@@ -102,14 +107,32 @@ const EMPTY_METRICS: Metrics = {
   bytes: 0,
   lastTransferBytes: 0,
   lastFrameBytes: 0,
+  rawPayloads: 0,
+  rawPayloadBytes: 0,
+  lastRawPayloadBytes: 0,
   mavlinkPayloads: 0,
   mavlinkBytes: 0,
   lastMavlinkBytes: 0,
+  audioPackets: 0,
+  audioBytes: 0,
+  audioDecodedFrames: 0,
+  audioErrors: 0,
   errors: 0,
   adaptiveTxFrames: 0,
   adaptiveTxErrors: 0,
   fecRecovered: 0,
   fecLost: 0,
+};
+
+const EMPTY_AUDIO_STATS: AudioStats = {
+  enabled: false,
+  supported: false,
+  decoderName: "Idle",
+  packets: 0,
+  bytes: 0,
+  decodedFrames: 0,
+  errors: 0,
+  queuedMs: 0,
 };
 
 const DIAGNOSTIC_STAGE_ORDER: DiagnosticStageId[] = [
@@ -190,6 +213,10 @@ type OpenIpcVideoDecoderConfig = VideoDecoderConfig & {
   hevc?: {
     format?: "annexb" | "hevc";
   };
+};
+
+type OpenIpcRouteProfile = OpenIpcRxTransferProfile & {
+  rawPayloads?: OpenIpcRawPayload[];
 };
 
 function emptyCodecCapability(codec: string): WebCodecsCapabilities["h264"] {
@@ -355,9 +382,88 @@ function emptyTransferStats(): DiagnosticTransferStats {
     wfbPayloads: 0,
     rtpPackets: 0,
     videoFrames: 0,
+    rawPayloads: 0,
+    rawPayloadBytes: 0,
     mavlinkPayloads: 0,
     mavlinkBytes: 0,
   };
+}
+
+function routeNeedsRawPayload(
+  route: PayloadRouteConfig,
+  udpAvailable: boolean,
+): boolean {
+  return (
+    route.enabled &&
+    route.action !== "audio" &&
+    (udpAvailable || route.action !== "udp")
+  );
+}
+
+function routeNeedsRtpPayloadTap(
+  route: PayloadRouteConfig,
+  _udpAvailable: boolean,
+): boolean {
+  return route.enabled && route.action === "audio";
+}
+
+function routeNeedsRuntimeRoute(
+  route: PayloadRouteConfig,
+  udpAvailable: boolean,
+): boolean {
+  return route.enabled && (udpAvailable || route.action !== "udp");
+}
+
+function routeProducesPayload(
+  route: PayloadRouteConfig,
+  udpAvailable: boolean,
+): boolean {
+  return (
+    routeNeedsRawPayload(route, udpAvailable) ||
+    routeNeedsRtpPayloadTap(route, udpAvailable)
+  );
+}
+
+function routeIdsForRawPayloads(
+  routes: PayloadRouteConfig[],
+  udpAvailable: boolean,
+): Uint32Array {
+  return new Uint32Array(
+    routes
+      .filter((route) => routeNeedsRawPayload(route, udpAvailable))
+      .map((route) => Math.max(1, Math.trunc(route.id))),
+  );
+}
+
+function routeIdsForRtpPayloadTaps(
+  routes: PayloadRouteConfig[],
+  udpAvailable: boolean,
+): Uint32Array {
+  return new Uint32Array(
+    routes
+      .filter((route) => routeNeedsRtpPayloadTap(route, udpAvailable))
+      .map((route) => Math.max(1, Math.trunc(route.id))),
+  );
+}
+
+function payloadTypesForRtpPayloadTaps(
+  routes: PayloadRouteConfig[],
+  udpAvailable: boolean,
+): Uint8Array {
+  return new Uint8Array(
+    routes
+      .filter((route) => routeNeedsRtpPayloadTap(route, udpAvailable))
+      .map((route) =>
+        Math.max(
+          0,
+          Math.min(127, Math.trunc(route.payloadType ?? RTP_PAYLOAD_TYPE_OPUS)),
+        ),
+      ),
+  );
+}
+
+function rawPayloadsFromProfile(profile: OpenIpcRouteProfile): OpenIpcRawPayload[] {
+  return profile.rawPayloads ?? profile.mavlinkPayloads ?? [];
 }
 
 function createEmptyDiagnostics(): DiagnosticsState {
@@ -415,12 +521,15 @@ function parseQuality(json: string): LinkQualityReport {
   return JSON.parse(json) as LinkQualityReport;
 }
 
-function pickRecorderMimeType(): string {
-  const candidates = [
-    "video/webm;codecs=vp9",
-    "video/webm;codecs=vp8",
-    "video/webm",
-  ];
+function pickRecorderMimeType(includeAudio = false): string {
+  const candidates = includeAudio
+    ? [
+        "video/webm;codecs=vp9,opus",
+        "video/webm;codecs=vp8,opus",
+        "video/webm;codecs=opus",
+        "video/webm",
+      ]
+    : ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
   return (
     candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate)) ??
     ""
@@ -546,6 +655,9 @@ export function useOpenIpcRuntime() {
   const diagnosticEventIdRef = useRef(0);
   const diagnosticFallbackFramesRef = useRef(0);
   const diagnosticDroppedBeforeKeyframeRef = useRef(0);
+  const routeStatsRef = useRef(new Map<number, PayloadRouteStats>());
+  const routeLogThrottleRef = useRef(new Map<number, number>());
+  const audioPlayerRef = useRef<OpusAudioPlayer | null>(null);
   const pendingDecodeSamplesRef = useRef(
     new Map<number, PendingDecodeSample>(),
   );
@@ -573,6 +685,8 @@ export function useOpenIpcRuntime() {
   >([]);
   const settingsRef = useRef(settings);
   const [metrics, setMetrics] = useState<Metrics>({ ...EMPTY_METRICS });
+  const [routeStats, setRouteStats] = useState<PayloadRouteStats[]>([]);
+  const [audio, setAudio] = useState<AudioStats>({ ...EMPTY_AUDIO_STATS });
   const [videoStats, setVideoStats] = useState<VideoStats>(DEFAULT_VIDEO_STATS);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsState>(() =>
     createEmptyDiagnostics(),
@@ -593,6 +707,26 @@ export function useOpenIpcRuntime() {
     logIdRef.current += 1;
     setLogs((current) => [...current.slice(-160), entry]);
   }, []);
+
+  function audioPlayer(): OpusAudioPlayer {
+    if (!audioPlayerRef.current) {
+      audioPlayerRef.current = new OpusAudioPlayer(
+        (stats) => {
+          setAudio(stats);
+          setMetrics((current) => ({
+            ...current,
+            audioPackets: stats.packets,
+            audioBytes: stats.bytes,
+            audioDecodedFrames: stats.decodedFrames,
+            audioErrors: stats.errors,
+          }));
+        },
+        (level, message) => appendLog(level, message),
+      );
+      audioPlayerRef.current.setVolume(settingsRef.current.audioVolume / 100);
+    }
+    return audioPlayerRef.current;
+  }
 
   function recordDiagnosticStage(stage: DiagnosticStageId, durationMs: number) {
     if (!Number.isFinite(durationMs) || durationMs < 0) {
@@ -629,8 +763,9 @@ export function useOpenIpcRuntime() {
     }
   }
 
-  function recordTransferProfile(profile: OpenIpcRxTransferProfile) {
+  function recordTransferProfile(profile: OpenIpcRouteProfile) {
     const totals = diagnosticTransfersRef.current;
+    const rawPayloads = rawPayloadsFromProfile(profile);
     totals.packets += profile.packets;
     totals.acceptedPackets += profile.acceptedPackets;
     totals.droppedPackets += profile.droppedPackets;
@@ -642,8 +777,96 @@ export function useOpenIpcRuntime() {
     totals.wfbPayloads += profile.wfbPayloads;
     totals.rtpPackets += profile.rtpPackets;
     totals.videoFrames += profile.videoFrames;
+    totals.rawPayloads += rawPayloads.length;
+    totals.rawPayloadBytes += rawPayloads.reduce(
+      (sum, payload) => sum + payload.data.byteLength,
+      0,
+    );
     totals.mavlinkPayloads += profile.mavlinkPayloadCount;
     totals.mavlinkBytes += profile.mavlinkBytes;
+  }
+
+  async function processRawPayloads(profile: OpenIpcRouteProfile) {
+    const payloads = rawPayloadsFromProfile(profile);
+    if (payloads.length === 0) {
+      return;
+    }
+    const routes = new Map(
+      settingsRef.current.payloadRoutes
+        .filter((route) => routeProducesPayload(route, desktopRuntime))
+        .map((route) => [route.id, route]),
+    );
+    let lastRawPayloadBytes = 0;
+
+    for (const payload of payloads) {
+      const route = routes.get(payload.routeId);
+      if (!route) {
+        continue;
+      }
+      if (route.action === "audio") {
+        const matched = await audioPlayer().pushRtpPacket(payload.data, {
+          enabled: route.enabled,
+          payloadType: route.payloadType ?? RTP_PAYLOAD_TYPE_OPUS,
+          sampleRate: route.sampleRate ?? 48_000,
+          channels: route.channels ?? 1,
+        });
+        if (!matched) {
+          continue;
+        }
+      }
+      lastRawPayloadBytes = payload.data.byteLength;
+      const existing = routeStatsRef.current.get(route.id) ?? {
+        routeId: route.id,
+        name: route.name,
+        action: route.action,
+        packets: 0,
+        bytes: 0,
+        lastBytes: 0,
+        errors: 0,
+      };
+      routeStatsRef.current.set(route.id, {
+        ...existing,
+        name: route.name,
+        action: route.action,
+        packets: existing.packets + 1,
+        bytes: existing.bytes + payload.data.byteLength,
+        lastBytes: payload.data.byteLength,
+      });
+
+      if (route.action === "log") {
+        const now = performance.now();
+        const lastLog = routeLogThrottleRef.current.get(route.id) ?? 0;
+        if (now - lastLog > 1000) {
+          routeLogThrottleRef.current.set(route.id, now);
+          const rtp = parseRtpPacket(payload.data);
+          appendLog(
+            "rx",
+            `${route.name} route=${route.id} bytes=${payload.data.byteLength}${
+              rtp ? ` rtp_pt=${rtp.payloadType} seq=${rtp.sequenceNumber}` : ""
+            }`,
+          );
+        }
+      } else if (route.action === "udp" && !desktopRuntime) {
+        const now = performance.now();
+        const lastLog = routeLogThrottleRef.current.get(route.id) ?? 0;
+        if (now - lastLog > 5000) {
+          routeLogThrottleRef.current.set(route.id, now);
+          appendLog("warn", `UDP route "${route.name}" requires native/Tauri mode`);
+        }
+      }
+    }
+
+    setRouteStats(
+      [...routeStatsRef.current.values()].sort((a, b) => a.routeId - b.routeId),
+    );
+    setMetrics((current) => ({
+      ...current,
+      rawPayloads: current.rawPayloads + payloads.length,
+      rawPayloadBytes:
+        current.rawPayloadBytes +
+        payloads.reduce((sum, payload) => sum + payload.data.byteLength, 0),
+      lastRawPayloadBytes,
+    }));
   }
 
   function publishDiagnostics(force = false) {
@@ -750,6 +973,20 @@ export function useOpenIpcRuntime() {
   }, [settings.darkMode]);
 
   useEffect(() => {
+    const audioEnabled = settings.payloadRoutes.some(
+      (route) => route.enabled && route.action === "audio",
+    );
+    if (!audioEnabled) {
+      audioPlayerRef.current?.close();
+    }
+    setAudio((current) => ({ ...current, enabled: audioEnabled }));
+  }, [settings.payloadRoutes]);
+
+  useEffect(() => {
+    audioPlayerRef.current?.setVolume(settings.audioVolume / 100);
+  }, [settings.audioVolume]);
+
+  useEffect(() => {
     const onFullscreenChange = () => {
       setFullscreen(
         currentFullscreenElement() !== null || fullscreenFallbackRef.current,
@@ -820,6 +1057,7 @@ export function useOpenIpcRuntime() {
       if (lastRecordingUrlRef.current) {
         URL.revokeObjectURL(lastRecordingUrlRef.current);
       }
+      audioPlayerRef.current?.close();
       cleanupTauriSubscriptions();
       if (desktopRuntime) {
         void tauriStopRx().catch(() => {
@@ -1177,10 +1415,20 @@ export function useOpenIpcRuntime() {
       appendLog("error", "MediaRecorder is not available");
       return;
     }
-    const stream = canvas.captureStream(
+    const canvasStream = canvas.captureStream(
       Math.max(30, Math.round(videoStats.renderFps || 60)),
     );
-    const mimeType = pickRecorderMimeType();
+    const audioRouteEnabled = settingsRef.current.payloadRoutes.some(
+      (route) => route.enabled && route.action === "audio",
+    );
+    const audioTracks = audioRouteEnabled
+      ? (audioPlayer().recordingStream()?.getAudioTracks() ?? [])
+      : [];
+    const stream =
+      audioTracks.length > 0
+        ? new MediaStream([...canvasStream.getVideoTracks(), ...audioTracks])
+        : canvasStream;
+    const mimeType = pickRecorderMimeType(audioTracks.length > 0);
     const recorder = new MediaRecorder(
       stream,
       mimeType ? { mimeType } : undefined,
@@ -1192,7 +1440,7 @@ export function useOpenIpcRuntime() {
       }
     };
     recorder.onstop = () => {
-      stream.getTracks().forEach((track) => track.stop());
+      canvasStream.getTracks().forEach((track) => track.stop());
       const blob = new Blob(recordedChunksRef.current, {
         type: mimeType || "video/webm",
       });
@@ -1216,7 +1464,10 @@ export function useOpenIpcRuntime() {
     recorder.start(1000);
     mediaRecorderRef.current = recorder;
     setRecording(true);
-    appendLog("info", `Recording started${mimeType ? ` (${mimeType})` : ""}`);
+    appendLog(
+      "info",
+      `Recording started${mimeType ? ` (${mimeType})` : ""}${audioTracks.length > 0 ? " with audio" : ""}`,
+    );
   }
 
   function stopRecording() {
@@ -1247,11 +1498,25 @@ export function useOpenIpcRuntime() {
       setKeyReady(false);
       return;
     }
-    receiverRef.current = OpenIpcReceiver.withKeypair(
+    const receiver = OpenIpcReceiver.withKeypairOnly(
       channelId,
       keyBytes,
       minimumEpoch,
     );
+    for (const route of settings.payloadRoutes.filter((candidate) =>
+      routeNeedsRuntimeRoute(candidate, desktopRuntime),
+    )) {
+      if (route.id === 1) {
+        continue;
+      }
+      receiver.addKeyedRoute(
+        Math.trunc(route.id),
+        parseInteger(route.channelId, `${route.name} channel ID`),
+        keyBytes,
+        minimumEpoch,
+      );
+    }
+    receiverRef.current = receiver;
     adaptiveRef.current = new OpenIpcAdaptiveLink(
       Math.floor(channelId / 256),
       keyBytes,
@@ -1262,7 +1527,12 @@ export function useOpenIpcRuntime() {
     rtpClockRef.current = null;
     setLinkQuality(null);
     setKeyReady(true);
-  }, [desktopRuntime, settings.channelId, settings.minimumEpoch]);
+  }, [
+    desktopRuntime,
+    settings.channelId,
+    settings.minimumEpoch,
+    settings.payloadRoutes,
+  ]);
 
   function applyKeypair(bytes: Uint8Array, name: string, persist: boolean) {
     if (bytes.byteLength !== 64) {
@@ -1389,7 +1659,7 @@ export function useOpenIpcRuntime() {
   }, [appendLog, desktopRuntime, refreshAuthorizedDevices]);
 
   useEffect(() => {
-    if (keyBytesRef.current) {
+    if (keyBytesRef.current && !runningRef.current) {
       try {
         rebuildReceiver();
         appendLog("info", "Receiver key settings updated");
@@ -1534,13 +1804,11 @@ export function useOpenIpcRuntime() {
     const webUsbDevice = await selectWebUsbDevice(filters);
     const realtek = await WebUsbRealtekDevice.fromWebUsbDevice(webUsbDevice);
     const currentSettings = settingsRef.current;
-    const initReport = JSON.parse(
-      await realtek.initializeMonitor(
-        currentSettings.rfChannel,
-        currentSettings.channelWidthMhz,
-        currentSettings.channelOffset,
-      ),
-    ) as InitReport;
+    const initReport = (await realtek.initializeMonitor(
+      currentSettings.rfChannel,
+      currentSettings.channelWidthMhz,
+      currentSettings.channelOffset,
+    )) as InitReport;
     usbRef.current = realtek;
     appliedTxPowerRef.current = null;
     const deviceId = webUsbDeviceId(webUsbDevice);
@@ -1583,16 +1851,21 @@ export function useOpenIpcRuntime() {
     return {
       data: base64ToBytes(payload.dataBase64),
       packetSeq: payload.packetSeq,
+      routeId: payload.routeId,
       channelId: payload.channelId,
     };
   }
 
-  function tauriBatchToProfile(
-    batch: TauriRxBatchPayload,
-  ): OpenIpcRxTransferProfile {
+  function tauriBatchToProfile(batch: TauriRxBatchPayload): OpenIpcRouteProfile {
+    const rawPayloads = (batch.rawPayloads ?? batch.mavlinkPayloads).map(
+      tauriPayloadToOpenIpcPayload,
+    );
     return {
       frames: batch.frames.map(tauriFrameToOpenIpcFrame),
-      mavlinkPayloads: batch.mavlinkPayloads.map(tauriPayloadToOpenIpcPayload),
+      rawPayloads,
+      mavlinkPayloads: rawPayloads,
+      rawPayloadCount: batch.rawPayloadCount,
+      rawPayloadBytes: batch.rawPayloadBytes,
       transferBytes: batch.transferBytes,
       packets: batch.packets,
       acceptedPackets: batch.acceptedPackets,
@@ -1634,6 +1907,7 @@ export function useOpenIpcRuntime() {
 
     const profile = tauriBatchToProfile(batch);
     recordTransferProfile(profile);
+    await processRawPayloads(profile);
     recordDiagnosticStage("fecCounters", 0);
     setLinkQuality(batch.linkQuality);
     setMetrics((current) => ({
@@ -1723,6 +1997,16 @@ export function useOpenIpcRuntime() {
           1,
           Math.min(40, Math.trunc(currentSettings.alinkTxPower)),
         ),
+        payloadRoutes: currentSettings.payloadRoutes.map((route) => ({
+          routeId: Math.trunc(route.id),
+          enabled: route.enabled,
+          name: route.name,
+          channelId: parseInteger(route.channelId, `${route.name} channel ID`),
+          action: route.action,
+          payloadType: route.payloadType,
+          udpHost: route.udpHost,
+          udpPort: route.udpPort,
+        })),
       });
     } catch (error) {
       runningRef.current = false;
@@ -1779,10 +2063,17 @@ export function useOpenIpcRuntime() {
               performance.now() - adaptiveRxStart,
             );
           }
-          const profile = receiver.pushRxTransferProfiled(transfer);
+          const profile = receiver.pushRxTransferProfiledWithRouteIdsAndRtpTaps(
+            transfer,
+            false,
+            routeIdsForRawPayloads(currentSettings.payloadRoutes, desktopRuntime),
+            routeIdsForRtpPayloadTaps(currentSettings.payloadRoutes, desktopRuntime),
+            payloadTypesForRtpPayloadTaps(currentSettings.payloadRoutes, desktopRuntime),
+          ) as OpenIpcRouteProfile;
           recordDiagnosticStage("realtekParse", profile.parseMs);
           recordDiagnosticStage("openipcPipeline", profile.pipelineMs);
           recordTransferProfile(profile);
+          await processRawPayloads(profile);
           const frames = profile.frames;
           const fecStart = performance.now();
           const counters = parseCounters(receiver.fecCounters());
@@ -1905,8 +2196,13 @@ export function useOpenIpcRuntime() {
     rtpClockRef.current = null;
     encodedWindowRef.current = [];
     renderWindowRef.current = [];
+    routeStatsRef.current.clear();
+    routeLogThrottleRef.current.clear();
+    audioPlayerRef.current?.reset();
     resetDiagnostics();
     setMetrics({ ...EMPTY_METRICS });
+    setRouteStats([]);
+    setAudio({ ...EMPTY_AUDIO_STATS });
     setVideoStats((current) => ({
       ...current,
       inputFps: 0,
@@ -1948,6 +2244,8 @@ export function useOpenIpcRuntime() {
     linkQuality,
     logs,
     metrics,
+    routeStats,
+    audio,
     diagnostics,
     packetLoss,
     recording,

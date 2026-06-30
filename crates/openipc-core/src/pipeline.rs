@@ -1,53 +1,43 @@
 use crate::channel::ChannelId;
 use crate::ieee80211::{FrameLayout, WifiFrame};
-use crate::rtp::{DepacketizedFrame, RtpDepacketizer};
 use crate::wfb::{
     parse_forwarder_packet, FecCounters, PlainAssembler, WfbError, WfbEvent, WfbKeypair, WfbPacket,
     WfbReceiver,
 };
 
+/// Payload recovered from one OpenIPC/WFB channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveredPayload {
+    /// WFB channel that produced this payload.
+    pub channel_id: ChannelId,
+    /// Recovered WFB packet sequence number.
     pub packet_seq: u64,
+    /// Raw application payload bytes.
     pub data: Vec<u8>,
 }
 
+/// Event emitted by the lower-level single-channel payload pipeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PayloadPipelineEvent {
+    /// Frame was valid enough to inspect but did not match this pipeline.
     IgnoredFrame,
+    /// A WFB session packet established or refreshed decryption/FEC state.
     SessionEstablished {
+        /// Session epoch accepted from the transmitter.
         epoch: u64,
+        /// Number of primary fragments in each FEC block.
         fec_k: usize,
+        /// Total primary plus parity fragments in each FEC block.
         fec_n: usize,
     },
+    /// A raw application payload was recovered.
     Payload(RecoveredPayload),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PipelineEvent {
-    IgnoredFrame,
-    SessionEstablished {
-        epoch: u64,
-        fec_k: usize,
-        fec_n: usize,
-    },
-    WfbPayload {
-        packet_seq: u64,
-        len: usize,
-    },
-    RtpPacket {
-        packet_seq: u64,
-        payload: Vec<u8>,
-    },
-    VideoFrame(DepacketizedFrame),
-}
-
-#[derive(Debug, Clone)]
-pub struct ReceiverPipeline {
-    payload_pipeline: PayloadPipeline,
-    depacketizer: RtpDepacketizer,
-}
-
+/// Single-channel OpenIPC/WFB recovery pipeline.
+///
+/// This type stops at recovered payload bytes. Use [`crate::ReceiverRuntime`]
+/// when you also want route fanout and built-in RTP-to-video depacketization.
 #[derive(Debug, Clone)]
 pub struct PayloadPipeline {
     channel_id: ChannelId,
@@ -57,6 +47,7 @@ pub struct PayloadPipeline {
 }
 
 impl PayloadPipeline {
+    /// Create a pipeline for already-plain WFB fragments.
     pub fn new(
         channel_id: ChannelId,
         frame_layout: FrameLayout,
@@ -71,6 +62,7 @@ impl PayloadPipeline {
         })
     }
 
+    /// Create a pipeline that accepts encrypted WFB session and data packets.
     pub fn with_keypair(
         channel_id: ChannelId,
         frame_layout: FrameLayout,
@@ -85,10 +77,12 @@ impl PayloadPipeline {
         })
     }
 
+    /// Return this pipeline's channel id.
     pub const fn channel_id(&self) -> ChannelId {
         self.channel_id
     }
 
+    /// Return cumulative FEC counters.
     pub fn fec_counters(&self) -> FecCounters {
         self.wfb_receiver
             .as_ref()
@@ -96,6 +90,7 @@ impl PayloadPipeline {
             .unwrap_or_else(|| self.assembler.counters())
     }
 
+    /// Return true if an 802.11 frame belongs to this pipeline's channel.
     pub fn accepts_80211_frame(&self, frame: &[u8]) -> bool {
         WifiFrame::parse(frame, self.frame_layout)
             .map(|frame| frame.matches_channel_id(self.channel_id))
@@ -104,11 +99,10 @@ impl PayloadPipeline {
 
     /// Process a raw WFB 802.11 frame and stop at recovered payload bytes.
     ///
-    /// This is the right boundary for non-video WFB channels.
-    ///
-    /// Callers receive decrypted/FEC-recovered payloads without RTP, codec, or
-    /// telemetry-format assumptions. Use it for MAVLink, data, custom payload
-    /// ports, or any other application protocol carried over WFB.
+    /// This is the protocol boundary shared by video, telemetry, and custom
+    /// channels. It does not parse RTP, MAVLink, MSP, CRSF, IP, or any other
+    /// application payload. Feed `RecoveredPayload::data` into the next-stage
+    /// protocol handler chosen by the application.
     pub fn push_80211_frame(
         &mut self,
         frame: &[u8],
@@ -122,7 +116,7 @@ impl PayloadPipeline {
 
         if let Some(receiver) = self.wfb_receiver.as_mut() {
             let events = receiver.push_forwarder_packet(frame.payload())?;
-            return Ok(Self::map_wfb_events(events));
+            return Ok(self.map_wfb_events(events));
         }
 
         match parse_forwarder_packet(frame.payload())? {
@@ -135,6 +129,7 @@ impl PayloadPipeline {
         }
     }
 
+    /// Process an 802.11 frame when the WFB data fragment is already decrypted.
     pub fn push_decrypted_80211_frame(
         &mut self,
         frame: &[u8],
@@ -154,6 +149,7 @@ impl PayloadPipeline {
         self.push_decrypted_fragment(packet, decrypted_fragment)
     }
 
+    /// Push an already-decrypted WFB fragment into the plain assembler.
     pub fn push_decrypted_fragment(
         &mut self,
         data_nonce: u64,
@@ -166,6 +162,7 @@ impl PayloadPipeline {
             .into_iter()
             .map(|payload| {
                 PayloadPipelineEvent::Payload(RecoveredPayload {
+                    channel_id: self.channel_id,
                     packet_seq: payload.packet_seq,
                     data: payload.payload,
                 })
@@ -173,7 +170,7 @@ impl PayloadPipeline {
             .collect())
     }
 
-    fn map_wfb_events(events: Vec<WfbEvent>) -> Vec<PayloadPipelineEvent> {
+    fn map_wfb_events(&self, events: Vec<WfbEvent>) -> Vec<PayloadPipelineEvent> {
         events
             .into_iter()
             .map(|event| match event {
@@ -183,125 +180,12 @@ impl PayloadPipeline {
                     fec_n: session.fec_n,
                 },
                 WfbEvent::Payload(payload) => PayloadPipelineEvent::Payload(RecoveredPayload {
+                    channel_id: self.channel_id,
                     packet_seq: payload.packet_seq,
                     data: payload.payload,
                 }),
             })
             .collect()
-    }
-}
-
-impl ReceiverPipeline {
-    pub fn new(
-        channel_id: ChannelId,
-        frame_layout: FrameLayout,
-        fec_k: usize,
-        fec_n: usize,
-    ) -> Result<Self, WfbError> {
-        Ok(Self {
-            payload_pipeline: PayloadPipeline::new(channel_id, frame_layout, fec_k, fec_n)?,
-            depacketizer: RtpDepacketizer::new(),
-        })
-    }
-
-    pub fn with_keypair(
-        channel_id: ChannelId,
-        frame_layout: FrameLayout,
-        keypair: WfbKeypair,
-        minimum_epoch: u64,
-    ) -> Result<Self, WfbError> {
-        Ok(Self {
-            payload_pipeline: PayloadPipeline::with_keypair(
-                channel_id,
-                frame_layout,
-                keypair,
-                minimum_epoch,
-            )?,
-            depacketizer: RtpDepacketizer::new(),
-        })
-    }
-
-    pub const fn channel_id(&self) -> ChannelId {
-        self.payload_pipeline.channel_id()
-    }
-
-    pub fn fec_counters(&self) -> FecCounters {
-        self.payload_pipeline.fec_counters()
-    }
-
-    pub fn accepts_80211_frame(&self, frame: &[u8]) -> bool {
-        self.payload_pipeline.accepts_80211_frame(frame)
-    }
-
-    /// Process a raw WFB 802.11 frame. This path handles session-key packets,
-    /// encrypted WFB data packets, FEC recovery, RTP depacketization, and Annex-B
-    /// video frame output.
-    pub fn push_80211_frame(&mut self, frame: &[u8]) -> Result<Vec<PipelineEvent>, WfbError> {
-        let events = self.payload_pipeline.push_80211_frame(frame)?;
-        self.map_payload_events(events)
-    }
-
-    /// Process a WFB frame whose WFB data packet payload has already been
-    /// decrypted by the platform adapter.
-    pub fn push_decrypted_80211_frame(
-        &mut self,
-        frame: &[u8],
-        decrypted_fragment: &[u8],
-    ) -> Result<Vec<PipelineEvent>, WfbError> {
-        let events = self
-            .payload_pipeline
-            .push_decrypted_80211_frame(frame, decrypted_fragment)?;
-        self.map_payload_events(events)
-    }
-
-    pub fn push_decrypted_fragment(
-        &mut self,
-        data_nonce: u64,
-        decrypted_fragment: &[u8],
-    ) -> Result<Vec<PipelineEvent>, WfbError> {
-        let events = self
-            .payload_pipeline
-            .push_decrypted_fragment(data_nonce, decrypted_fragment)?;
-        self.map_payload_events(events)
-    }
-
-    pub fn push_rtp(&mut self, rtp_packet: &[u8]) -> Option<DepacketizedFrame> {
-        self.depacketizer.push(rtp_packet).ok().flatten()
-    }
-
-    fn map_payload_events(
-        &mut self,
-        events: Vec<PayloadPipelineEvent>,
-    ) -> Result<Vec<PipelineEvent>, WfbError> {
-        let mut out = Vec::new();
-        for event in events {
-            match event {
-                PayloadPipelineEvent::IgnoredFrame => out.push(PipelineEvent::IgnoredFrame),
-                PayloadPipelineEvent::SessionEstablished {
-                    epoch,
-                    fec_k,
-                    fec_n,
-                } => out.push(PipelineEvent::SessionEstablished {
-                    epoch,
-                    fec_k,
-                    fec_n,
-                }),
-                PayloadPipelineEvent::Payload(payload) => {
-                    out.push(PipelineEvent::WfbPayload {
-                        packet_seq: payload.packet_seq,
-                        len: payload.data.len(),
-                    });
-                    out.push(PipelineEvent::RtpPacket {
-                        packet_seq: payload.packet_seq,
-                        payload: payload.data.clone(),
-                    });
-                    if let Ok(Some(frame)) = self.depacketizer.push(&payload.data) {
-                        out.push(PipelineEvent::VideoFrame(frame));
-                    }
-                }
-            }
-        }
-        Ok(out)
     }
 }
 
@@ -322,31 +206,29 @@ mod tests {
         let mut pipeline =
             PayloadPipeline::new(ChannelId::default_video(), FrameLayout::WithFcs, 1, 1).unwrap();
         let events = pipeline
-            .push_decrypted_fragment(0, &plain(b"mavlink bytes"))
+            .push_decrypted_fragment(0, &plain(b"telemetry bytes"))
             .unwrap();
         assert_eq!(
             events,
             vec![PayloadPipelineEvent::Payload(RecoveredPayload {
+                channel_id: ChannelId::default_video(),
                 packet_seq: 0,
-                data: b"mavlink bytes".to_vec(),
+                data: b"telemetry bytes".to_vec(),
             })]
         );
     }
 
     #[test]
-    fn receiver_pipeline_still_emits_rtp_payload_event_from_raw_payload() {
-        let mut pipeline =
-            ReceiverPipeline::new(ChannelId::default_video(), FrameLayout::WithFcs, 1, 1).unwrap();
+    fn recovered_payloads_carry_the_pipeline_channel_id() {
+        let channel_id = ChannelId::from_link_port(0x112233, crate::RadioPort::TunnelRx);
+        let mut pipeline = PayloadPipeline::new(channel_id, FrameLayout::WithFcs, 1, 1).unwrap();
         let events = pipeline
-            .push_decrypted_fragment(0, &plain(b"rtp bytes"))
+            .push_decrypted_fragment(0, &plain(b"data bytes"))
             .unwrap();
-        assert!(events.contains(&PipelineEvent::WfbPayload {
-            packet_seq: 0,
-            len: 9,
-        }));
-        assert!(events.contains(&PipelineEvent::RtpPacket {
-            packet_seq: 0,
-            payload: b"rtp bytes".to_vec(),
-        }));
+        let PayloadPipelineEvent::Payload(payload) = &events[0] else {
+            panic!("expected payload event");
+        };
+        assert_eq!(payload.channel_id, channel_id);
+        assert_eq!(payload.data, b"data bytes");
     }
 }

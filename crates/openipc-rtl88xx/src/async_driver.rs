@@ -1,12 +1,18 @@
+//! Async-shaped Realtek driver entry points.
+//!
+//! On wasm these methods are backed by WebUSB promises. On native targets they
+//! wrap blocking `nusb` operations so the same HAL sequences can be shared
+//! across targets; call them from a worker or other blocking context.
+
 use nusb::transfer::{Buffer, Bulk, ControlIn, ControlOut, ControlType, In, Out, Recipient};
 #[cfg(not(target_arch = "wasm32"))]
 use nusb::MaybeFuture;
-use openipc_core::realtek_tx::{build_usb_tx_frame, RealtekTxOptions};
 
 #[cfg(target_arch = "wasm32")]
 use crate::device::discover_bulk_endpoints_with_override;
 use crate::device::RealtekDevice;
 use crate::regs::*;
+use crate::tx::{build_usb_tx_frame, RealtekTxOptions};
 #[cfg(target_arch = "wasm32")]
 use crate::types::is_supported_id;
 use crate::types::{
@@ -16,16 +22,19 @@ use crate::types::{
 use crate::PowerTrackingState;
 
 impl RealtekDevice {
+    /// Open the first supported Realtek USB adapter using async-shaped API.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn open_first_async(options: DriverOptions) -> Result<Self, DriverError> {
         Self::open_first(options)
     }
 
+    /// Build a Realtek device from a browser WebUSB device.
     #[cfg(target_arch = "wasm32")]
     pub async fn from_web_usb_device(device: web_sys::UsbDevice) -> Result<Self, DriverError> {
         Self::from_web_usb_device_with_options(device, DriverOptions::default()).await
     }
 
+    /// Build a Realtek device from a browser WebUSB device with explicit options.
     #[cfg(target_arch = "wasm32")]
     pub async fn from_web_usb_device_with_options(
         device: web_sys::UsbDevice,
@@ -61,6 +70,7 @@ impl RealtekDevice {
         })
     }
 
+    /// Probe the chip family and RF layout from the hardware IDs and SYS_CFG register.
     pub async fn probe_chip_async(&self) -> Result<ChipInfo, DriverError> {
         let sys_cfg = self.read_u32_async(REG_SYS_CFG).await?;
         Ok(ChipInfo::from_probe(
@@ -70,6 +80,7 @@ impl RealtekDevice {
         ))
     }
 
+    /// Initialize the adapter for monitor-mode OpenIPC reception.
     pub async fn initialize_monitor_async(
         &self,
         radio: RadioConfig,
@@ -80,6 +91,7 @@ impl RealtekDevice {
             .await
     }
 
+    /// Initialize the adapter for monitor-mode OpenIPC reception with full options.
     pub async fn initialize_monitor_with_options_async(
         &self,
         radio: RadioConfig,
@@ -170,6 +182,7 @@ impl RealtekDevice {
         })
     }
 
+    /// Read one USB bulk-IN transfer from the receive endpoint.
     #[cfg(target_arch = "wasm32")]
     pub async fn read_rx_transfer_async(&self, length: usize) -> Result<Vec<u8>, DriverError> {
         let mut endpoint = self
@@ -189,6 +202,7 @@ impl RealtekDevice {
         Ok(completion.buffer[..completion.actual_len].to_vec())
     }
 
+    /// Read a small batch of USB bulk-IN transfers from the receive endpoint.
     #[cfg(target_arch = "wasm32")]
     pub async fn read_rx_transfers_async(
         &self,
@@ -219,6 +233,7 @@ impl RealtekDevice {
         Ok(transfers)
     }
 
+    /// Read one USB bulk-IN transfer from the receive endpoint.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn read_rx_transfer_async(&self, length: usize) -> Result<Vec<u8>, DriverError> {
         let mut endpoint = self
@@ -236,6 +251,7 @@ impl RealtekDevice {
         Ok(completion.buffer[..completion.actual_len].to_vec())
     }
 
+    /// Read a small batch of USB bulk-IN transfers from the receive endpoint.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn read_rx_transfers_async(
         &self,
@@ -271,6 +287,7 @@ impl RealtekDevice {
         Ok(transfers)
     }
 
+    /// Write one USB bulk-OUT transfer to the transmit endpoint.
     #[cfg(target_arch = "wasm32")]
     pub async fn write_tx_transfer_async(&self, transfer: &[u8]) -> Result<usize, DriverError> {
         let mut endpoint = self
@@ -306,6 +323,7 @@ impl RealtekDevice {
         Ok(completion.actual_len)
     }
 
+    /// Write one USB bulk-OUT transfer to the transmit endpoint.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn write_tx_transfer_async(&self, transfer: &[u8]) -> Result<usize, DriverError> {
         let mut endpoint = self
@@ -339,6 +357,7 @@ impl RealtekDevice {
         Ok(completion.actual_len)
     }
 
+    /// Convert a radiotap + 802.11 packet into a Realtek TX frame and transmit it.
     pub async fn send_packet_async(
         &self,
         radiotap_packet: &[u8],
@@ -349,6 +368,7 @@ impl RealtekDevice {
         self.write_tx_transfer_async(&usb_frame).await
     }
 
+    /// Read raw bytes from a Realtek vendor register.
     #[cfg(target_arch = "wasm32")]
     pub async fn read_register_async(
         &self,
@@ -371,6 +391,7 @@ impl RealtekDevice {
             .map_err(|err| DriverError::Nusb(format!("vendor read 0x{register:04x} failed: {err}")))
     }
 
+    /// Read raw bytes from a Realtek vendor register.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn read_register_async(
         &self,
@@ -393,6 +414,7 @@ impl RealtekDevice {
             .map_err(|err| DriverError::Nusb(format!("vendor read 0x{register:04x} failed: {err}")))
     }
 
+    /// Write raw bytes to a Realtek vendor register.
     #[cfg(target_arch = "wasm32")]
     pub async fn write_register_async(
         &self,
@@ -417,6 +439,7 @@ impl RealtekDevice {
             })
     }
 
+    /// Write raw bytes to a Realtek vendor register.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn write_register_async(
         &self,
@@ -441,6 +464,7 @@ impl RealtekDevice {
             })
     }
 
+    /// Read an 8-bit little-endian Realtek register value.
     pub async fn read_u8_async(&self, register: u16) -> Result<u8, DriverError> {
         let bytes = self.read_register_async(register, 1).await?;
         bytes.first().copied().ok_or(DriverError::RegisterReadSize {
@@ -449,6 +473,7 @@ impl RealtekDevice {
         })
     }
 
+    /// Read a 16-bit little-endian Realtek register value.
     pub async fn read_u16_async(&self, register: u16) -> Result<u16, DriverError> {
         let bytes = self.read_register_async(register, 2).await?;
         let array: [u8; 2] =
@@ -462,6 +487,7 @@ impl RealtekDevice {
         Ok(u16::from_le_bytes(array))
     }
 
+    /// Read a 32-bit little-endian Realtek register value.
     pub async fn read_u32_async(&self, register: u16) -> Result<u32, DriverError> {
         let bytes = self.read_register_async(register, 4).await?;
         let array: [u8; 4] =
@@ -475,15 +501,18 @@ impl RealtekDevice {
         Ok(u32::from_le_bytes(array))
     }
 
+    /// Write an 8-bit Realtek register value.
     pub async fn write_u8_async(&self, register: u16, value: u8) -> Result<(), DriverError> {
         self.write_register_async(register, &[value]).await
     }
 
+    /// Write a 16-bit little-endian Realtek register value.
     pub async fn write_u16_async(&self, register: u16, value: u16) -> Result<(), DriverError> {
         self.write_register_async(register, &value.to_le_bytes())
             .await
     }
 
+    /// Write a 32-bit little-endian Realtek register value.
     pub async fn write_u32_async(&self, register: u16, value: u32) -> Result<(), DriverError> {
         self.write_register_async(register, &value.to_le_bytes())
             .await

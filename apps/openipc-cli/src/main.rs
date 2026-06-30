@@ -9,15 +9,17 @@ use nusb::transfer::{Bulk, Out};
 use openipc_core::channel::DEFAULT_LINK_ID;
 use openipc_core::realtek::{parse_rx_aggregate, RxPacketType};
 use openipc_core::realtek::{RxPacketAttrib, DEFAULT_RX_TRANSFER_SIZE};
-use openipc_core::realtek_tx::RealtekTxOptions;
 use openipc_core::{
-    AdaptiveLinkSender, ChannelId, FecCounters, FrameLayout, PipelineEvent, RadioPort,
-    ReceiverPipeline, WfbKeypair, WfbTxKeypair,
+    AdaptiveLinkSender, ChannelId, FecCounters, FrameLayout, PayloadRouteId, RadioPort,
+    ReceiverBatchOptions, ReceiverRuntime, WfbKeypair, WfbTxKeypair,
 };
-use openipc_native::{
+use openipc_rtl88xx::{
     list_devices, list_supported_devices, ChannelWidth, ChipFamily, DriverOptions,
-    Firmware8814Mode, MonitorOptions, RadioConfig, RealtekDevice,
+    Firmware8814Mode, MonitorOptions, RadioConfig, RealtekDevice, RealtekTxOptions,
 };
+
+const VIDEO_ROUTE_ID: PayloadRouteId = PayloadRouteId::new(1);
+const DEFAULT_KEY_SLOT: u64 = 0;
 
 fn main() {
     if let Err(err) = run() {
@@ -107,12 +109,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or("decode-aggregate requires a binary transfer file")?;
             let config = RecvConfig::parse(args)?;
             let bytes = fs::read(&path)?;
-            let mut pipeline = config.pipeline()?;
+            let mut receiver = config.receiver_runtime()?;
             let mut sinks = config.sinks()?;
             let mut stats = StreamStats::default();
             process_rx_transfer(
                 &bytes,
-                &mut pipeline,
+                &mut receiver,
                 &mut sinks,
                 &mut stats,
                 None,
@@ -134,7 +136,52 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 fn print_help() {
     println!(
-        "openipc-rs\n\ncommands:\n  list                         list USB devices visible to nusb\n  list-supported               list recognized Realtek rtl88xx adapters\n  probe [usb options]          open, claim, and identify an adapter\n  parse-aggregate <file>       parse a binary Realtek RX bulk transfer\n  decode-aggregate <file> ...  decrypt/decode one captured RX transfer\n  recv ...                     initialize monitor mode and receive from an adapter\n\nusb options:\n  --vid <hex|dec>              target USB vendor id\n  --pid <hex|dec>              target USB product id\n  --tx-ep <hex|dec>            override selected bulk-OUT endpoint\n  --skip-reset                 do not USB-reset the adapter before claiming it\n\nrecv/decode options:\n  --key <gs.key>               WFB keypair file: rx secret key + tx public key\n  --out <file|->               write Annex-B H.264/H.265 frames; '-' means stdout\n  --rtp-udp <host:port>        mirror recovered RTP packets to UDP\n  --channel-id <id>            channel id as decimal or 0x-prefixed hex\n  --epoch <n>                  minimum accepted WFB session epoch\n  --max-transfers <n>          stop after n USB transfers\n  --rx-urbs <n>                number of pending bulk IN reads, default 4\n  --no-init                    skip Realtek monitor-mode initialization\n  --rf-channel <n>             WiFi channel for monitor mode, default 36\n  --rf-width <20|40|80>        channel width, default 20\n  --rf-offset <n>              secondary-channel offset, default 0\n  --accept-bad-fcs             ask the chip to pass CRC/ICV-bad frames\n  --skip-txpwr                 skip TX-power table writes during channel set\n  --force-iqk                  run IQK on RTL8814 as well as RTL8812\n  --disable-iqk                skip IQK even where normally armed\n  --fwdl-8814 <kernel|rtw88>   RTL8814 firmware download path\n  --fwdl-8814-chunk <n>        RTL8814 kernel firmware chunk size, 64..4096\n  --tx-legacy-8812-desc        use legacy 8812 TX descriptor shape on RTL8814\n  --adaptive-link              send adaptive-link feedback on WFB port 160\n  --alink-key <tx.key>         uplink keypair; defaults to --key\n  --alink-epoch <n>            uplink WFB session epoch, default 0\n  --alink-fec <k:n>            uplink FEC parameters, default 1:5\n  --alink-tx-power <0..63>     force adaptive-link uplink TXAGC index\n\ndevourer-compatible env:\n  DEVOURER_VID DEVOURER_PID DEVOURER_SKIP_RESET DEVOURER_TX_EP\n  DEVOURER_SKIP_TXPWR DEVOURER_FORCE_IQK DEVOURER_DISABLE_IQK\n  DEVOURER_8814_FWDL DEVOURER_8814_FWDL_CHUNK\n  DEVOURER_TX_LEGACY_8812_DESC"
+        r#"openipc-rs
+
+commands:
+  list                         list USB devices visible to nusb
+  list-supported               list recognized Realtek rtl88xx adapters
+  probe [usb options]          open, claim, and identify an adapter
+  parse-aggregate <file>       parse a binary Realtek RX bulk transfer
+  decode-aggregate <file> ...  decrypt/decode one captured RX transfer
+  recv ...                     initialize monitor mode and receive from an adapter
+
+usb options:
+  --vid <hex|dec>              target USB vendor id
+  --pid <hex|dec>              target USB product id
+  --tx-ep <hex|dec>            override selected bulk-OUT endpoint
+  --skip-reset                 do not USB-reset the adapter before claiming it
+
+recv/decode options:
+  --key <gs.key>               WFB keypair file: rx secret key + tx public key
+  --out <file|->               write Annex-B H.264/H.265 frames; '-' means stdout
+  --rtp-udp <host:port>        mirror recovered RTP packets to UDP
+  --channel-id <id>            channel id as decimal or 0x-prefixed hex
+  --epoch <n>                  minimum accepted WFB session epoch
+  --max-transfers <n>          stop after n USB transfers
+  --rx-urbs <n>                number of pending bulk IN reads, default 4
+  --no-init                    skip Realtek monitor-mode initialization
+  --rf-channel <n>             WiFi channel for monitor mode, default 36
+  --rf-width <20|40|80>        channel width, default 20
+  --rf-offset <n>              secondary-channel offset, default 0
+  --accept-bad-fcs             ask the chip to pass CRC/ICV-bad frames
+  --skip-txpwr                 skip TX-power table writes during channel set
+  --force-iqk                  run IQK on RTL8814 as well as RTL8812
+  --disable-iqk                skip IQK even where normally armed
+  --fwdl-8814 <kernel|rtw88>   RTL8814 firmware download path
+  --fwdl-8814-chunk <n>        RTL8814 kernel firmware chunk size, 64..4096
+  --tx-legacy-8812-desc        use legacy 8812 TX descriptor shape on RTL8814
+  --adaptive-link              send adaptive-link feedback on tunnel TX port 0xa0
+  --alink-key <tx.key>         uplink keypair; defaults to --key
+  --alink-epoch <n>            uplink WFB session epoch, default 0
+  --alink-fec <k:n>            uplink FEC parameters, default 1:5
+  --alink-tx-power <0..63>     force adaptive-link uplink TXAGC index
+
+devourer-compatible env:
+  DEVOURER_VID DEVOURER_PID DEVOURER_SKIP_RESET DEVOURER_TX_EP
+  DEVOURER_SKIP_TXPWR DEVOURER_FORCE_IQK DEVOURER_DISABLE_IQK
+  DEVOURER_8814_FWDL DEVOURER_8814_FWDL_CHUNK
+  DEVOURER_TX_LEGACY_8812_DESC"#
     );
 }
 
@@ -298,11 +345,13 @@ impl RecvConfig {
         })
     }
 
-    fn pipeline(&self) -> Result<ReceiverPipeline, Box<dyn std::error::Error>> {
+    fn receiver_runtime(&self) -> Result<ReceiverRuntime, Box<dyn std::error::Error>> {
         let keypair = WfbKeypair::from_bytes(&fs::read(&self.key_path)?)?;
-        Ok(ReceiverPipeline::with_keypair(
-            self.channel_id,
+        Ok(ReceiverRuntime::with_keyed_video_route(
             FrameLayout::WithFcs,
+            VIDEO_ROUTE_ID,
+            self.channel_id,
+            DEFAULT_KEY_SLOT,
             keypair,
             self.minimum_epoch,
         )?)
@@ -462,7 +511,7 @@ fn run_recv(config: RecvConfig) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut ep_in = device.bulk_in_endpoint()?;
-    let mut pipeline = config.pipeline()?;
+    let mut receiver = config.receiver_runtime()?;
     let mut sinks = config.sinks()?;
     let mut stats = StreamStats::default();
     let mut ep_out = if config.adaptive_link {
@@ -477,11 +526,11 @@ fn run_recv(config: RecvConfig) -> Result<(), Box<dyn std::error::Error>> {
         }
         eprintln!(
             "adaptive link enabled: uplink_channel=0x{:08x} fec={}:{}",
-            ChannelId::from_link_port(config.channel_id.raw() >> 8, RadioPort::MavlinkTx).raw(),
+            ChannelId::from_link_port(config.channel_id.raw() >> 8, RadioPort::TunnelTx).raw(),
             config.alink_fec_k,
             config.alink_fec_n
         );
-        Some(config.adaptive_runtime(pipeline.fec_counters(), chip.family)?)
+        Some(config.adaptive_runtime(receiver.video_fec_counters(), chip.family)?)
     } else {
         None
     };
@@ -517,7 +566,7 @@ fn run_recv(config: RecvConfig) -> Result<(), Box<dyn std::error::Error>> {
             let now_ms = unix_time_ms();
             process_rx_transfer(
                 bytes,
-                &mut pipeline,
+                &mut receiver,
                 &mut sinks,
                 &mut stats,
                 adaptive.as_mut(),
@@ -525,7 +574,7 @@ fn run_recv(config: RecvConfig) -> Result<(), Box<dyn std::error::Error>> {
                 config.monitor_options.accept_bad_fcs,
             )?;
             if let Some(runtime) = adaptive.as_mut() {
-                runtime.record_pipeline(now_ms, pipeline.fec_counters());
+                runtime.record_pipeline(now_ms, receiver.video_fec_counters());
             }
             tick_adaptive(&mut adaptive, ep_out.as_mut(), now_ms, &mut stats);
         }
@@ -539,7 +588,7 @@ fn run_recv(config: RecvConfig) -> Result<(), Box<dyn std::error::Error>> {
 
 fn process_rx_transfer(
     bytes: &[u8],
-    pipeline: &mut ReceiverPipeline,
+    receiver: &mut ReceiverRuntime,
     sinks: &mut StreamSinks,
     stats: &mut StreamStats,
     mut adaptive: Option<&mut AdaptiveRuntime>,
@@ -557,49 +606,44 @@ fn process_rx_transfer(
     };
     stats.rx_packets += packets.len() as u64;
 
-    for packet in packets {
-        if packet.attrib.pkt_rpt_type != RxPacketType::NormalRx
-            || (!accept_bad_fcs && (packet.attrib.crc_err || packet.attrib.icv_err))
-        {
+    for packet in &packets {
+        if packet.attrib.pkt_rpt_type != RxPacketType::NormalRx {
             continue;
         }
-        if pipeline.accepts_80211_frame(packet.data) {
+        if !accept_bad_fcs && (packet.attrib.crc_err || packet.attrib.icv_err) {
+            continue;
+        }
+        if receiver.accepts_video_frame(packet.data) {
             if let Some(runtime) = adaptive.as_deref_mut() {
                 runtime.record_rx(now_ms, &packet.attrib);
             }
         }
-        let events = match pipeline.push_80211_frame(packet.data) {
-            Ok(events) => events,
-            Err(err) => {
-                eprintln!("pipeline rejected frame: {err:?}");
-                continue;
-            }
-        };
-        for event in events {
-            match event {
-                PipelineEvent::IgnoredFrame => stats.ignored_frames += 1,
-                PipelineEvent::SessionEstablished {
-                    epoch,
-                    fec_k,
-                    fec_n,
-                } => {
-                    eprintln!("WFB session established epoch={epoch} fec={fec_k}/{fec_n}");
-                }
-                PipelineEvent::WfbPayload { .. } => {
-                    stats.accepted_wifi_frames += 1;
-                }
-                PipelineEvent::RtpPacket { payload, .. } => {
-                    stats.rtp_packets += 1;
-                    if let Some((socket, dest)) = &sinks.rtp {
-                        socket.send_to(&payload, dest)?;
-                    }
-                }
-                PipelineEvent::VideoFrame(frame) => {
-                    stats.video_frames += 1;
-                    sinks.video.write_all(&frame.data)?;
-                }
-            }
+    }
+
+    let raw_payload_routes = if sinks.rtp.is_some() {
+        vec![VIDEO_ROUTE_ID]
+    } else {
+        Vec::new()
+    };
+    let batch = receiver.push_rx_packets(
+        packets,
+        &ReceiverBatchOptions {
+            accept_corrupted: accept_bad_fcs,
+            raw_payload_routes,
+        },
+    );
+
+    stats.accepted_wifi_frames += batch.counters.wfb_payloads as u64;
+    stats.rtp_packets += batch.counters.rtp_packets as u64;
+    stats.video_frames += batch.counters.video_frames as u64;
+    stats.ignored_frames += batch.counters.ignored_frames as u64;
+    for payload in batch.raw_payloads {
+        if let Some((socket, dest)) = &sinks.rtp {
+            socket.send_to(&payload.data, dest)?;
         }
+    }
+    for frame in batch.frames {
+        sinks.video.write_all(&frame.data)?;
     }
     Ok(())
 }

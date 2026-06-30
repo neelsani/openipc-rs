@@ -85,17 +85,28 @@ const TX_SCALING_TABLE_JAGUAR: [u32; TX_SCALE_TABLE_SIZE] = [
     0x23e, 0x261, 0x285, 0x2ab, 0x2d3, 0x2fe, 0x32b, 0x35c, 0x38e, 0x3c4, 0x3fe,
 ];
 
+/// Mutable RTL8812 thermal power-tracking state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PowerTrackingState {
+    /// True after initialization has populated the state.
     pub initialized: bool,
+    /// True if EFUSE thermal calibration enables power tracking.
     pub enabled: bool,
+    /// EFUSE thermal baseline.
     pub eeprom_thermal: u8,
+    /// Default OFDM swing table index.
     pub default_ofdm_index: u8,
+    /// Last raw thermal reading.
     pub thermal_value: u8,
+    /// Moving-average thermal samples.
     pub thermal_value_avg: [u8; AVG_THERMAL_NUM],
+    /// Moving-average write index.
     pub thermal_value_avg_index: u8,
+    /// Absolute OFDM swing adjustment per RF path.
     pub absolute_ofdm_swing_idx: [i8; 2],
+    /// Current power-index delta per RF path.
     pub delta_power_index: [i8; 2],
+    /// Previous power-index delta per RF path.
     pub delta_power_index_last: [i8; 2],
 }
 
@@ -116,20 +127,31 @@ impl Default for PowerTrackingState {
     }
 }
 
+/// Report returned by one RTL8812 power-tracking tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PowerTrackingReport {
+    /// Whether power tracking is enabled.
     pub enabled: bool,
+    /// Raw thermal reading from hardware.
     pub thermal_raw: u8,
+    /// Averaged thermal value used for decisions.
     pub thermal_average: u8,
+    /// EFUSE thermal baseline.
     pub eeprom_thermal: u8,
+    /// Absolute thermal delta from baseline.
     pub delta: u8,
+    /// Default OFDM swing table index.
     pub default_ofdm_index: u8,
+    /// Final OFDM swing index per RF path.
     pub final_ofdm_index: [u8; 2],
+    /// Applied swing delta per RF path.
     pub swing_delta: [i8; 2],
+    /// True when the tick wrote new swing values.
     pub applied: bool,
 }
 
 impl RealtekDevice {
+    /// Initialize RTL8812 thermal TX power tracking state.
     pub async fn init_power_tracking_8812_async(
         &self,
         state: &mut PowerTrackingState,
@@ -153,6 +175,7 @@ impl RealtekDevice {
         Ok(())
     }
 
+    /// Reset RTL8812 thermal TX power tracking state to EFUSE/default values.
     pub async fn clear_power_tracking_8812_async(
         &self,
         state: &mut PowerTrackingState,
@@ -178,6 +201,7 @@ impl RealtekDevice {
         Ok(())
     }
 
+    /// Run one RTL8812 thermal TX power tracking tick.
     pub async fn tick_power_tracking_8812_async(
         &self,
         state: &mut PowerTrackingState,

@@ -137,6 +137,10 @@ const TXAGC_RATES_8812: [[u8; 4]; 12] = [
 ];
 
 impl RealtekDevice {
+    /// Override TX power indexes for the current channel.
+    ///
+    /// `power` is the Realtek TXAGC index, clamped by hardware to the valid
+    /// 0..=63 range.
     pub async fn set_tx_power_override_async(
         &self,
         current_channel: u8,

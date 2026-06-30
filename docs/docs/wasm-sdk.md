@@ -4,8 +4,8 @@ sidebar_position: 7
 
 # WASM SDK Usage
 
-`openipc-web` is the browser SDK layer. It exposes the Rust receiver pipeline
-and the WebUSB Realtek device wrapper to JavaScript.
+`openipc-web` is the browser SDK layer. It exposes the Rust payload/RTP receive
+path and the WebUSB Realtek device wrapper to JavaScript.
 
 ## Install Or Build
 
@@ -53,6 +53,8 @@ sequenceDiagram
 ```ts
 import init, {
   OpenIpcReceiver,
+  WebUsbPhydmWatchdog,
+  WebUsbPowerTracking8812,
   WebUsbRealtekDevice,
   supportedUsbFilters,
 } from "@openipc-rs/web";
@@ -67,23 +69,30 @@ const channelId = 7669206 << 8;
 const keypairBytes = new Uint8Array(
   await (await fetch("/gs.key")).arrayBuffer(),
 );
-const receiver = OpenIpcReceiver.withKeypair(channelId, keypairBytes, 0n);
+const telemetryChannelId = (channelId & 0xffffff00) | 0x10;
+const receiver = OpenIpcReceiver.withKeypairOnly(channelId, keypairBytes, 0n);
+receiver.addKeyedRoute(2, telemetryChannelId, keypairBytes, 0n);
 
-await radio.initializeMonitor(36, 20, 0);
+const initReport = await radio.initializeMonitor(36, 20, 0);
+console.log(initReport.chip, initReport.status);
 
 while (true) {
   const transfer = await radio.readRxTransfer(32768);
-  const batch = receiver.pushRxTransferProfiled(transfer);
+  const batch = receiver.pushRxTransferProfiledWithRouteIds(
+    transfer,
+    false,
+    new Uint32Array([2]),
+  );
 
   for (const frame of batch.frames) {
     // frame.data is encoded Annex-B H.264/H.265.
     console.log(frame.codec, frame.data.byteLength, frame.isKeyFrame);
   }
 
-  for (const payload of batch.mavlinkPayloads) {
-    // payload.data is raw recovered bytes from the MAVLink RX radio port.
-    // The SDK does not parse MAVLink messages or forward them.
-    console.log(payload.packetSeq, payload.data.byteLength);
+  for (const payload of batch.rawPayloads) {
+    // payload.data is raw recovered bytes from the requested route.
+    // The SDK does not parse MAVLink, MSP, or other telemetry messages.
+    console.log(payload.routeId, payload.packetSeq, payload.data.byteLength);
   }
 }
 ```
@@ -92,13 +101,97 @@ while (true) {
 returns frames and counters from the same call, so the UI can update metrics
 without replaying the transfer through another parser.
 
-By default `OpenIpcReceiver.withKeypair(...)` also watches the matching
-MAVLink downlink channel (`link_id:0x10`) and exposes those recovered bytes as
-`mavlinkPayloads`. That name is a browser SDK convenience, not a core protocol
-restriction. The Rust core uses `PayloadPipeline` for any non-video radio port.
-If your setup uses a non-standard MAVLink port, call
-`OpenIpcReceiver.withKeypairAndMavlinkChannel(videoChannelId, mavlinkChannelId,
-keypairBytes, minimumEpoch)`.
+Use `OpenIpcReceiver.withKeypairOnly(...)` plus `addKeyedRoute(...)` when you
+want an explicit route list. `pushRxTransferProfiledWithRouteIds(...)` controls
+which route payloads are copied back to JavaScript for the current transfer.
+
+`OpenIpcReceiver.withKeypair(...)` remains as a shortcut for video plus the
+default telemetry downlink route (`link_id:0x10`). It returns those bytes
+through the neutral `rawPayloads` field and the older `mavlinkPayloads` alias.
+The Rust core uses `ReceiverRuntime` with an internal `PayloadRouteManager` to
+keep one WFB runtime per channel/key slot and fan recovered payloads out by
+route ID.
+
+## Opus Audio Route
+
+Station can play Opus when the air unit sends Opus RTP packets. The common
+OpenIPC setup mixes Opus RTP payload type 98 into the main video RTP route, so
+the WASM SDK exposes filtered RTP taps: Rust copies only the selected payload
+type back to JavaScript while the video depacketizer keeps consuming the same
+route.
+
+Opus RTP is simple: once the RTP header is removed, the remaining bytes are the
+Opus payload. Convert RTP timestamps with the fixed Opus RTP clock rate of
+48 kHz.
+
+```ts
+const AUDIO_ROUTE = 3;
+const OPUS_PT = 98;
+
+const receiver = OpenIpcReceiver.withKeypairOnly(channelId, keypairBytes, 0n);
+receiver.addKeyedRoute(AUDIO_ROUTE, channelId, keypairBytes, 0n);
+
+const batch = receiver.pushRxTransferProfiledWithRouteIdsAndRtpTaps(
+  transfer,
+  false,
+  new Uint32Array([]),
+  new Uint32Array([AUDIO_ROUTE]),
+  new Uint8Array([OPUS_PT]),
+);
+
+for (const payload of batch.rawPayloads) {
+  const rtp = parseRtp(payload.data);
+  if (!rtp) continue;
+  audioDecoder.decode(
+    new EncodedAudioChunk({
+      type: "key",
+      timestamp: rtpTimestampToUs(rtp.timestamp),
+      data: rtp.payload,
+    }),
+  );
+}
+```
+
+`parseRtp` and `rtpTimestampToUs` are small app-side helpers. The station app
+keeps them outside the WASM SDK so apps can choose their own payload type,
+clocking, queueing, and audio output strategy.
+For a separate wfb-ng audio profile, register `AUDIO_ROUTE` against that audio
+channel id instead of `channelId`.
+
+## Driver Diagnostics
+
+The WebUSB driver exposes diagnostics as typed wasm-bindgen objects:
+
+```ts
+const thermal = await radio.readThermalStatus();
+console.log(thermal.raw, thermal.bucket);
+
+const fa = await radio.readFalseAlarmCounters();
+console.log(fa.all, fa.ccaAll);
+
+const queues = await radio.readQueueDepth8814();
+console.log([...queues.values()]);
+
+const dbg = await radio.readBbDbgport(0x0);
+console.log(dbg.selector, dbg.value, dbg.chipAlive);
+```
+
+PHYDM and power tracking are explicit tick objects, not hidden background
+workers:
+
+```ts
+const dig = new WebUsbPhydmWatchdog();
+const digReport = await dig.tick(radio);
+console.log(digReport.previousIgi, digReport.currentIgi);
+
+const pwr = new WebUsbPowerTracking8812();
+await pwr.init(radio);
+const powerReport = await pwr.tick(radio, 36, 20);
+console.log(powerReport.applied, powerReport.thermalAverage);
+```
+
+`supportedUsbFilters()` still returns a JSON string because the immediate
+consumer is `navigator.usb.requestDevice({ filters })`.
 
 ## WebCodecs Rendering
 

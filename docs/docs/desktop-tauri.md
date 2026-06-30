@@ -27,7 +27,7 @@ Tauri command
   -> native Rust backend
   -> nusb USB device
   -> openipc-rtl88xx Realtek HAL
-  -> openipc-core receiver pipeline
+  -> openipc-core ReceiverRuntime
   -> Tauri events with encoded Annex-B frames and metrics
   -> React WebCodecs playback
 ```
@@ -154,9 +154,10 @@ The shared Rust receive path after `openipc_connect_from_fd` is the same Realtek
 HAL, OpenIPC/WFB/RTP pipeline, adaptive-link feedback path, and WebCodecs UI
 used by desktop Tauri.
 
-On Android, the UI calls `plugin:openipc-usb|list_devices` for attached
-adapters. `openipc_list_devices` remains a compatibility fallback and returns
-the supported Realtek IDs rather than live Android enumeration.
+On Android, the UI still calls the app-level `openipc_list_devices` command.
+The Rust command delegates to the local `tauri-plugin-openipc-usb` plugin, and
+the plugin does live `UsbManager` enumeration using filters generated from
+`openipc-rtl88xx::SUPPORTED_DEVICES`.
 
 ## Signing
 

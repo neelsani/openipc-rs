@@ -6,6 +6,7 @@ use crate::models::*;
 #[cfg(target_os = "ios")]
 tauri::ios_plugin_binding!(init_plugin_openipc_usb);
 
+/// Initialize the mobile USB bridge.
 pub fn init<R: Runtime, C: DeserializeOwned>(
     _app: &AppHandle<R>,
     api: PluginApi<R, C>,
@@ -26,6 +27,7 @@ pub fn init<R: Runtime, C: DeserializeOwned>(
     }
 }
 
+/// Platform USB helper stored in Tauri state.
 pub struct OpenIpcUsb<R: Runtime> {
     #[cfg(target_os = "android")]
     handle: tauri::plugin::PluginHandle<R>,
@@ -34,6 +36,7 @@ pub struct OpenIpcUsb<R: Runtime> {
 }
 
 impl<R: Runtime> OpenIpcUsb<R> {
+    /// List supported USB devices visible to Android's UsbManager.
     pub fn list_devices(&self) -> crate::Result<Vec<AndroidUsbDevice>> {
         #[cfg(target_os = "android")]
         {
@@ -48,6 +51,7 @@ impl<R: Runtime> OpenIpcUsb<R> {
         ))
     }
 
+    /// Request permission for and open a USB device, returning a file descriptor.
     pub fn open_device(
         &self,
         request: AndroidUsbOpenRequest,
@@ -68,6 +72,7 @@ impl<R: Runtime> OpenIpcUsb<R> {
         }
     }
 
+    /// Close a file descriptor opened by the Android USB bridge.
     pub fn close_device(&self, request: AndroidUsbCloseRequest) -> crate::Result<()> {
         #[cfg(target_os = "android")]
         {

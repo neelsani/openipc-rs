@@ -15,7 +15,7 @@ flowchart LR
         Rtl["openipc-rtl88xx<br/>Realtek USB HAL"]
     end
 
-    Native["Native CLI<br/>openipc-native"] --> Rtl
+    Native["Native CLI app<br/>openipc-cli"] --> Rtl
     Desktop["Tauri backend<br/>OpenIPC Station"] --> Rtl
     Browser["Browser UI<br/>React + WebUSB permission"] --> Wasm["openipc-web<br/>wasm-bindgen"]
     Wasm --> Rtl
@@ -34,8 +34,8 @@ flowchart LR
   returns bytes and packet sequence metadata; application crates decide whether
   those bytes are MAVLink, MSP, CRSF, IP, or something else.
 - Adaptive-link quality windows and feedback packet construction.
-- WFB uplink encryption, FEC parity generation, and 802.11 wrapping.
-- Realtek TX descriptor construction for monitor-injection packets.
+- WFB uplink encryption, FEC parity generation, radiotap headers, and 802.11
+  wrapping.
 
 ## Platform Responsibilities
 
@@ -46,6 +46,8 @@ protocol details, then let each target own the APIs that make sense there.
 
 - USB discovery, open, reset, claim, endpoint discovery, and bulk IO through
   `nusb`.
+- Realtek TX descriptor construction for monitor-injection packets before USB
+  bulk OUT.
 - CLI output as Annex-B or RTP-over-UDP.
 - Tauri commands/events for the desktop station UI.
 
@@ -81,11 +83,11 @@ flowchart TD
     B --> C["OpenIPC 802.11/WFB filter"]
     C --> D["WFB session/data decrypt"]
     D --> E["Reed-Solomon FEC recovery"]
-    E --> F["RTP depacketizer"]
+    E --> P["ReceiverRuntime<br/>route fanout"]
+    P --> F["RTP depacketizer<br/>video route"]
     F --> G["Annex-B H.264/H.265 frames"]
     G --> H["WebCodecs, file output, or UDP mirror"]
-    E --> I["PayloadPipeline"]
-    I --> J["raw telemetry/data bytes"]
+    P --> J["raw telemetry/data bytes<br/>non-video channels"]
 ```
 
 Adaptive-link feedback flows the other direction:

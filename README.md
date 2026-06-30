@@ -11,8 +11,8 @@ desktop.
 ```text
 crates/openipc-core       WFB, RTP, FEC, crypto, video and raw payload pipeline
 crates/openipc-rtl88xx    Realtek rtl88xx USB WiFi driver
-crates/openipc-native     Native CLI and library adapter
 crates/openipc-web        wasm-bindgen package for browser/WebUSB apps
+apps/openipc-cli          Native command-line utilities
 apps/openipc-station      React/Vite browser app and Tauri desktop app
 plugins/tauri-plugin-openipc-usb
                           Android USB permission bridge used by Station
@@ -26,7 +26,6 @@ scripts                   cleanup helpers
 | ----------------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `openipc-core`    | [crates.io](https://crates.io/crates/openipc-core)    | Shared protocol code: WFB, FEC, RTP, crypto, video frame extraction, generic raw payload taps, adaptive-link packet logic. |
 | `openipc-rtl88xx` | [crates.io](https://crates.io/crates/openipc-rtl88xx) | Realtek rtl88xx USB WiFi driver/HAL for monitor receive and adaptive-link transmit.                                        |
-| `openipc-native`  | [crates.io](https://crates.io/crates/openipc-native)  | Native CLI/library adapter around the driver and receive pipeline.                                                         |
 | `openipc-web`     | [crates.io](https://crates.io/crates/openipc-web)     | Rust/WASM bindings for browser WebUSB applications.                                                                        |
 | `@openipc-rs/web` | [npm](https://www.npmjs.com/package/@openipc-rs/web)  | Generated npm package from `openipc-web`, with WASM, JS glue, and TypeScript definitions.                                  |
 
@@ -87,9 +86,9 @@ the file descriptor to Rust, and the Rust backend continues through
 Use the native CLI:
 
 ```sh
-cargo run -p openipc-native -- list-supported
-cargo run -p openipc-native -- probe
-cargo run -p openipc-native -- recv --key gs.key --rf-channel 36 --adaptive-link
+cargo run -p openipc-cli -- list-supported
+cargo run -p openipc-cli -- probe
+cargo run -p openipc-cli -- recv --key gs.key --rf-channel 36 --adaptive-link
 ```
 
 Build the WASM SDK:

@@ -12,6 +12,10 @@ use crate::receiver::OpenIpcReceiver;
 use crate::webusb::WebUsbRealtekDevice;
 
 #[wasm_bindgen]
+/// Browser/WASM adaptive-link feedback sender.
+///
+/// The app records RX quality and FEC counters, then calls `tick()` or
+/// `tickAndSend()` to produce/send encrypted WFB feedback packets.
 pub struct OpenIpcAdaptiveLink {
     sender: AdaptiveLinkSender,
     last_counters: FecCounters,
@@ -21,6 +25,7 @@ pub struct OpenIpcAdaptiveLink {
 #[wasm_bindgen]
 impl OpenIpcAdaptiveLink {
     #[wasm_bindgen(constructor)]
+    /// Create a new adaptive-link sender for a link id and WFB TX keypair.
     pub fn new(
         link_id: u32,
         keypair: &[u8],
@@ -40,6 +45,7 @@ impl OpenIpcAdaptiveLink {
     }
 
     #[wasm_bindgen(js_name = recordRx)]
+    /// Record one pair of RSSI/SNR samples for link-quality estimation.
     pub fn record_rx(&mut self, now_ms: f64, rssi0: u8, rssi1: u8, snr0: i8, snr1: i8) {
         self.sender
             .link_mut()
@@ -47,6 +53,7 @@ impl OpenIpcAdaptiveLink {
     }
 
     #[wasm_bindgen(js_name = recordRxTransfer)]
+    /// Parse one RX transfer and record RSSI/SNR for matching video frames.
     pub fn record_rx_transfer(&mut self, transfer: &[u8], now_ms: f64) -> Result<(), JsValue> {
         let packets = parse_rx_aggregate(transfer)
             .map_err(|err| JsValue::from_str(&format!("Realtek RX aggregate rejected: {err}")))?;
@@ -71,22 +78,26 @@ impl OpenIpcAdaptiveLink {
     }
 
     #[wasm_bindgen(js_name = recordReceiverCounters)]
+    /// Record FEC counter deltas from an [`OpenIpcReceiver`].
     pub fn record_receiver_counters(&mut self, receiver: &OpenIpcReceiver, now_ms: f64) {
-        self.record_counter_delta(ms_from_js(now_ms), receiver.pipeline.fec_counters());
+        self.record_counter_delta(ms_from_js(now_ms), receiver.video_fec_counters());
     }
 
     #[wasm_bindgen(js_name = recordFec)]
+    /// Record explicit FEC totals for the current time window.
     pub fn record_fec(&mut self, now_ms: f64, total: u32, recovered: u32, lost: u32) {
         self.sender
             .record_fec(ms_from_js(now_ms), total, recovered, lost);
     }
 
     #[wasm_bindgen(js_name = requestKeyframe)]
+    /// Force keyframe-request messages in upcoming feedback packets.
     pub fn request_keyframe(&mut self) {
         self.sender.link_mut().request_keyframe();
     }
 
     #[wasm_bindgen(js_name = setKeyframeRequestMessages)]
+    /// Configure how many feedback packets carry a keyframe request.
     pub fn set_keyframe_request_messages(&mut self, messages: u32) {
         self.sender
             .link_mut()
@@ -94,6 +105,7 @@ impl OpenIpcAdaptiveLink {
     }
 
     #[wasm_bindgen(js_name = setVideoStartIdleMs)]
+    /// Configure how long a quiet video stream is considered idle.
     pub fn set_video_start_idle_ms(&mut self, idle_ms: u32) {
         self.sender
             .link_mut()
@@ -101,6 +113,7 @@ impl OpenIpcAdaptiveLink {
     }
 
     #[wasm_bindgen(js_name = tick)]
+    /// Return feedback frames that should be sent at `now_ms`.
     pub fn tick(&mut self, now_ms: f64) -> Result<Array, JsValue> {
         let frames = self
             .sender
@@ -114,11 +127,13 @@ impl OpenIpcAdaptiveLink {
     }
 
     #[wasm_bindgen(js_name = counters)]
+    /// Return the last recorded FEC counters as JSON.
     pub fn counters(&self) -> String {
         counters_json(self.last_counters)
     }
 
     #[wasm_bindgen(js_name = quality)]
+    /// Return the current link-quality report as JSON.
     pub fn quality(&mut self, now_ms: f64) -> String {
         let quality = self.sender.link_mut().quality(ms_from_js(now_ms));
         format!(
@@ -160,6 +175,7 @@ impl OpenIpcAdaptiveLink {
 #[wasm_bindgen]
 impl OpenIpcAdaptiveLink {
     #[wasm_bindgen(js_name = tickAndSend)]
+    /// Produce due feedback frames and send them through a WebUSB Realtek device.
     pub async fn tick_and_send(
         &mut self,
         device: &WebUsbRealtekDevice,

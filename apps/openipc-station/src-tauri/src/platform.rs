@@ -44,6 +44,19 @@ pub(crate) fn station_device_from_summary(device: UsbDeviceSummary) -> StationUs
     }
 }
 
+#[cfg(target_os = "android")]
+pub(crate) fn station_device_from_android(
+    device: tauri_plugin_openipc_usb::AndroidUsbDevice,
+) -> StationUsbDevice {
+    StationUsbDevice {
+        id: Some(device.device_id),
+        vendor_id: device.vendor_id,
+        product_id: device.product_id,
+        product: device.product,
+        manufacturer: device.manufacturer,
+    }
+}
+
 pub(crate) fn device_label(
     manufacturer: Option<&str>,
     product: Option<&str>,

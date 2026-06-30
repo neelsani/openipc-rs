@@ -90,6 +90,10 @@ export function DiagnosticsPanel({ api }: { api: StationApi }) {
               <Health ok={v.packetsParsed > 0} label="Packets parsed" />
               <Health ok={v.wfbPayloads > 0} label="WFB decrypt / recover" />
               <Health ok={v.rtpPackets > 0} label="RTP packets arriving" />
+              <Health
+                ok={!state.audio.enabled || state.audio.supported}
+                label="Opus audio decoder"
+              />
               <Health ok={v.videoFrames > 0} label="Video frames extracted" />
               <Health
                 ok={state.decoderAvailable && state.hasVideo}
@@ -260,6 +264,19 @@ export function DiagnosticsPanel({ api }: { api: StationApi }) {
             <Stat label="WFB payloads" value={v.wfbPayloads.toLocaleString()} />
             <Stat label="RTP packets" value={v.rtpPackets.toLocaleString()} />
             <Stat label="Video frames" value={v.videoFrames.toLocaleString()} />
+            <Stat label="Raw payloads" value={v.rawPayloads.toLocaleString()} />
+            <Stat label="Raw bytes" value={fmtBytes(v.rawPayloadBytes)} />
+            <Stat label="Audio packets" value={v.audioPackets.toLocaleString()} />
+            <Stat
+              label="Audio decoded"
+              value={v.audioDecodedFrames.toLocaleString()}
+              tone={state.audio.supported ? "good" : "muted"}
+            />
+            <Stat
+              label="Audio errors"
+              value={v.audioErrors.toLocaleString()}
+              tone={v.audioErrors > 0 ? "warn" : "muted"}
+            />
           </Grid>
         )}
 

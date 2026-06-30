@@ -1,7 +1,8 @@
-use crate::radiotap::{
-    parse_radiotap_tx_mode, radiotap_len, ChannelBandwidth, RadiotapError, TxMode, TxModeKind,
+use openipc_core::radiotap::{
+    parse_radiotap_tx_mode, radiotap_len, RadiotapError, TxMode, TxModeKind,
 };
 
+/// Size of the Realtek USB TX descriptor prepended before injected frames.
 pub const TX_DESC_SIZE: usize = 40;
 
 const MGN_1M: u8 = 0x02;
@@ -19,11 +20,16 @@ const MGN_54M: u8 = 0x6c;
 const MGN_MCS0: u8 = 0x80;
 const MGN_VHT1SS_MCS0: u8 = 0xa0;
 
+/// Options used while building a Realtek USB TX frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RealtekTxOptions {
+    /// Current RF channel, used to avoid CCK rates on 5 GHz channels.
     pub current_channel: u8,
+    /// Whether to use RTL8814-specific descriptor behavior.
     pub is_8814a: bool,
+    /// Force the legacy RTL8812 descriptor shape for compatibility testing.
     pub legacy_8812_descriptor: bool,
+    /// Default TX mode when the radiotap header does not provide one.
     pub tx_mode_default: Option<TxMode>,
 }
 
@@ -38,9 +44,12 @@ impl Default for RealtekTxOptions {
     }
 }
 
+/// Error returned while constructing a Realtek TX USB frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RealtekTxError {
+    /// Radiotap parsing failed.
     Radiotap(RadiotapError),
+    /// 802.11 payload does not fit in the descriptor length field.
     PayloadTooLarge,
 }
 
@@ -61,6 +70,7 @@ impl From<RadiotapError> for RealtekTxError {
     }
 }
 
+/// Convert a radiotap+802.11 packet into a Realtek USB TX frame.
 pub fn build_usb_tx_frame(
     radiotap_packet: &[u8],
     options: RealtekTxOptions,
@@ -192,21 +202,14 @@ const fn mrate_to_hw_rate(rate: u8) -> u8 {
     }
 }
 
-#[allow(dead_code)]
-const fn bandwidth_from_desc_bits(bits: u8) -> ChannelBandwidth {
-    match bits {
-        1 => ChannelBandwidth::Mhz40,
-        2 => ChannelBandwidth::Mhz80,
-        _ => ChannelBandwidth::Mhz20,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ieee80211::build_wfb_header_with_frame_type;
-    use crate::radiotap::{build_radiotap_header, TxRadioParams, FRAME_TYPE_RTS};
-    use crate::ChannelId;
+    use openipc_core::ieee80211::build_wfb_header_with_frame_type;
+    use openipc_core::radiotap::{
+        build_radiotap_header, ChannelBandwidth, TxRadioParams, FRAME_TYPE_RTS,
+    };
+    use openipc_core::ChannelId;
 
     fn le32(bytes: &[u8], offset: usize) -> u32 {
         u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())

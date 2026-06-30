@@ -82,9 +82,9 @@ jobs:
                   expected = tomllib.loads((root / "crates/openipc-core/Cargo.toml").read_text())["package"]["version"]
 
                   cargo_manifests = [
+                      "apps/openipc-cli/Cargo.toml",
                       "crates/openipc-core/Cargo.toml",
                       "crates/openipc-rtl88xx/Cargo.toml",
-                      "crates/openipc-native/Cargo.toml",
                       "crates/openipc-web/Cargo.toml",
                       "apps/openipc-station/src-tauri/Cargo.toml",
                       "plugins/tauri-plugin-openipc-usb/Cargo.toml",
@@ -509,7 +509,6 @@ jobs:
                   for manifest in \
                     crates/openipc-core/Cargo.toml \
                     crates/openipc-rtl88xx/Cargo.toml \
-                    crates/openipc-native/Cargo.toml \
                     crates/openipc-web/Cargo.toml
                   do
                     CRATE_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' "$manifest" | head -n 1)

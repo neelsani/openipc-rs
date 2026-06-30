@@ -13,13 +13,7 @@ pub(crate) fn openipc_list_devices(_app: AppHandle) -> Result<Vec<StationUsbDevi
             .list_devices()
             .map_err(|err| err.to_string())?
             .into_iter()
-            .map(|device| StationUsbDevice {
-                id: Some(device.device_id),
-                vendor_id: device.vendor_id,
-                product_id: device.product_id,
-                product: device.product,
-                manufacturer: device.manufacturer,
-            })
+            .map(station_device_from_android)
             .collect())
     }
 
@@ -27,13 +21,7 @@ pub(crate) fn openipc_list_devices(_app: AppHandle) -> Result<Vec<StationUsbDevi
     Ok(list_supported_devices()
         .map_err(|err| err.to_string())?
         .into_iter()
-        .map(|device| StationUsbDevice {
-            id: None,
-            vendor_id: device.vendor_id,
-            product_id: device.product_id,
-            product: device.product,
-            manufacturer: device.manufacturer,
-        })
+        .map(station_device_from_summary)
         .collect())
 }
 

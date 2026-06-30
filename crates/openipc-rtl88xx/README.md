@@ -139,6 +139,13 @@ directly. Browser applications go through `openipc-web`, where JavaScript first
 gets a user-approved `UsbDevice` and Rust/WASM uses the WebUSB-capable `nusb`
 backend.
 
+One naming caveat: the native `*_async` methods are async-shaped compatibility
+APIs around blocking `nusb` calls (`wait` and blocking bulk transfers). They are
+useful for sharing HAL sequences with WebUSB, but native apps should run them on
+a dedicated worker/blocking context. They are not intended to be polled on a
+latency-sensitive async executor. On wasm, the same methods map to real WebUSB
+promises.
+
 On Android, apps should discover and permission USB devices with Android
 `UsbManager`, then pass an already-open file descriptor into Rust. OpenIPC
 Station ships the local `tauri-plugin-openipc-usb` bridge for this, while the

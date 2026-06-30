@@ -4,15 +4,23 @@ use poly1305::universal_hash::KeyInit;
 use poly1305::Poly1305;
 use subtle::ConstantTimeEq;
 
+/// Key length used by the legacy WFB ChaCha20-Poly1305 construction.
 pub const CHACHA20_POLY1305_KEY_LEN: usize = 32;
+/// Nonce length used by the legacy WFB ChaCha20-Poly1305 construction.
 pub const CHACHA20_POLY1305_NONCE_LEN: usize = 8;
+/// Authentication tag length used by the legacy WFB construction.
 pub const CHACHA20_POLY1305_TAG_LEN: usize = 16;
 
+/// Error from legacy WFB ChaCha20-Poly1305 helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CryptoError {
+    /// Key slice was not 32 bytes.
     InvalidKey,
+    /// Nonce slice was not 8 bytes.
     InvalidNonce,
+    /// Ciphertext did not include a full authentication tag.
     CiphertextTooShort,
+    /// Authentication tag did not verify.
     AuthenticationFailed,
 }
 
@@ -29,6 +37,7 @@ impl std::fmt::Display for CryptoError {
 
 impl std::error::Error for CryptoError {}
 
+/// Verify and decrypt the legacy WFB ChaCha20-Poly1305 payload shape.
 pub fn decrypt_chacha20poly1305_legacy(
     key: &[u8],
     nonce: &[u8],
@@ -51,6 +60,7 @@ pub fn decrypt_chacha20poly1305_legacy(
     Ok(plaintext)
 }
 
+/// Encrypt and authenticate using the legacy WFB ChaCha20-Poly1305 shape.
 pub fn encrypt_chacha20poly1305_legacy(
     key: &[u8],
     nonce: &[u8],

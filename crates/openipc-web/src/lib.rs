@@ -1,3 +1,9 @@
+//! WebAssembly bindings for the OpenIPC receiver pipeline and WebUSB driver.
+//!
+//! The Rust types in this crate wrap `openipc-core` and `openipc-rtl88xx` for
+//! browser and Tauri-webview frontends. JavaScript receives typed video frames,
+//! raw route payloads, diagnostics, and WebUSB helpers through wasm-bindgen.
+
 mod adaptive;
 mod js;
 mod receiver;
@@ -9,7 +15,9 @@ pub use receiver::OpenIpcReceiver;
 pub use webusb::supported_usb_filters;
 #[cfg(target_arch = "wasm32")]
 pub use webusb::{
-    list_authorized_usb_devices, WebUsbPhydmWatchdog, WebUsbPowerTracking8812, WebUsbRealtekDevice,
+    list_authorized_usb_devices, WebBbDbgportRead, WebFalseAlarmCounters, WebInitReport,
+    WebIqkReport, WebPhydmWatchdogReport, WebPowerTrackingReport, WebQueueDepth8814,
+    WebThermalStatus, WebUsbPhydmWatchdog, WebUsbPowerTracking8812, WebUsbRealtekDevice,
 };
 
 use wasm_bindgen::prelude::*;
@@ -27,12 +35,16 @@ export type OpenIpcVideoFrame = {
 export type OpenIpcRawPayload = {
     data: Uint8Array;
     packetSeq: string;
+    routeId: number;
     channelId: number;
 };
 
 export type OpenIpcRxTransferProfile = {
     frames: OpenIpcVideoFrame[];
+    rawPayloads: OpenIpcRawPayload[];
     mavlinkPayloads: OpenIpcRawPayload[];
+    rawPayloadCount: number;
+    rawPayloadBytes: number;
     transferBytes: number;
     packets: number;
     acceptedPackets: number;

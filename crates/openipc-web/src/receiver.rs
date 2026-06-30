@@ -1,49 +1,59 @@
 use js_sys::{Array, Object, Reflect, Uint8Array};
-use openipc_core::realtek::{parse_rx_aggregate, RxPacketType};
+use openipc_core::realtek::parse_rx_aggregate;
 use openipc_core::{
-    ChannelId, FrameLayout, PayloadPipeline, PipelineEvent, RadioPort, ReceiverPipeline, WfbKeypair,
+    ChannelId, FrameLayout, PayloadRouteId, RadioPort, ReceiverBatchOptions, ReceiverRuntime,
+    RtpPayloadTap, WfbKeypair,
 };
 use wasm_bindgen::prelude::*;
 
-use crate::js::{
-    accept_rx_packet, append_payload_objects, append_video_frame_objects, append_video_frames,
-    counters_json, elapsed_ms, now_ms, parse_hex_u64, set_number, video_frames_from_events,
-};
+use crate::js::{counters_json, elapsed_ms, now_ms, parse_hex_u64, raw_payload_object, set_number};
 use crate::video::video_frame_object;
 
+const VIDEO_ROUTE_ID: PayloadRouteId = PayloadRouteId::new(1);
+const TELEMETRY_ROUTE_ID: PayloadRouteId = PayloadRouteId::new(2);
+const DEFAULT_KEY_SLOT: u64 = 0;
+
 #[wasm_bindgen]
+/// Browser/WASM receiver for OpenIPC RX transfers and RTP packets.
 pub struct OpenIpcReceiver {
-    pub(crate) pipeline: ReceiverPipeline,
-    mavlink_pipeline: Option<PayloadPipeline>,
+    pub(crate) runtime: ReceiverRuntime,
+}
+
+impl OpenIpcReceiver {
+    pub(crate) fn video_fec_counters(&self) -> openipc_core::FecCounters {
+        self.runtime.video_fec_counters()
+    }
 }
 
 #[wasm_bindgen]
 impl OpenIpcReceiver {
     #[wasm_bindgen(constructor)]
+    /// Create a plain/FEC-only receiver for the default OpenIPC video channel.
     pub fn new() -> Result<OpenIpcReceiver, JsValue> {
         Self::with_channel_id(openipc_core::channel::DEFAULT_LINK_ID << 8, 1, 5)
     }
 
     #[wasm_bindgen(js_name = withChannelId)]
+    /// Create a plain/FEC-only receiver for a specific channel id.
     pub fn with_channel_id(
         channel_id: u32,
         fec_k: usize,
         fec_n: usize,
     ) -> Result<OpenIpcReceiver, JsValue> {
-        let pipeline = ReceiverPipeline::new(
-            ChannelId::new(channel_id),
+        let runtime = ReceiverRuntime::with_plain_video_route(
             FrameLayout::WithFcs,
+            VIDEO_ROUTE_ID,
+            ChannelId::new(channel_id),
+            DEFAULT_KEY_SLOT,
             fec_k,
             fec_n,
         )
-        .map_err(|err| JsValue::from_str(&format!("invalid receiver config: {err:?}")))?;
-        Ok(Self {
-            pipeline,
-            mavlink_pipeline: None,
-        })
+        .map_err(|err| JsValue::from_str(&format!("invalid receiver config: {err}")))?;
+        Ok(Self { runtime })
     }
 
     #[wasm_bindgen(js_name = withKeypair)]
+    /// Create an encrypted WFB receiver and default telemetry downlink tap.
     pub fn with_keypair(
         channel_id: u32,
         keypair: &[u8],
@@ -51,26 +61,49 @@ impl OpenIpcReceiver {
     ) -> Result<OpenIpcReceiver, JsValue> {
         let keypair = WfbKeypair::from_bytes(keypair)
             .map_err(|err| JsValue::from_str(&format!("invalid WFB keypair: {err}")))?;
-        let mavlink_channel_id =
-            ChannelId::from_link_port(channel_id >> 8, RadioPort::MavlinkRx).raw();
-        openipc_receiver_with_keypair_and_mavlink_channel_inner(
+        let telemetry_channel_id =
+            ChannelId::from_link_port(channel_id >> 8, RadioPort::TelemetryRx).raw();
+        openipc_receiver_with_keypair_and_telemetry_channel_inner(
             channel_id,
-            mavlink_channel_id,
+            telemetry_channel_id,
             keypair,
             minimum_epoch,
         )
     }
 
+    #[wasm_bindgen(js_name = withKeypairOnly)]
+    /// Create an encrypted WFB receiver with only the video route.
+    pub fn with_keypair_only(
+        channel_id: u32,
+        keypair: &[u8],
+        minimum_epoch: u64,
+    ) -> Result<OpenIpcReceiver, JsValue> {
+        let keypair = WfbKeypair::from_bytes(keypair)
+            .map_err(|err| JsValue::from_str(&format!("invalid WFB keypair: {err}")))?;
+        let runtime = ReceiverRuntime::with_keyed_video_route(
+            FrameLayout::WithFcs,
+            VIDEO_ROUTE_ID,
+            ChannelId::new(channel_id),
+            DEFAULT_KEY_SLOT,
+            keypair,
+            minimum_epoch,
+        )
+        .map_err(|err| JsValue::from_str(&format!("invalid encrypted receiver config: {err}")))?;
+        Ok(OpenIpcReceiver { runtime })
+    }
+
     #[wasm_bindgen(js_name = withKeypairAndMavlinkChannel)]
+    /// Create an encrypted WFB receiver with an explicit raw telemetry channel.
+    ///
+    /// This is the historical JS name. New applications should call
+    /// `withKeypairAndTelemetryChannel`.
     pub fn with_keypair_and_mavlink_channel(
         channel_id: u32,
         mavlink_channel_id: u32,
         keypair: &[u8],
         minimum_epoch: u64,
     ) -> Result<OpenIpcReceiver, JsValue> {
-        let keypair = WfbKeypair::from_bytes(keypair)
-            .map_err(|err| JsValue::from_str(&format!("invalid WFB keypair: {err}")))?;
-        openipc_receiver_with_keypair_and_mavlink_channel_inner(
+        Self::with_keypair_and_telemetry_channel(
             channel_id,
             mavlink_channel_id,
             keypair,
@@ -78,10 +111,32 @@ impl OpenIpcReceiver {
         )
     }
 
+    #[wasm_bindgen(js_name = withKeypairAndTelemetryChannel)]
+    /// Create an encrypted WFB receiver with an explicit raw telemetry channel.
+    pub fn with_keypair_and_telemetry_channel(
+        channel_id: u32,
+        telemetry_channel_id: u32,
+        keypair: &[u8],
+        minimum_epoch: u64,
+    ) -> Result<OpenIpcReceiver, JsValue> {
+        let keypair = WfbKeypair::from_bytes(keypair)
+            .map_err(|err| JsValue::from_str(&format!("invalid WFB keypair: {err}")))?;
+        openipc_receiver_with_keypair_and_telemetry_channel_inner(
+            channel_id,
+            telemetry_channel_id,
+            keypair,
+            minimum_epoch,
+        )
+    }
+
     #[wasm_bindgen(js_name = pushRtpPacket)]
+    /// Push one raw RTP packet and return Annex-B bytes when a frame completes.
     pub fn push_rtp_packet(&mut self, data: &[u8]) -> Option<Uint8Array> {
-        self.pipeline
-            .push_rtp(data)
+        self.runtime
+            .rtp_mut()
+            .push(data)
+            .ok()
+            .flatten()
             .map(|frame| Uint8Array::from(frame.data.as_slice()))
     }
 
@@ -89,87 +144,78 @@ impl OpenIpcReceiver {
         js_name = pushRtpPacketDetailed,
         unchecked_return_type = "OpenIpcVideoFrame | null"
     )]
+    /// Push one RTP packet and return a typed frame object when one completes.
     pub fn push_rtp_packet_detailed(&mut self, data: &[u8]) -> Result<JsValue, JsValue> {
-        match self.pipeline.push_rtp(data) {
+        match self.runtime.rtp_mut().push(data).ok().flatten() {
             Some(frame) => Ok(video_frame_object(frame)?.into()),
             None => Ok(JsValue::NULL),
         }
     }
 
     #[wasm_bindgen(js_name = pushDecryptedFragment)]
+    /// Push an already-decrypted WFB fragment into the video runtime.
     pub fn push_decrypted_fragment(
         &mut self,
         data_nonce_hex: &str,
         fragment: &[u8],
     ) -> Result<Array, JsValue> {
         let data_nonce = parse_hex_u64(data_nonce_hex)?;
-        let events = self
-            .pipeline
-            .push_decrypted_fragment(data_nonce, fragment)
-            .map_err(|err| JsValue::from_str(&format!("WFB fragment rejected: {err:?}")))?;
-
-        let frames = Array::new();
-        for event in events {
-            if let PipelineEvent::VideoFrame(frame) = event {
-                frames.push(&Uint8Array::from(frame.data.as_slice()));
-            }
-        }
-        Ok(frames)
+        let batch = self
+            .runtime
+            .push_decrypted_fragment(
+                self.runtime.video_runtime(),
+                data_nonce,
+                fragment,
+                &ReceiverBatchOptions::default(),
+            )
+            .map_err(|err| JsValue::from_str(&format!("WFB fragment rejected: {err}")))?;
+        Ok(frame_bytes_array(batch.frames))
     }
 
     #[wasm_bindgen(js_name = pushDecrypted80211Frame)]
+    /// Push an 802.11 frame with a caller-supplied decrypted WFB fragment.
     pub fn push_decrypted_80211_frame(
         &mut self,
         frame: &[u8],
         fragment: &[u8],
     ) -> Result<Array, JsValue> {
-        let events = self
-            .pipeline
-            .push_decrypted_80211_frame(frame, fragment)
-            .map_err(|err| JsValue::from_str(&format!("802.11 frame rejected: {err:?}")))?;
-        let frames = Array::new();
-        for event in events {
-            if let PipelineEvent::VideoFrame(frame) = event {
-                frames.push(&Uint8Array::from(frame.data.as_slice()));
-            }
-        }
-        Ok(frames)
+        let batch = self
+            .runtime
+            .push_decrypted_80211_frame(
+                self.runtime.video_runtime(),
+                frame,
+                fragment,
+                &ReceiverBatchOptions::default(),
+            )
+            .map_err(|err| JsValue::from_str(&format!("802.11 frame rejected: {err}")))?;
+        Ok(frame_bytes_array(batch.frames))
     }
 
     #[wasm_bindgen(js_name = pushEncrypted80211Frame)]
+    /// Push one encrypted OpenIPC/WFB 802.11 frame.
     pub fn push_encrypted_80211_frame(&mut self, frame: &[u8]) -> Result<Array, JsValue> {
-        let events = self
-            .pipeline
-            .push_80211_frame(frame)
+        let batch = self
+            .runtime
+            .push_80211_frame(frame, &ReceiverBatchOptions::default())
             .map_err(|err| JsValue::from_str(&format!("802.11 frame rejected: {err}")))?;
-        Ok(video_frames_from_events(events))
+        Ok(frame_bytes_array(batch.frames))
     }
 
     #[wasm_bindgen(js_name = pushRxTransfer)]
+    /// Push one Realtek RX USB transfer and return completed Annex-B frames.
     pub fn push_rx_transfer(&mut self, transfer: &[u8]) -> Result<Array, JsValue> {
-        let packets = parse_rx_aggregate(transfer)
+        let batch = self
+            .runtime
+            .push_rx_transfer(transfer, &ReceiverBatchOptions::default())
             .map_err(|err| JsValue::from_str(&format!("Realtek RX aggregate rejected: {err}")))?;
-        let frames = Array::new();
-        for packet in packets {
-            if packet.attrib.crc_err
-                || packet.attrib.icv_err
-                || packet.attrib.pkt_rpt_type != RxPacketType::NormalRx
-            {
-                continue;
-            }
-            let events = self
-                .pipeline
-                .push_80211_frame(packet.data)
-                .map_err(|err| JsValue::from_str(&format!("OpenIPC frame rejected: {err}")))?;
-            append_video_frames(&frames, events);
-        }
-        Ok(frames)
+        Ok(frame_bytes_array(batch.frames))
     }
 
     #[wasm_bindgen(
         js_name = pushRxTransferDetailed,
         unchecked_return_type = "OpenIpcVideoFrame[]"
     )]
+    /// Push one RX transfer and return typed frame objects.
     pub fn push_rx_transfer_detailed(&mut self, transfer: &[u8]) -> Result<Array, JsValue> {
         self.push_rx_transfer_detailed_with_options(transfer, false)
     }
@@ -178,31 +224,30 @@ impl OpenIpcReceiver {
         js_name = pushRxTransferDetailedWithOptions,
         unchecked_return_type = "OpenIpcVideoFrame[]"
     )]
+    /// Push one RX transfer with control over CRC/ICV-marked packets.
     pub fn push_rx_transfer_detailed_with_options(
         &mut self,
         transfer: &[u8],
         keep_corrupted: bool,
     ) -> Result<Array, JsValue> {
-        let packets = parse_rx_aggregate(transfer)
+        let batch = self
+            .runtime
+            .push_rx_transfer(
+                transfer,
+                &ReceiverBatchOptions {
+                    accept_corrupted: keep_corrupted,
+                    ..ReceiverBatchOptions::default()
+                },
+            )
             .map_err(|err| JsValue::from_str(&format!("Realtek RX aggregate rejected: {err}")))?;
-        let frames = Array::new();
-        for packet in packets {
-            if !accept_rx_packet(packet.attrib, keep_corrupted) {
-                continue;
-            }
-            let events = self
-                .pipeline
-                .push_80211_frame(packet.data)
-                .map_err(|err| JsValue::from_str(&format!("OpenIPC frame rejected: {err}")))?;
-            append_video_frame_objects(&frames, events)?;
-        }
-        Ok(frames)
+        frame_objects_array(batch.frames)
     }
 
     #[wasm_bindgen(
         js_name = pushRxTransferProfiled,
         unchecked_return_type = "OpenIpcRxTransferProfile"
     )]
+    /// Push one RX transfer and return frames plus parser/latency counters.
     pub fn push_rx_transfer_profiled(&mut self, transfer: &[u8]) -> Result<Object, JsValue> {
         self.push_rx_transfer_profiled_with_options(transfer, false)
     }
@@ -211,10 +256,105 @@ impl OpenIpcReceiver {
         js_name = pushRxTransferProfiledWithOptions,
         unchecked_return_type = "OpenIpcRxTransferProfile"
     )]
+    /// Push one RX transfer with profiling and bad-FCS handling options.
     pub fn push_rx_transfer_profiled_with_options(
         &mut self,
         transfer: &[u8],
         keep_corrupted: bool,
+    ) -> Result<Object, JsValue> {
+        self.push_rx_transfer_profiled_inner(
+            transfer,
+            keep_corrupted,
+            &[TELEMETRY_ROUTE_ID.raw() as u32],
+            &[],
+        )
+    }
+
+    #[wasm_bindgen(
+        js_name = pushRxTransferProfiledWithRouteIds,
+        unchecked_return_type = "OpenIpcRxTransferProfile"
+    )]
+    /// Push one RX transfer and copy raw payloads for caller-selected route IDs.
+    pub fn push_rx_transfer_profiled_with_route_ids(
+        &mut self,
+        transfer: &[u8],
+        keep_corrupted: bool,
+        raw_route_ids: &[u32],
+    ) -> Result<Object, JsValue> {
+        self.push_rx_transfer_profiled_inner(transfer, keep_corrupted, raw_route_ids, &[])
+    }
+
+    #[wasm_bindgen(
+        js_name = pushRxTransferProfiledWithRouteIdsAndRtpTaps,
+        unchecked_return_type = "OpenIpcRxTransferProfile"
+    )]
+    /// Push one RX transfer and copy raw payloads plus filtered RTP payload taps.
+    pub fn push_rx_transfer_profiled_with_route_ids_and_rtp_taps(
+        &mut self,
+        transfer: &[u8],
+        keep_corrupted: bool,
+        raw_route_ids: &[u32],
+        rtp_tap_route_ids: &[u32],
+        rtp_tap_payload_types: &[u8],
+    ) -> Result<Object, JsValue> {
+        if rtp_tap_route_ids.len() != rtp_tap_payload_types.len() {
+            return Err(JsValue::from_str(
+                "RTP tap route id and payload type arrays must have the same length",
+            ));
+        }
+        let rtp_payload_taps = rtp_tap_route_ids
+            .iter()
+            .zip(rtp_tap_payload_types.iter())
+            .map(|(route_id, payload_type)| RtpPayloadTap {
+                route_id: PayloadRouteId::new(*route_id as u64),
+                payload_type: *payload_type,
+            })
+            .collect::<Vec<_>>();
+        self.push_rx_transfer_profiled_inner(
+            transfer,
+            keep_corrupted,
+            raw_route_ids,
+            &rtp_payload_taps,
+        )
+    }
+
+    #[wasm_bindgen(js_name = addKeyedRoute)]
+    /// Add an encrypted raw-payload route to the receiver.
+    pub fn add_keyed_route(
+        &mut self,
+        route_id: u32,
+        channel_id: u32,
+        keypair: &[u8],
+        minimum_epoch: u64,
+    ) -> Result<(), JsValue> {
+        let keypair = WfbKeypair::from_bytes(keypair)
+            .map_err(|err| JsValue::from_str(&format!("invalid WFB keypair: {err}")))?;
+        self.runtime
+            .add_keyed_route(
+                PayloadRouteId::new(route_id as u64),
+                ChannelId::new(channel_id),
+                DEFAULT_KEY_SLOT,
+                keypair,
+                minimum_epoch,
+            )
+            .map_err(|err| JsValue::from_str(&format!("invalid route config: {err}")))?;
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = fecCounters)]
+    /// Return cumulative video FEC counters as JSON.
+    pub fn fec_counters(&self) -> String {
+        counters_json(self.video_fec_counters())
+    }
+}
+
+impl OpenIpcReceiver {
+    fn push_rx_transfer_profiled_inner(
+        &mut self,
+        transfer: &[u8],
+        keep_corrupted: bool,
+        raw_route_ids: &[u32],
+        rtp_payload_taps: &[RtpPayloadTap],
     ) -> Result<Object, JsValue> {
         let total_start = now_ms();
         let parse_start = now_ms();
@@ -222,125 +362,114 @@ impl OpenIpcReceiver {
             .map_err(|err| JsValue::from_str(&format!("Realtek RX aggregate rejected: {err}")))?;
         let parse_ms = elapsed_ms(parse_start);
 
-        let frames = Array::new();
-        let mavlink_payloads = Array::new();
-        let mut accepted_packets = 0usize;
-        let mut crc_dropped = 0usize;
-        let mut icv_dropped = 0usize;
-        let mut report_dropped = 0usize;
-        let mut ignored_frames = 0usize;
-        let mut sessions = 0usize;
-        let mut wfb_payloads = 0usize;
-        let mut rtp_packets = 0usize;
-        let mut video_frames = 0usize;
-        let mut mavlink_payload_count = 0usize;
-        let mut mavlink_bytes = 0usize;
-
+        let raw_payload_routes = raw_route_ids
+            .iter()
+            .map(|id| PayloadRouteId::new(*id as u64))
+            .collect();
         let pipeline_start = now_ms();
-        let packet_count = packets.len();
-        for packet in packets {
-            if packet.attrib.crc_err && !keep_corrupted {
-                crc_dropped += 1;
-                continue;
-            }
-            if packet.attrib.icv_err && !keep_corrupted {
-                icv_dropped += 1;
-                continue;
-            }
-            if packet.attrib.pkt_rpt_type != RxPacketType::NormalRx {
-                report_dropped += 1;
-                continue;
-            }
-            accepted_packets += 1;
-            if let Some(mavlink_pipeline) = self.mavlink_pipeline.as_mut() {
-                if let Ok(events) = mavlink_pipeline.push_80211_frame(packet.data) {
-                    append_payload_objects(
-                        &mavlink_payloads,
-                        events,
-                        mavlink_pipeline.channel_id(),
-                        &mut mavlink_payload_count,
-                        &mut mavlink_bytes,
-                    )?;
-                }
-            }
-            let events = self
-                .pipeline
-                .push_80211_frame(packet.data)
-                .map_err(|err| JsValue::from_str(&format!("OpenIPC frame rejected: {err}")))?;
-            for event in events {
-                match event {
-                    PipelineEvent::IgnoredFrame => ignored_frames += 1,
-                    PipelineEvent::SessionEstablished { .. } => sessions += 1,
-                    PipelineEvent::WfbPayload { .. } => wfb_payloads += 1,
-                    PipelineEvent::RtpPacket { .. } => rtp_packets += 1,
-                    PipelineEvent::VideoFrame(frame) => {
-                        video_frames += 1;
-                        frames.push(&video_frame_object(frame)?.into());
-                    }
-                }
-            }
-        }
+        let batch = self.runtime.push_rx_packets(
+            packets,
+            &ReceiverBatchOptions {
+                accept_corrupted: keep_corrupted,
+                raw_payload_routes,
+                rtp_payload_taps: rtp_payload_taps.to_vec(),
+            },
+        );
         let pipeline_ms = elapsed_ms(pipeline_start);
+        let counters = batch.counters;
+        let frames = frame_objects_array(batch.frames)?;
+        let raw_payloads = raw_payload_array(batch.raw_payloads)?;
 
         let object = Object::new();
         Reflect::set(&object, &JsValue::from_str("frames"), &frames)?;
+        Reflect::set(&object, &JsValue::from_str("rawPayloads"), &raw_payloads)?;
         Reflect::set(
             &object,
             &JsValue::from_str("mavlinkPayloads"),
-            &mavlink_payloads,
+            &raw_payloads,
         )?;
-        set_number(&object, "transferBytes", transfer.len() as f64)?;
-        set_number(&object, "packets", packet_count as f64)?;
-        set_number(&object, "acceptedPackets", accepted_packets as f64)?;
         set_number(
             &object,
-            "droppedPackets",
-            (crc_dropped + icv_dropped + report_dropped) as f64,
+            "rawPayloadCount",
+            counters.raw_payload_count as f64,
         )?;
-        set_number(&object, "crcDropped", crc_dropped as f64)?;
-        set_number(&object, "icvDropped", icv_dropped as f64)?;
-        set_number(&object, "reportDropped", report_dropped as f64)?;
-        set_number(&object, "ignoredFrames", ignored_frames as f64)?;
-        set_number(&object, "sessions", sessions as f64)?;
-        set_number(&object, "wfbPayloads", wfb_payloads as f64)?;
-        set_number(&object, "rtpPackets", rtp_packets as f64)?;
-        set_number(&object, "videoFrames", video_frames as f64)?;
-        set_number(&object, "mavlinkPayloadCount", mavlink_payload_count as f64)?;
-        set_number(&object, "mavlinkBytes", mavlink_bytes as f64)?;
+        set_number(
+            &object,
+            "rawPayloadBytes",
+            counters.raw_payload_bytes as f64,
+        )?;
+        set_number(&object, "transferBytes", transfer.len() as f64)?;
+        set_number(&object, "packets", counters.packets as f64)?;
+        set_number(&object, "acceptedPackets", counters.accepted_packets as f64)?;
+        set_number(&object, "droppedPackets", counters.dropped_packets as f64)?;
+        set_number(&object, "crcDropped", counters.crc_dropped as f64)?;
+        set_number(&object, "icvDropped", counters.icv_dropped as f64)?;
+        set_number(&object, "reportDropped", counters.report_dropped as f64)?;
+        set_number(&object, "ignoredFrames", counters.ignored_frames as f64)?;
+        set_number(&object, "sessions", counters.sessions as f64)?;
+        set_number(&object, "wfbPayloads", counters.wfb_payloads as f64)?;
+        set_number(&object, "rtpPackets", counters.rtp_packets as f64)?;
+        set_number(&object, "videoFrames", counters.video_frames as f64)?;
+        set_number(
+            &object,
+            "mavlinkPayloadCount",
+            counters.raw_payload_count as f64,
+        )?;
+        set_number(&object, "mavlinkBytes", counters.raw_payload_bytes as f64)?;
         set_number(&object, "parseMs", parse_ms)?;
         set_number(&object, "pipelineMs", pipeline_ms)?;
         set_number(&object, "totalMs", elapsed_ms(total_start))?;
         Ok(object)
     }
-
-    #[wasm_bindgen(js_name = fecCounters)]
-    pub fn fec_counters(&self) -> String {
-        counters_json(self.pipeline.fec_counters())
-    }
 }
 
-fn openipc_receiver_with_keypair_and_mavlink_channel_inner(
+fn openipc_receiver_with_keypair_and_telemetry_channel_inner(
     channel_id: u32,
-    mavlink_channel_id: u32,
+    telemetry_channel_id: u32,
     keypair: WfbKeypair,
     minimum_epoch: u64,
 ) -> Result<OpenIpcReceiver, JsValue> {
-    let pipeline = ReceiverPipeline::with_keypair(
-        ChannelId::new(channel_id),
+    let mut runtime = ReceiverRuntime::with_keyed_video_route(
         FrameLayout::WithFcs,
+        VIDEO_ROUTE_ID,
+        ChannelId::new(channel_id),
+        DEFAULT_KEY_SLOT,
         keypair,
         minimum_epoch,
     )
     .map_err(|err| JsValue::from_str(&format!("invalid encrypted receiver config: {err}")))?;
-    let mavlink_pipeline = PayloadPipeline::with_keypair(
-        ChannelId::new(mavlink_channel_id),
-        FrameLayout::WithFcs,
-        keypair,
-        minimum_epoch,
-    )
-    .map_err(|err| JsValue::from_str(&format!("invalid MAVLink receiver config: {err}")))?;
-    Ok(OpenIpcReceiver {
-        pipeline,
-        mavlink_pipeline: Some(mavlink_pipeline),
-    })
+    runtime
+        .add_keyed_route(
+            TELEMETRY_ROUTE_ID,
+            ChannelId::new(telemetry_channel_id),
+            DEFAULT_KEY_SLOT,
+            keypair,
+            minimum_epoch,
+        )
+        .map_err(|err| JsValue::from_str(&format!("invalid MAVLink receiver config: {err}")))?;
+    Ok(OpenIpcReceiver { runtime })
+}
+
+fn frame_bytes_array(frames: Vec<openipc_core::DepacketizedFrame>) -> Array {
+    let out = Array::new();
+    for frame in frames {
+        out.push(&Uint8Array::from(frame.data.as_slice()));
+    }
+    out
+}
+
+fn frame_objects_array(frames: Vec<openipc_core::DepacketizedFrame>) -> Result<Array, JsValue> {
+    let out = Array::new();
+    for frame in frames {
+        out.push(&video_frame_object(frame)?.into());
+    }
+    Ok(out)
+}
+
+fn raw_payload_array(payloads: Vec<openipc_core::RoutePayload>) -> Result<Array, JsValue> {
+    let out = Array::new();
+    for payload in payloads {
+        out.push(&raw_payload_object(payload)?.into());
+    }
+    Ok(out)
 }

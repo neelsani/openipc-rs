@@ -98,19 +98,19 @@ normal; the Tauri window is the desktop app.
 List adapters:
 
 ```sh
-cargo run -p openipc-native -- list-supported
+cargo run -p openipc-cli -- list-supported
 ```
 
 Probe the first supported adapter without monitor initialization:
 
 ```sh
-cargo run -p openipc-native -- probe
+cargo run -p openipc-cli -- probe
 ```
 
 Receive video, write Annex-B frames, and send adaptive-link feedback:
 
 ```sh
-cargo run -p openipc-native -- recv \
+cargo run -p openipc-cli -- recv \
   --key gs.key \
   --rf-channel 161 \
   --rf-width 20 \

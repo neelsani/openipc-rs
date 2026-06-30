@@ -15,8 +15,10 @@ the frame stop moving?
 - WFB session updates, decrypted packets, recovered fragments, and lost
   fragments.
 - RTP packets and extracted Annex-B frames.
-- Raw payload count and recovered telemetry/data bytes for the configured
-  non-video radio port.
+- Raw payload count and recovered route bytes for configured telemetry, data,
+  RTP mirror, or audio routes.
+- Opus audio packets, decoded audio frames, audio queue depth, and audio
+  decoder errors when an audio route is enabled.
 - WebCodecs decoder name, codec string, resolution, decode errors, and render
   FPS.
 - WebCodecs capability probe: `VideoDecoder`, `EncodedVideoChunk`, H.264, H.265,
@@ -50,10 +52,10 @@ When video is not smooth, compare the stage counters in order:
 1. USB bytes arriving.
 2. Realtek packets parsed.
 3. WFB packets decrypted.
-4. Raw payload counts increasing if telemetry or data-channel traffic is
-   expected.
-5. RTP packets emitted.
-6. Annex-B frames extracted.
+4. Raw payload counts increasing if telemetry, data, mirrored RTP, or audio
+   traffic is expected.
+5. Video-channel payloads counted as RTP packets.
+6. Annex-B frames extracted by `RtpDepacketizer`.
 7. Decoder capability probe reports the needed WebCodecs API and codec support.
 8. WebCodecs frames decoded.
 9. Canvas frames rendered.
@@ -68,10 +70,10 @@ failure boundary.
 | No USB bytes                         | Device permission, driver claim, endpoint discovery, channel setup, or no RF traffic.                                                          |
 | USB bytes but no accepted packets    | Realtek descriptor parsing, CRC/ICV drops, wrong channel, or unsupported descriptor variant.                                                   |
 | Accepted packets but no WFB payloads | Wrong channel id, wrong radio port, or frame layout mismatch.                                                                                  |
-| Video works but no raw payloads      | Air unit is not sending telemetry/data on the expected port, that channel's session packet has not arrived, or the link id/key does not match. |
-| WFB payloads but no RTP              | Bad key, missing session packet, epoch filter, or unrecoverable FEC loss.                                                                      |
-| RTP but no video frames              | Codec packetization issue or waiting for a keyframe/access unit.                                                                               |
+| Video works but no raw payloads      | Air unit is not sending on the expected route channel, that channel's session packet has not arrived, or the link id/key does not match.       |
+| WFB payloads but no video frames     | RTP packetization issue, unsupported payload type, codec fragmentation issue, or waiting for a keyframe/access unit.                           |
 | Video frames but black output        | WebCodecs unsupported codec/config, decoder reset, or no keyframe yet.                                                                         |
+| Raw audio packets but no audio       | Wrong RTP payload type, WebCodecs `AudioDecoder` lacks Opus support, muted/suspended AudioContext, or unsupported channel/sample-rate config.  |
 | Good decode FPS but low render FPS   | Canvas/rendering path or recording overhead.                                                                                                   |
 
 ## Logs

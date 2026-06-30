@@ -7,56 +7,101 @@ use crate::channel::ChannelId;
 use crate::crypto::decrypt_chacha20poly1305_legacy;
 use crate::fec::FecCode;
 
+/// WFB WiFi MTU used by OpenIPC forwarder packets.
 pub const WIFI_MTU: usize = 4045;
+/// 802.11 header length subtracted from WFB packet capacity.
 pub const IEEE80211_HEADER_LEN: usize = 24;
+/// crypto_box secret key length.
 pub const CRYPTO_BOX_SECRETKEY_LEN: usize = 32;
+/// crypto_box public key length.
 pub const CRYPTO_BOX_PUBLICKEY_LEN: usize = 32;
+/// crypto_box nonce length.
 pub const CRYPTO_BOX_NONCE_LEN: usize = 24;
+/// crypto_box authentication tag length.
 pub const CRYPTO_BOX_TAG_LEN: usize = 16;
+/// WFB session packet header length.
 pub const WSESSION_HDR_LEN: usize = 1 + CRYPTO_BOX_NONCE_LEN;
+/// Plain WFB session body length before crypto_box encryption.
 pub const WSESSION_DATA_LEN: usize = 8 + 4 + 1 + 1 + 1 + CHACHA20_POLY1305_KEY_LEN;
+/// WFB data-block header length.
 pub const WBLOCK_HDR_LEN: usize = 9;
+/// Plain WFB payload-fragment header length.
 pub const WPACKET_HDR_LEN: usize = 3;
+/// WFB session ChaCha20-Poly1305 key length.
 pub const CHACHA20_POLY1305_KEY_LEN: usize = 32;
+/// WFB session ChaCha20-Poly1305 authentication tag length.
 pub const CHACHA20_POLY1305_TAG_LEN: usize = 16;
+/// Maximum encrypted FEC fragment payload carried by one WFB data packet.
 pub const MAX_FEC_PAYLOAD: usize =
     WIFI_MTU - IEEE80211_HEADER_LEN - WBLOCK_HDR_LEN - CHACHA20_POLY1305_TAG_LEN;
+/// Maximum application payload before WFB fragment headers are added.
 pub const MAX_PAYLOAD_SIZE: usize = MAX_FEC_PAYLOAD - WPACKET_HDR_LEN;
+/// Maximum WFB forwarder packet payload after the 802.11 header.
 pub const MAX_FORWARDER_PACKET_SIZE: usize = WIFI_MTU - IEEE80211_HEADER_LEN;
+/// Largest WFB block index before a transmitter must rotate session keys.
 pub const MAX_BLOCK_IDX: u64 = (1u64 << 55) - 1;
 
+/// WFB packet type for encrypted data fragments.
 pub const WFB_PACKET_DATA: u8 = 0x01;
+/// WFB packet type for encrypted session-key packets.
 pub const WFB_PACKET_KEY: u8 = 0x02;
+/// FEC type used by WFB's Vandermonde Reed-Solomon blocks.
 pub const WFB_FEC_VDM_RS: u8 = 0x01;
+/// Flag marking a WFB packet as parity-only FEC data.
 pub const WFB_PACKET_FEC_ONLY: u8 = 0x01;
 
+/// Error returned while parsing, decrypting, or assembling WFB packets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WfbError {
+    /// Packet buffer is empty.
     Empty,
+    /// Packet exceeds WFB forwarder size.
     TooLong,
+    /// Data packet is too short.
     ShortDataPacket,
+    /// Session packet is too short.
     ShortSessionPacket,
+    /// WFB keypair is not the expected 64-byte file shape.
     InvalidKeypair,
+    /// Session-key encryption failed.
     SessionEncryptFailed,
+    /// Session-key decryption failed.
     SessionDecryptFailed,
+    /// Data encryption failed.
     DataEncryptFailed,
+    /// Data decryption failed.
     DataDecryptFailed,
+    /// Session epoch was older than the configured minimum.
     SessionEpochTooOld {
+        /// Epoch from the received session packet.
         session_epoch: u64,
+        /// Minimum epoch accepted by the receiver.
         minimum_epoch: u64,
     },
+    /// Session packet was for a different WFB channel.
     SessionChannelMismatch {
+        /// Expected channel id.
         expected: u32,
+        /// Actual channel id in the session packet.
         actual: u32,
     },
+    /// FEC type is not the supported VDM Reed-Solomon mode.
     UnsupportedFecType(u8),
+    /// Forwarder packet type is unknown.
     UnknownPacketType(u8),
+    /// FEC parameters are invalid.
     InvalidFecParameters,
+    /// Fragment index is outside the current FEC block.
     InvalidFragmentIndex,
+    /// Data nonce encoded a block index beyond the supported range.
     BlockIndexOverflow,
+    /// Decrypted plain packet is malformed.
     InvalidPlainPacket,
+    /// Plain payload exceeds the WFB maximum.
     PayloadTooLarge,
+    /// Encrypted data packet arrived before a session key.
     MissingSession,
+    /// FEC recovery failed.
     FecRecoveryFailed,
 }
 
@@ -102,26 +147,38 @@ impl std::fmt::Display for WfbError {
 
 impl std::error::Error for WfbError {}
 
+/// Borrowed WFB forwarder packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WfbPacket<'a> {
+    /// Encrypted WFB data/FEC fragment packet.
     Data {
+        /// Data nonce; high bits are block index and low byte is fragment index.
         data_nonce: u64,
+        /// Encrypted fragment payload plus authentication tag.
         encrypted_payload: &'a [u8],
+        /// Associated data used for WFB data authentication.
         associated_data: &'a [u8],
     },
+    /// Encrypted WFB session-key packet.
     SessionKey {
+        /// crypto_box session nonce.
         session_nonce: &'a [u8],
+        /// Encrypted session data.
         encrypted_session: &'a [u8],
     },
 }
 
+/// Ground-station WFB keypair file contents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WfbKeypair {
+    /// Ground-station receive secret key.
     pub rx_secretkey: [u8; CRYPTO_BOX_SECRETKEY_LEN],
+    /// Air-unit transmit public key.
     pub tx_publickey: [u8; CRYPTO_BOX_PUBLICKEY_LEN],
 }
 
 impl WfbKeypair {
+    /// Parse the 64-byte `gs.key` style keypair.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, WfbError> {
         if bytes.len() != CRYPTO_BOX_SECRETKEY_LEN + CRYPTO_BOX_PUBLICKEY_LEN {
             return Err(WfbError::InvalidKeypair);
@@ -137,21 +194,33 @@ impl WfbKeypair {
     }
 }
 
+/// Cumulative FEC counters for a WFB receiver or assembler.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct FecCounters {
+    /// Total data fragments observed.
     pub total_packets: u64,
+    /// Primary fragments recovered by FEC.
     pub recovered_packets: u64,
+    /// Primary fragments considered lost.
     pub lost_packets: u64,
+    /// Malformed or unrecoverable fragments.
     pub bad_packets: u64,
 }
 
+/// Decrypted WFB session parameters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WfbSession {
+    /// Session epoch.
     pub epoch: u64,
+    /// Channel id this session applies to.
     pub channel_id: ChannelId,
+    /// WFB FEC type.
     pub fec_type: u8,
+    /// Primary fragment count.
     pub fec_k: usize,
+    /// Total primary plus parity fragment count.
     pub fec_n: usize,
+    /// Symmetric key used for WFB data packets.
     pub session_key: [u8; CHACHA20_POLY1305_KEY_LEN],
 }
 
@@ -161,7 +230,7 @@ impl WfbSession {
         expected_channel_id: ChannelId,
         minimum_epoch: u64,
     ) -> Result<Self, WfbError> {
-        if plaintext.len() != WSESSION_DATA_LEN {
+        if plaintext.len() < WSESSION_DATA_LEN {
             return Err(WfbError::SessionDecryptFailed);
         }
         let epoch = u64::from_be_bytes(plaintext[0..8].try_into().expect("checked length"));
@@ -187,7 +256,7 @@ impl WfbSession {
         }
         let fec_k = plaintext[13] as usize;
         let fec_n = plaintext[14] as usize;
-        if fec_k == 0 || fec_n == 0 || fec_k > fec_n {
+        if fec_k == 0 || fec_n == 0 || fec_k > fec_n || fec_n >= 256 {
             return Err(WfbError::InvalidFecParameters);
         }
 
@@ -204,12 +273,16 @@ impl WfbSession {
     }
 }
 
+/// Event emitted by an encrypted WFB receiver.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WfbEvent {
+    /// A session key was accepted.
     Session(WfbSession),
+    /// One recovered payload was emitted.
     Payload(WfbOutput),
 }
 
+/// Encrypted WFB receiver for one channel.
 #[derive(Debug, Clone)]
 pub struct WfbReceiver {
     channel_id: ChannelId,
@@ -223,6 +296,7 @@ pub struct WfbReceiver {
 }
 
 impl WfbReceiver {
+    /// Create a receiver for one channel and keypair.
     pub fn new(channel_id: ChannelId, keypair: WfbKeypair, minimum_epoch: u64) -> Self {
         Self {
             channel_id,
@@ -236,10 +310,12 @@ impl WfbReceiver {
         }
     }
 
+    /// Return the currently accepted WFB session, if any.
     pub fn session(&self) -> Option<&WfbSession> {
         self.session.as_ref()
     }
 
+    /// Return cumulative receive/FEC counters.
     pub fn counters(&self) -> FecCounters {
         let assembler = self
             .assembler
@@ -254,6 +330,7 @@ impl WfbReceiver {
         }
     }
 
+    /// Push one WFB forwarder packet payload.
     pub fn push_forwarder_packet(&mut self, buf: &[u8]) -> Result<Vec<WfbEvent>, WfbError> {
         match parse_forwarder_packet(buf)? {
             WfbPacket::SessionKey {
@@ -316,10 +393,16 @@ impl WfbReceiver {
         let plaintext = cipher
             .decrypt(BoxNonce::from_slice(&nonce), encrypted_session)
             .map_err(|_| WfbError::SessionDecryptFailed)?;
-        WfbSession::parse(&plaintext, self.channel_id, self.minimum_epoch)
+        let minimum_epoch = self
+            .session
+            .as_ref()
+            .map(|session| session.epoch.max(self.minimum_epoch))
+            .unwrap_or(self.minimum_epoch);
+        WfbSession::parse(&plaintext, self.channel_id, minimum_epoch)
     }
 }
 
+/// Parse a WFB forwarder packet as data or session-key payload.
 pub fn parse_forwarder_packet(buf: &[u8]) -> Result<WfbPacket<'_>, WfbError> {
     if buf.is_empty() {
         return Err(WfbError::Empty);
@@ -330,7 +413,7 @@ pub fn parse_forwarder_packet(buf: &[u8]) -> Result<WfbPacket<'_>, WfbError> {
 
     match buf[0] {
         WFB_PACKET_DATA => {
-            if buf.len() < WBLOCK_HDR_LEN + WPACKET_HDR_LEN {
+            if buf.len() < WBLOCK_HDR_LEN + WPACKET_HDR_LEN + CHACHA20_POLY1305_TAG_LEN {
                 return Err(WfbError::ShortDataPacket);
             }
             let mut nonce = [0; 8];
@@ -342,7 +425,7 @@ pub fn parse_forwarder_packet(buf: &[u8]) -> Result<WfbPacket<'_>, WfbError> {
             })
         }
         WFB_PACKET_KEY => {
-            if buf.len() != WSESSION_HDR_LEN + WSESSION_DATA_LEN + CRYPTO_BOX_TAG_LEN {
+            if buf.len() < WSESSION_HDR_LEN + WSESSION_DATA_LEN + CRYPTO_BOX_TAG_LEN {
                 return Err(WfbError::ShortSessionPacket);
             }
             Ok(WfbPacket::SessionKey {
@@ -354,9 +437,12 @@ pub fn parse_forwarder_packet(buf: &[u8]) -> Result<WfbPacket<'_>, WfbError> {
     }
 }
 
+/// Recovered WFB application payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WfbOutput {
+    /// Recovered packet sequence number.
     pub packet_seq: u64,
+    /// Raw application payload bytes.
     pub payload: Vec<u8>,
 }
 
@@ -377,6 +463,11 @@ impl Block {
     }
 }
 
+/// Plain WFB FEC assembler.
+///
+/// This is used after data decryption, or directly for tests/pre-decrypted
+/// captures. It accepts primary and parity fragments and emits recovered
+/// application payloads in order.
 #[derive(Debug, Clone)]
 pub struct PlainAssembler {
     fec_k: usize,
@@ -384,13 +475,18 @@ pub struct PlainAssembler {
     fec: FecCode,
     blocks: BTreeMap<u64, Block>,
     next_block: Option<u64>,
+    /// Total fragments observed.
     pub total_packets: u64,
+    /// Primary fragments considered lost.
     pub lost_packets: u64,
+    /// Primary fragments recovered by FEC.
     pub recovered_packets: u64,
+    /// Malformed or unrecoverable fragments.
     pub bad_packets: u64,
 }
 
 impl PlainAssembler {
+    /// Create a plain assembler for `fec_k` primary and `fec_n` total fragments.
     pub fn new(fec_k: usize, fec_n: usize) -> Result<Self, WfbError> {
         if fec_k == 0 || fec_n == 0 || fec_k > fec_n || fec_n > 255 {
             return Err(WfbError::InvalidFecParameters);
@@ -409,19 +505,23 @@ impl PlainAssembler {
         })
     }
 
+    /// Return the primary fragment count.
     pub const fn fec_k(&self) -> usize {
         self.fec_k
     }
 
+    /// Return the total primary plus parity fragment count.
     pub const fn fec_n(&self) -> usize {
         self.fec_n
     }
 
+    /// Reset assembler state and FEC parameters.
     pub fn reset_fec(&mut self, fec_k: usize, fec_n: usize) -> Result<(), WfbError> {
         *self = Self::new(fec_k, fec_n)?;
         Ok(())
     }
 
+    /// Return cumulative FEC counters.
     pub fn counters(&self) -> FecCounters {
         FecCounters {
             total_packets: self.total_packets,
@@ -451,6 +551,13 @@ impl PlainAssembler {
         if self.next_block.is_none() {
             self.next_block = Some(block_idx);
         }
+        if self
+            .next_block
+            .map(|next_block| block_idx < next_block)
+            .unwrap_or(false)
+        {
+            return Ok(Vec::new());
+        }
 
         let block = self
             .blocks
@@ -471,6 +578,11 @@ impl PlainAssembler {
         let mut out = Vec::new();
         while let Some(block_idx) = self.next_block {
             if !self.blocks.contains_key(&block_idx) {
+                if self.should_skip_missing_block(block_idx) {
+                    self.lost_packets += self.fec_k as u64;
+                    self.next_block = Some(block_idx + 1);
+                    continue;
+                }
                 break;
             }
 
@@ -521,6 +633,16 @@ impl PlainAssembler {
             break;
         }
         out
+    }
+
+    fn should_skip_missing_block(&self, block_idx: u64) -> bool {
+        let Some((&next_present_block, block)) = self.blocks.range((block_idx + 1)..).next() else {
+            return false;
+        };
+
+        block.received >= self.fec_k
+            || self.blocks.len() > 40
+            || next_present_block.saturating_sub(block_idx) >= 40
     }
 
     fn emit_contiguous_primary(&mut self, block_idx: u64, out: &mut Vec<WfbOutput>) {
@@ -581,6 +703,7 @@ impl PlainAssembler {
     }
 }
 
+/// Parse a decrypted WFB plain packet and return payload bytes when present.
 pub fn parse_plain_packet(fragment: &[u8]) -> Result<Option<&[u8]>, WfbError> {
     if fragment.len() < WPACKET_HDR_LEN {
         return Err(WfbError::InvalidPlainPacket);
@@ -622,7 +745,8 @@ mod tests {
     fn parses_forwarder_data_packet() {
         let mut packet = vec![WFB_PACKET_DATA];
         packet.extend_from_slice(&0x0102_0304_0506_0708u64.to_be_bytes());
-        packet.extend_from_slice(&[9, 10, 11]);
+        let encrypted = [9; WPACKET_HDR_LEN + CHACHA20_POLY1305_TAG_LEN];
+        packet.extend_from_slice(&encrypted);
 
         let parsed = parse_forwarder_packet(&packet).unwrap();
         match parsed {
@@ -632,11 +756,23 @@ mod tests {
                 associated_data,
             } => {
                 assert_eq!(data_nonce, 0x0102_0304_0506_0708);
-                assert_eq!(encrypted_payload, &[9, 10, 11]);
+                assert_eq!(encrypted_payload, encrypted);
                 assert_eq!(associated_data.len(), WBLOCK_HDR_LEN);
             }
             WfbPacket::SessionKey { .. } => panic!("expected data"),
         }
+    }
+
+    #[test]
+    fn rejects_data_packets_without_encrypted_plain_header_and_tag() {
+        let mut packet = vec![WFB_PACKET_DATA];
+        packet.extend_from_slice(&0x0102_0304_0506_0708u64.to_be_bytes());
+        packet.extend_from_slice(&[0; WPACKET_HDR_LEN + CHACHA20_POLY1305_TAG_LEN - 1]);
+
+        assert_eq!(
+            parse_forwarder_packet(&packet),
+            Err(WfbError::ShortDataPacket)
+        );
     }
 
     #[test]
@@ -679,6 +815,49 @@ mod tests {
     }
 
     #[test]
+    fn skips_fully_missing_blocks_when_later_block_is_ready() {
+        let mut assembler = PlainAssembler::new(2, 2).unwrap();
+
+        let first = assembler
+            .push_decrypted_fragment(0, &plain(b"b0-f0"))
+            .unwrap();
+        assert_eq!(first[0].payload, b"b0-f0");
+
+        assert!(assembler
+            .push_decrypted_fragment(2 << 8, &plain(b"b2-f0"))
+            .unwrap()
+            .is_empty());
+        let out = assembler
+            .push_decrypted_fragment((2 << 8) | 1, &plain(b"b2-f1"))
+            .unwrap();
+
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].payload, b"b2-f0");
+        assert_eq!(out[1].payload, b"b2-f1");
+        assert_eq!(assembler.lost_packets, 3);
+    }
+
+    #[test]
+    fn ignores_late_fragments_from_already_flushed_blocks() {
+        let mut assembler = PlainAssembler::new(2, 2).unwrap();
+
+        assembler
+            .push_decrypted_fragment(0, &plain(b"b0-f0"))
+            .unwrap();
+        assembler
+            .push_decrypted_fragment(2 << 8, &plain(b"b2-f0"))
+            .unwrap();
+        assembler
+            .push_decrypted_fragment((2 << 8) | 1, &plain(b"b2-f1"))
+            .unwrap();
+
+        let late = assembler
+            .push_decrypted_fragment(1 << 8, &plain(b"late-b1-f0"))
+            .unwrap();
+        assert!(late.is_empty());
+    }
+
+    #[test]
     fn skips_fec_only_plain_packets() {
         let mut fragment = vec![WFB_PACKET_FEC_ONLY];
         fragment.extend_from_slice(&4u16.to_be_bytes());
@@ -705,6 +884,8 @@ mod tests {
         session_plain.push(1);
         session_plain.extend_from_slice(&session_key);
         assert_eq!(session_plain.len(), WSESSION_DATA_LEN);
+        // wfb-ng allows encrypted optional session TLVs after the fixed fields.
+        session_plain.extend_from_slice(&[0x42, 0x00, 0x01, 0x99]);
 
         let session_nonce = [3; CRYPTO_BOX_NONCE_LEN];
         let tx_box = SalsaBox::new(&rx_secret.public_key(), &tx_secret);
@@ -740,5 +921,31 @@ mod tests {
             [WfbEvent::Payload(payload)] => assert_eq!(payload.payload, b"rtp payload"),
             other => panic!("unexpected events: {other:?}"),
         }
+
+        let mut older_session_plain = Vec::new();
+        older_session_plain.extend_from_slice(&0u64.to_be_bytes());
+        older_session_plain.extend_from_slice(&channel_id.raw().to_be_bytes());
+        older_session_plain.push(WFB_FEC_VDM_RS);
+        older_session_plain.push(1);
+        older_session_plain.push(1);
+        older_session_plain.extend_from_slice(&[8; CHACHA20_POLY1305_KEY_LEN]);
+        let older_session_nonce = [4; CRYPTO_BOX_NONCE_LEN];
+        let encrypted_older_session = tx_box
+            .encrypt(
+                BoxNonce::from_slice(&older_session_nonce),
+                older_session_plain.as_slice(),
+            )
+            .unwrap();
+        let mut older_session_packet = vec![WFB_PACKET_KEY];
+        older_session_packet.extend_from_slice(&older_session_nonce);
+        older_session_packet.extend_from_slice(&encrypted_older_session);
+
+        assert_eq!(
+            receiver.push_forwarder_packet(&older_session_packet),
+            Err(WfbError::SessionEpochTooOld {
+                session_epoch: 0,
+                minimum_epoch: 1,
+            })
+        );
     }
 }

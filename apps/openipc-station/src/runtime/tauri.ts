@@ -5,6 +5,7 @@ import type {
   InitReport,
   LinkQualityReport,
   LogLevel,
+  PayloadRouteAction,
   UsbInfo,
 } from "@/lib/types";
 
@@ -102,6 +103,18 @@ export type TauriStartRxRequest = {
   adaptiveEnabled: boolean;
   rfChannel: number;
   alinkTxPower: number;
+  payloadRoutes: TauriPayloadRouteRequest[];
+};
+
+export type TauriPayloadRouteRequest = {
+  routeId: number;
+  enabled: boolean;
+  name: string;
+  channelId: number;
+  action: PayloadRouteAction;
+  payloadType?: number;
+  udpHost?: string;
+  udpPort?: number;
 };
 
 export type TauriVideoFramePayload = {
@@ -115,14 +128,16 @@ export type TauriVideoFramePayload = {
 export type TauriRawPayloadPayload = {
   dataBase64: string;
   packetSeq: string;
+  routeId: number;
   channelId: number;
 };
 
 export type TauriRxBatchPayload = Omit<
   OpenIpcRxTransferProfile,
-  "frames" | "mavlinkPayloads"
+  "frames" | "rawPayloads" | "mavlinkPayloads"
 > & {
   frames: TauriVideoFramePayload[];
+  rawPayloads: TauriRawPayloadPayload[];
   mavlinkPayloads: TauriRawPayloadPayload[];
   fecCounters: FecCounters;
   linkQuality: LinkQualityReport | null;
@@ -162,19 +177,6 @@ export async function tauriConnectFromFd(
 ): Promise<TauriConnectReport> {
   const { invoke } = await tauriApi();
   return invoke("openipc_connect_from_fd", { request });
-}
-
-export async function tauriAndroidUsbListDevices(): Promise<
-  TauriAndroidUsbDevice[]
-> {
-  const { invoke } = await tauriApi();
-  const devices = await invoke<
-    Array<AuthorizedUsbDevice & { deviceId: string }>
-  >("plugin:openipc-usb|list_devices");
-  return devices.map(({ deviceId, ...device }) => ({
-    ...device,
-    id: deviceId,
-  }));
 }
 
 export async function tauriAndroidUsbOpenDevice(

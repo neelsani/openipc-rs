@@ -17,9 +17,16 @@ export type Metrics = {
   bytes: number;
   lastTransferBytes: number;
   lastFrameBytes: number;
+  rawPayloads: number;
+  rawPayloadBytes: number;
+  lastRawPayloadBytes: number;
   mavlinkPayloads: number;
   mavlinkBytes: number;
   lastMavlinkBytes: number;
+  audioPackets: number;
+  audioBytes: number;
+  audioDecodedFrames: number;
+  audioErrors: number;
   errors: number;
   adaptiveTxFrames: number;
   adaptiveTxErrors: number;
@@ -94,6 +101,8 @@ export type DiagnosticTransferStats = {
   wfbPayloads: number;
   rtpPackets: number;
   videoFrames: number;
+  rawPayloads: number;
+  rawPayloadBytes: number;
   mavlinkPayloads: number;
   mavlinkBytes: number;
 };
@@ -144,7 +153,45 @@ export type Settings = {
   channelWidthMhz: ChannelWidthMhz;
   channelOffset: number;
   alinkTxPower: number;
+  audioVolume: number;
   darkMode: boolean;
+  payloadRoutes: PayloadRouteConfig[];
+};
+
+export type PayloadRouteAction = "inspect" | "log" | "udp" | "audio";
+
+export type PayloadRouteConfig = {
+  id: number;
+  enabled: boolean;
+  name: string;
+  channelId: string;
+  action: PayloadRouteAction;
+  payloadType?: number;
+  udpHost?: string;
+  udpPort?: number;
+  sampleRate?: number;
+  channels?: number;
+};
+
+export type PayloadRouteStats = {
+  routeId: number;
+  name: string;
+  action: PayloadRouteAction;
+  packets: number;
+  bytes: number;
+  lastBytes: number;
+  errors: number;
+};
+
+export type AudioStats = {
+  enabled: boolean;
+  supported: boolean;
+  decoderName: string;
+  packets: number;
+  bytes: number;
+  decodedFrames: number;
+  errors: number;
+  queuedMs: number;
 };
 
 export type FecCounters = {

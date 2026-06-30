@@ -88,6 +88,30 @@ pub(crate) struct StartRxRequest {
     pub(crate) adaptive_enabled: bool,
     pub(crate) rf_channel: u8,
     pub(crate) alink_tx_power: u8,
+    #[serde(default)]
+    pub(crate) payload_routes: Vec<PayloadRouteRequest>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PayloadRouteRequest {
+    pub(crate) route_id: u64,
+    pub(crate) enabled: bool,
+    pub(crate) name: String,
+    pub(crate) channel_id: u32,
+    pub(crate) action: PayloadRouteAction,
+    pub(crate) payload_type: Option<u8>,
+    pub(crate) udp_host: Option<String>,
+    pub(crate) udp_port: Option<u16>,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum PayloadRouteAction {
+    Inspect,
+    Log,
+    Udp,
+    Audio,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -105,6 +129,7 @@ pub(crate) struct VideoFramePayload {
 pub(crate) struct RawPayloadPayload {
     pub(crate) data_base64: String,
     pub(crate) packet_seq: String,
+    pub(crate) route_id: u64,
     pub(crate) channel_id: u32,
 }
 
@@ -133,6 +158,7 @@ pub(crate) struct LinkQualityPayload {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RxBatchPayload {
     pub(crate) frames: Vec<VideoFramePayload>,
+    pub(crate) raw_payloads: Vec<RawPayloadPayload>,
     pub(crate) mavlink_payloads: Vec<RawPayloadPayload>,
     pub(crate) transfer_bytes: usize,
     pub(crate) packets: usize,
@@ -146,6 +172,8 @@ pub(crate) struct RxBatchPayload {
     pub(crate) wfb_payloads: usize,
     pub(crate) rtp_packets: usize,
     pub(crate) video_frames: usize,
+    pub(crate) raw_payload_count: usize,
+    pub(crate) raw_payload_bytes: usize,
     pub(crate) mavlink_payload_count: usize,
     pub(crate) mavlink_bytes: usize,
     pub(crate) parse_ms: f64,
@@ -183,11 +211,13 @@ pub(crate) struct AdaptiveRuntime {
 }
 
 pub(crate) struct RxBatchContext<'a> {
-    pub(crate) pipeline: &'a mut ReceiverPipeline,
-    pub(crate) mavlink_pipeline: &'a mut PayloadPipeline,
+    pub(crate) receiver: &'a mut ReceiverRuntime,
     pub(crate) adaptive: Option<&'a mut AdaptiveRuntime>,
     pub(crate) ep_out: Option<&'a mut nusb::Endpoint<Bulk, Out>>,
     pub(crate) now_ms: u64,
     pub(crate) usb_read_ms: f64,
     pub(crate) loop_start: Instant,
+    pub(crate) raw_payload_routes: &'a [PayloadRouteId],
+    pub(crate) rtp_payload_taps: &'a [RtpPayloadTap],
+    pub(crate) udp_sinks: &'a [crate::worker::UdpRouteSink],
 }

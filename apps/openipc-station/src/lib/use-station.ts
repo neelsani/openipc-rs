@@ -9,7 +9,12 @@ import {
 } from "react";
 import { useOpenIpcRuntime } from "@/hooks/use-openipc-runtime";
 import { AVIATEUR_CHANNELS } from "@/lib/settings";
-import type { AuthorizedUsbDevice } from "@/lib/types";
+import type {
+  AudioStats,
+  AuthorizedUsbDevice,
+  PayloadRouteConfig,
+  PayloadRouteStats,
+} from "@/lib/types";
 
 export type ReceiverState =
   "loading" | "ready" | "connected" | "receiving" | "error";
@@ -39,6 +44,8 @@ export interface Series {
   packetRate: number[];
   dropRate: number[];
   clientP95: number[];
+  audioPackets: number[];
+  audioQueue: number[];
 }
 
 export interface LatencyStage {
@@ -64,6 +71,8 @@ export interface Settings {
   usbTransferSize: number;
   verbosity: "low" | "normal" | "high";
   darkMode: boolean;
+  audioVolume: number;
+  payloadRoutes: PayloadRouteConfig[];
 }
 
 export interface StationState {
@@ -89,6 +98,8 @@ export interface StationState {
   recordElapsed: number;
   recordedBytes: number;
   settings: Settings;
+  routeStats: PayloadRouteStats[];
+  audio: AudioStats;
   v: {
     inputFps: number;
     renderFps: number;
@@ -120,8 +131,13 @@ export interface StationState {
     wfbPayloads: number;
     rtpPackets: number;
     videoFrames: number;
+    rawPayloads: number;
+    rawPayloadBytes: number;
     mavlinkPayloads: number;
     mavlinkBytes: number;
+    audioPackets: number;
+    audioDecodedFrames: number;
+    audioErrors: number;
     adaptiveTxFrames: number;
     adaptiveTxErrors: number;
   };
@@ -143,6 +159,7 @@ type CounterSnapshot = {
   packets: number;
   dropped: number;
   bytes: number;
+  audioPackets: number;
 };
 
 const SERIES_LEN = 60;
@@ -163,6 +180,8 @@ function emptySeries(): Series {
     packetRate: zeroes(),
     dropRate: zeroes(),
     clientP95: zeroes(),
+    audioPackets: zeroes(),
+    audioQueue: zeroes(),
   };
 }
 
@@ -240,6 +259,7 @@ export function useStation() {
     packets: 0,
     dropped: 0,
     bytes: 0,
+    audioPackets: 0,
   });
   const [verbosity, setVerbosity] = useState<Settings["verbosity"]>("normal");
   const [elapsed, setElapsed] = useState(0);
@@ -297,6 +317,12 @@ export function useStation() {
             (current.metrics.bytes - previous.bytes) / seconds / (1024 * 1024),
           )
         : 0;
+      const audioPacketRate = current.running
+        ? Math.max(
+            0,
+            Math.round((current.audio.packets - previous.audioPackets) / seconds),
+          )
+        : 0;
       const clientP95 = current.diagnostics.bottleneck?.p95Ms ?? 0;
       const bitrateMbps = current.videoStats.bitrate / 1_000_000;
       const linkActive = current.running && current.linkQuality !== null;
@@ -315,6 +341,7 @@ export function useStation() {
         packets: transfers.packets,
         dropped: transfers.droppedPackets,
         bytes: current.metrics.bytes,
+        audioPackets: current.audio.packets,
       };
 
       setLive((sample) => ({
@@ -354,6 +381,14 @@ export function useStation() {
           packetRate: pushSample(sample.series.packetRate, packetRate),
           dropRate: pushSample(sample.series.dropRate, dropRate),
           clientP95: pushSample(sample.series.clientP95, clientP95),
+          audioPackets: pushSample(
+            sample.series.audioPackets,
+            audioPacketRate,
+          ),
+          audioQueue: pushSample(
+            sample.series.audioQueue,
+            current.audio.queuedMs,
+          ),
         },
       }));
     }, 1000);
@@ -392,6 +427,8 @@ export function useStation() {
       usbTransferSize: runtime.settings.transferSize,
       verbosity,
       darkMode: runtime.settings.darkMode,
+      audioVolume: runtime.settings.audioVolume,
+      payloadRoutes: runtime.settings.payloadRoutes,
     }),
     [runtime.settings, verbosity],
   );
@@ -421,7 +458,9 @@ export function useStation() {
       channelWidthMhz: patch.channelWidth ?? current.channelWidthMhz,
       channelOffset: patch.channelOffset ?? current.channelOffset,
       alinkTxPower: patch.txPower ?? current.alinkTxPower,
+      audioVolume: patch.audioVolume ?? current.audioVolume,
       darkMode: patch.darkMode ?? current.darkMode,
+      payloadRoutes: patch.payloadRoutes ?? current.payloadRoutes,
     }));
   }, []);
 
@@ -473,6 +512,8 @@ export function useStation() {
     recordElapsed,
     recordedBytes: 0,
     settings,
+    routeStats: runtime.routeStats,
+    audio: runtime.audio,
     v: {
       inputFps: runtime.videoStats.inputFps,
       renderFps: runtime.videoStats.renderFps,
@@ -508,8 +549,13 @@ export function useStation() {
       wfbPayloads: runtime.diagnostics.transfers.wfbPayloads,
       rtpPackets: runtime.diagnostics.transfers.rtpPackets,
       videoFrames: runtime.diagnostics.transfers.videoFrames,
+      rawPayloads: runtime.metrics.rawPayloads,
+      rawPayloadBytes: runtime.metrics.rawPayloadBytes,
       mavlinkPayloads: runtime.metrics.mavlinkPayloads,
       mavlinkBytes: runtime.metrics.mavlinkBytes,
+      audioPackets: runtime.audio.packets,
+      audioDecodedFrames: runtime.audio.decodedFrames,
+      audioErrors: runtime.audio.errors,
       adaptiveTxFrames: runtime.metrics.adaptiveTxFrames,
       adaptiveTxErrors: runtime.metrics.adaptiveTxErrors,
     },

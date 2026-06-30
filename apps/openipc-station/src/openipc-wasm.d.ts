@@ -12,12 +12,16 @@ declare module "@openipc/wasm" {
   export type OpenIpcRawPayload = {
     data: Uint8Array;
     packetSeq: string;
+    routeId: number;
     channelId: number;
   };
 
   export type OpenIpcRxTransferProfile = {
     frames: OpenIpcVideoFrame[];
+    rawPayloads: OpenIpcRawPayload[];
     mavlinkPayloads: OpenIpcRawPayload[];
+    rawPayloadCount: number;
+    rawPayloadBytes: number;
     transferBytes: number;
     packets: number;
     acceptedPackets: number;
@@ -49,12 +53,29 @@ declare module "@openipc/wasm" {
       keypair: Uint8Array,
       minimumEpoch: bigint,
     ): OpenIpcReceiver;
+    static withKeypairOnly(
+      channelId: number,
+      keypair: Uint8Array,
+      minimumEpoch: bigint,
+    ): OpenIpcReceiver;
     static withKeypairAndMavlinkChannel(
       channelId: number,
       mavlinkChannelId: number,
       keypair: Uint8Array,
       minimumEpoch: bigint,
     ): OpenIpcReceiver;
+    static withKeypairAndTelemetryChannel(
+      channelId: number,
+      telemetryChannelId: number,
+      keypair: Uint8Array,
+      minimumEpoch: bigint,
+    ): OpenIpcReceiver;
+    addKeyedRoute(
+      routeId: number,
+      channelId: number,
+      keypair: Uint8Array,
+      minimumEpoch: bigint,
+    ): void;
     pushRtpPacket(data: Uint8Array): Uint8Array | undefined;
     pushRtpPacketDetailed(data: Uint8Array): OpenIpcVideoFrame | null;
     pushRxTransfer(data: Uint8Array): Uint8Array[];
@@ -67,6 +88,18 @@ declare module "@openipc/wasm" {
     pushRxTransferProfiledWithOptions(
       data: Uint8Array,
       keepCorrupted: boolean,
+    ): OpenIpcRxTransferProfile;
+    pushRxTransferProfiledWithRouteIds(
+      data: Uint8Array,
+      keepCorrupted: boolean,
+      rawRouteIds: Uint32Array,
+    ): OpenIpcRxTransferProfile;
+    pushRxTransferProfiledWithRouteIdsAndRtpTaps(
+      data: Uint8Array,
+      keepCorrupted: boolean,
+      rawRouteIds: Uint32Array,
+      rtpTapRouteIds: Uint32Array,
+      rtpTapPayloadTypes: Uint8Array,
     ): OpenIpcRxTransferProfile;
     fecCounters(): string;
   }
@@ -107,6 +140,83 @@ declare module "@openipc/wasm" {
     quality(nowMs: number): string;
   }
 
+  export class WebInitReport {
+    readonly chip: string;
+    readonly rfPaths: number;
+    readonly cutVersion: number;
+    readonly status: "already_running" | "initialized";
+    readonly firmwareDownloaded: boolean;
+  }
+
+  export class WebThermalStatus {
+    readonly raw: number;
+    readonly baseline: number;
+    readonly delta: number;
+    readonly valid: boolean;
+    readonly bucket: "unknown" | "cool" | "warm" | "hot" | "critical";
+  }
+
+  export class WebQueueDepth8814 {
+    readonly q0: number;
+    readonly q1: number;
+    readonly q2: number;
+    readonly q3: number;
+    readonly q4: number;
+    values(): Uint32Array;
+  }
+
+  export class WebBbDbgportRead {
+    readonly selector: number;
+    readonly value: number;
+    readonly savedSelector: number;
+    readonly chipAlive: boolean;
+  }
+
+  export class WebFalseAlarmCounters {
+    readonly ofdmFail: number;
+    readonly cckFail: number;
+    readonly ofdmCca: number;
+    readonly cckCca: number;
+    readonly cckCrcOk: number;
+    readonly cckCrcError: number;
+    readonly ofdmCrcOk: number;
+    readonly ofdmCrcError: number;
+    readonly htCrcOk: number;
+    readonly htCrcError: number;
+    readonly vhtCrcOk: number;
+    readonly vhtCrcError: number;
+    readonly all: number;
+    readonly ccaAll: number;
+  }
+
+  export class WebPhydmWatchdogReport {
+    readonly previousIgi: number;
+    readonly currentIgi: number;
+    readonly counters: WebFalseAlarmCounters;
+  }
+
+  export class WebPowerTrackingReport {
+    readonly enabled: boolean;
+    readonly thermalRaw: number;
+    readonly thermalAverage: number;
+    readonly eepromThermal: number;
+    readonly delta: number;
+    readonly defaultOfdmIndex: number;
+    readonly finalOfdmIndex0: number;
+    readonly finalOfdmIndex1: number;
+    finalOfdmIndex(): Uint8Array;
+    readonly swingDelta0: number;
+    readonly swingDelta1: number;
+    swingDelta(): Int8Array;
+    readonly applied: boolean;
+  }
+
+  export class WebIqkReport {
+    readonly chip: string;
+    readonly channel: number;
+    readonly ran: boolean;
+  }
+
   export class WebUsbRealtekDevice {
     static fromWebUsbDevice(device: USBDevice): Promise<WebUsbRealtekDevice>;
     static fromWebUsbDeviceWithOptions(
@@ -125,13 +235,13 @@ declare module "@openipc/wasm" {
       channel: number,
       channelWidthMhz: number,
       channelOffset: number,
-    ): Promise<string>;
+    ): Promise<WebInitReport>;
     initializeMonitorWithOptions(
       channel: number,
       channelWidthMhz: number,
       channelOffset: number,
       acceptBadFcs: boolean,
-    ): Promise<string>;
+    ): Promise<WebInitReport>;
     initializeMonitorAdvanced(
       channel: number,
       channelWidthMhz: number,
@@ -142,7 +252,7 @@ declare module "@openipc/wasm" {
       disableIqk: boolean,
       firmware8814Mode: string,
       firmware8814Chunk: number,
-    ): Promise<string>;
+    ): Promise<WebInitReport>;
     readRxTransfer(length: number): Promise<Uint8Array>;
     readRxTransfers(length: number, inFlight: number): Promise<Uint8Array[]>;
     writeTxTransfer(data: Uint8Array): Promise<number>;
@@ -156,19 +266,19 @@ declare module "@openipc/wasm" {
       legacy8812Descriptor: boolean,
     ): Promise<number>;
     setTxPowerOverride(currentChannel: number, power: number): Promise<void>;
-    readThermalStatus(): Promise<string>;
-    readQueueDepth8814(): Promise<string>;
+    readThermalStatus(): Promise<WebThermalStatus>;
+    readQueueDepth8814(): Promise<WebQueueDepth8814>;
     readBbReg(register: number, mask: number): Promise<number>;
-    readBbDbgport(selector: number): Promise<string>;
-    readFalseAlarmCounters(): Promise<string>;
-    runIqk(channel: number): Promise<string>;
+    readBbDbgport(selector: number): Promise<WebBbDbgportRead>;
+    readFalseAlarmCounters(): Promise<WebFalseAlarmCounters>;
+    runIqk(channel: number): Promise<WebIqkReport>;
     readRegisterU8(register: number): Promise<number>;
     readRegisterU32(register: number): Promise<number>;
   }
 
   export class WebUsbPhydmWatchdog {
     constructor();
-    tick(device: WebUsbRealtekDevice): Promise<string>;
+    tick(device: WebUsbRealtekDevice): Promise<WebPhydmWatchdogReport>;
   }
 
   export class WebUsbPowerTracking8812 {
@@ -179,7 +289,7 @@ declare module "@openipc/wasm" {
       device: WebUsbRealtekDevice,
       channel: number,
       channelWidthMhz: number,
-    ): Promise<string>;
+    ): Promise<WebPowerTrackingReport>;
   }
 
   export function listAuthorizedUsbDevices(): Promise<unknown[]>;

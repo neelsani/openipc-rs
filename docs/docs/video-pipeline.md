@@ -16,7 +16,8 @@ flowchart LR
     Fec --> Rtp["RTP packet"]
     Rtp --> Video["H.264/H.265 Annex-B"]
     Video --> Decode["WebCodecs or native decoder"]
-    Fec --> Raw["Raw non-video payload bytes"]
+    Fec --> Raw["Selected raw route payloads"]
+    Raw --> Audio["Optional Opus AudioDecoder"]
 ```
 
 ## Receive Path
@@ -26,39 +27,66 @@ flowchart LR
    descriptor metadata such as RSSI, SNR, sequence number, and flags.
 3. The OpenIPC filter checks mirrored `57:42:<channel_id>` MAC fields and radio
    ports.
-4. WFB session packets update the data-decryption session key.
+4. WFB session packets update the data-decryption session key. The fixed
+   session fields are required; optional WFB-ng TLV fields are accepted and
+   ignored unless a higher layer decides to inspect them later.
 5. WFB data packets decrypt into primary and parity FEC fragments.
-6. Reed-Solomon recovery repairs missing primary fragments where possible.
-7. Video-channel primary fragments emit RTP packets.
-8. RTP H.264/H.265 depacketization emits Annex-B frames.
+6. Reed-Solomon recovery repairs missing primary fragments where possible. If
+   a whole WFB block is lost, the assembler skips it once later blocks prove
+   the stream has moved on, matching wfb-ng/PixelPilot receive behavior.
+7. `ReceiverRuntime` routes recovered payload bytes to the configured app
+   outputs.
+8. The configured video route treats recovered payload bytes as RTP and feeds
+   them to `RtpDepacketizer`.
+9. RTP H.264/H.265 depacketization emits Annex-B frames.
 
-The pipeline emits events as it learns new information. Session packets update
-the decryptor. Data packets may produce recovered RTP packets. RTP packets may
-or may not complete a video access unit. Only completed access units are sent to
-the video decoder.
+`PayloadPipeline` is deliberately generic. It emits recovered bytes plus
+channel and sequence metadata. It does not know whether those bytes are RTP,
+MAVLink, MSP, CRSF, IP, or something custom.
+`ReceiverRuntime` is the normal app-facing helper. Internally it uses
+`PayloadRouteManager` to keep one pipeline per WFB channel/key slot and fan
+recovered payloads out to one or more route IDs.
 
-This event stream is intentionally layered. An app can count WFB payloads,
-mirror RTP, and write Annex-B frames from the same receive loop:
+For the video channel, OpenIPC convention says the recovered payload bytes are
+RTP packets. Apps can mirror those RTP bytes, feed them into the built-in RTP
+depacketizer, or use their own video handling:
 
 ```rust
-for event in pipeline.push_80211_frame(frame)? {
-    match event {
-        PipelineEvent::WfbPayload { .. } => counters.wfb += 1,
-        PipelineEvent::RtpPacket { payload, .. } => mirror_rtp(&payload)?,
-        PipelineEvent::VideoFrame(frame) => decoder.push(frame.data)?,
-        _ => {}
-    }
+let batch = receiver.push_rx_transfer(
+    transfer,
+    &ReceiverBatchOptions {
+        raw_payload_routes: vec![VIDEO_ROUTE],
+        ..ReceiverBatchOptions::default()
+    },
+)?;
+
+for rtp in batch.raw_payloads {
+    mirror_rtp(&rtp.data)?;
+}
+for frame in batch.frames {
+    decoder.push(frame.data)?;
 }
 ```
 
-`RtpPacket` and `VideoFrame` can both appear for the same input frame because
-the depacketizer may complete an access unit while processing that RTP packet.
+One recovered RTP packet may or may not complete a video access unit. The
+depacketizer may return `None` for several packets and then return one Annex-B
+frame when a marker/fragment boundary completes. Fragmented H.264/H.265 NAL
+units are dropped if their RTP sequence numbers have a gap, because feeding
+corrupted Annex-B into WebCodecs is worse than waiting for the next clean
+access unit.
 
-Non-video WFB channels stop earlier. `PayloadPipeline` returns recovered payload
-bytes after decryption and FEC, without treating them as RTP. Use it for
-MAVLink, MSP, CRSF, data ports, or custom radio ports. The station currently
-watches the observed OpenIPC MAVLink downlink port and exposes byte counts in
-diagnostics. It does not parse MAVLink messages.
+In a long-running receiver, handle per-frame WFB errors as drops and keep
+processing the rest of the USB aggregate. A malformed Realtek aggregate is a
+batch-level error; a single missing session, failed decrypt, or bad WFB packet
+should not stop the receive loop.
+
+Non-video WFB channels use the same payload recovery machinery and stop at
+recovered bytes. Add another route for MAVLink, MSP, CRSF, data ports, or custom
+radio ports. Opus audio can either be a separate wfb-ng audio route or a
+filtered RTP tap on the main video route for payload type 98. The station route
+manager can inspect bytes, log a throttled summary, forward them over UDP in
+native/Tauri mode, or decode Opus RTP in the browser frontend. It does not parse
+MAVLink messages.
 
 ## Annex-B Frames
 
@@ -86,11 +114,16 @@ flowchart LR
     Frame --> Chunk["EncodedVideoChunk"]
     Chunk --> Decoder["WebCodecs VideoDecoder"]
     Decoder --> Surface["VideoFrame"]
-    Surface --> Canvas["Canvas render and recording"]
+    Surface --> Canvas["Canvas render"]
+    Canvas --> Record["MediaRecorder video track"]
+    Audio["Optional Opus AudioDecoder"] --> Record
 ```
 
 ## Recording
 
-The station records from the rendered canvas. That means the recording feature
-captures what the decoder actually produced, not the raw RF stream. For protocol
-debugging, use the native CLI to write Annex-B output or save USB captures.
+The station records rendered video from the canvas. When an Opus route or
+filtered mixed-audio tap is enabled and the browser/WebView can decode it, the
+Opus audio mix is attached to the same `MediaRecorder` stream. That means
+recording captures what the frontend actually played, not the raw RF stream.
+For protocol debugging, use the native CLI to write Annex-B output or save USB
+captures.

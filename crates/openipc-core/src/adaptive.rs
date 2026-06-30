@@ -11,14 +11,22 @@ const DEFAULT_SESSION_INTERVAL_MS: u64 = 1_000;
 const DEFAULT_IDR_REQUEST_MESSAGES: u32 = 20;
 const DEFAULT_VIDEO_START_IDLE_MS: u64 = 1_000;
 
+/// Link-quality report used by OpenIPC adaptive-link feedback.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LinkQuality {
+    /// Lost FEC fragments over the recent window.
     pub lost_last_second: u32,
+    /// Recovered FEC fragments over the recent window.
     pub recovered_last_second: u32,
+    /// Total FEC fragments over the recent window.
     pub total_last_second: u32,
+    /// Averaged RSSI for the first two RF paths.
     pub rssi: [i32; 2],
+    /// Averaged SNR for the first two RF paths.
     pub snr: [i32; 2],
+    /// Computed link-score values for the first two RF paths.
     pub link_score: [i32; 2],
+    /// IDR/keyframe request code to include in feedback.
     pub idr_code: String,
 }
 
@@ -82,6 +90,7 @@ impl FecController {
     }
 }
 
+/// Adaptive-link quality estimator and feedback payload builder.
 #[derive(Debug, Clone)]
 pub struct AdaptiveLink {
     rssi: Vec<SignalEntry>,
@@ -97,6 +106,7 @@ pub struct AdaptiveLink {
 }
 
 impl AdaptiveLink {
+    /// Create an empty adaptive-link estimator.
     pub fn new() -> Self {
         Self {
             rssi: Vec::new(),
@@ -112,10 +122,12 @@ impl AdaptiveLink {
         }
     }
 
+    /// Record RSSI/SNR arrays from a Realtek RX descriptor.
     pub fn record_rx_paths(&mut self, now_ms: u64, rssi: [u8; 4], snr: [i8; 4]) {
         self.record_rx(now_ms, rssi[0], rssi[1], snr[0], snr[1]);
     }
 
+    /// Record RSSI/SNR for the first two RF paths.
     pub fn record_rx(&mut self, now_ms: u64, rssi0: u8, rssi1: u8, snr0: i8, snr1: i8) {
         self.rssi.push(SignalEntry {
             at_ms: now_ms,
@@ -130,6 +142,7 @@ impl AdaptiveLink {
         self.cleanup(now_ms);
     }
 
+    /// Record FEC totals for the current quality window.
     pub fn record_fec(&mut self, now_ms: u64, total: u32, recovered: u32, lost: u32) {
         if total == 0 && recovered == 0 && lost == 0 {
             return;
@@ -148,6 +161,7 @@ impl AdaptiveLink {
         self.cleanup(now_ms);
     }
 
+    /// Request keyframes in upcoming feedback packets.
     pub fn request_keyframe(&mut self) {
         if self.idr_max_messages == 0 {
             self.idr_code = None;
@@ -158,6 +172,7 @@ impl AdaptiveLink {
         self.idr_remaining_messages = self.idr_max_messages;
     }
 
+    /// Configure how many feedback packets carry a keyframe request.
     pub fn set_keyframe_request_messages(&mut self, messages: u32) {
         self.idr_max_messages = messages;
         if self.idr_remaining_messages > messages {
@@ -169,10 +184,12 @@ impl AdaptiveLink {
         }
     }
 
+    /// Configure the idle duration after which new video asks for keyframes.
     pub fn set_video_start_idle_ms(&mut self, idle_ms: u64) {
         self.video_start_idle_ms = idle_ms;
     }
 
+    /// Compute current quality over the rolling window.
     pub fn quality(&mut self, now_ms: u64) -> LinkQuality {
         self.cleanup(now_ms);
         let (avg_rssi0, avg_rssi1) = avg_signal(&self.rssi);
@@ -207,6 +224,7 @@ impl AdaptiveLink {
         }
     }
 
+    /// Build the adaptive-link UDP payload.
     pub fn feedback_udp_payload(&mut self, now_ms: u64) -> Vec<u8> {
         let quality = self.quality(now_ms);
         if quality.lost_last_second > 2 || quality.recovered_last_second > 30 {
@@ -254,6 +272,7 @@ impl AdaptiveLink {
         udp_payload
     }
 
+    /// Build a length-prefixed IPv4/UDP feedback packet.
     pub fn feedback_ip_packet(&mut self, now_ms: u64) -> Vec<u8> {
         let packet =
             wrap_udp_ipv4_payload_with_id(&self.feedback_udp_payload(now_ms), self.ip_packet_id);
@@ -281,6 +300,7 @@ impl Default for AdaptiveLink {
     }
 }
 
+/// Periodic encrypted WFB sender for adaptive-link feedback.
 #[derive(Debug, Clone)]
 pub struct AdaptiveLinkSender {
     link: AdaptiveLink,
@@ -293,6 +313,7 @@ pub struct AdaptiveLinkSender {
 }
 
 impl AdaptiveLinkSender {
+    /// Create an adaptive-link sender for a link id and TX keypair.
     pub fn new(
         link_id: u32,
         keypair: WfbTxKeypair,
@@ -300,7 +321,7 @@ impl AdaptiveLinkSender {
         fec_k: usize,
         fec_n: usize,
     ) -> Result<Self, WfbError> {
-        let channel_id = ChannelId::from_link_port(link_id, RadioPort::MavlinkTx);
+        let channel_id = ChannelId::from_link_port(link_id, RadioPort::TunnelTx);
         Ok(Self {
             link: AdaptiveLink::new(),
             tx: WfbTransmitter::new(channel_id, keypair, epoch, fec_k, fec_n)?,
@@ -312,26 +333,32 @@ impl AdaptiveLinkSender {
         })
     }
 
+    /// Borrow the quality estimator.
     pub fn link(&self) -> &AdaptiveLink {
         &self.link
     }
 
+    /// Mutably borrow the quality estimator.
     pub fn link_mut(&mut self) -> &mut AdaptiveLink {
         &mut self.link
     }
 
+    /// Override radiotap/TX parameters for generated feedback frames.
     pub fn set_tx_params(&mut self, params: TxRadioParams) {
         self.tx_params = params;
     }
 
+    /// Record RSSI/SNR arrays from a Realtek RX descriptor.
     pub fn record_rx_paths(&mut self, now_ms: u64, rssi: [u8; 4], snr: [i8; 4]) {
         self.link.record_rx_paths(now_ms, rssi, snr);
     }
 
+    /// Record FEC totals for the current quality window.
     pub fn record_fec(&mut self, now_ms: u64, total: u32, recovered: u32, lost: u32) {
         self.link.record_fec(now_ms, total, recovered, lost);
     }
 
+    /// Return WFB radio packets that should be transmitted at `now_ms`.
     pub fn tick(&mut self, now_ms: u64) -> Result<Vec<Vec<u8>>, WfbError> {
         let mut out = Vec::new();
         let send_session = self
@@ -359,10 +386,12 @@ impl AdaptiveLinkSender {
     }
 }
 
+/// Wrap a UDP payload in the adaptive-link length-prefixed IPv4/UDP shape.
 pub fn wrap_udp_ipv4_payload(udp_payload: &[u8]) -> Vec<u8> {
     wrap_udp_ipv4_payload_with_id(udp_payload, 0)
 }
 
+/// Wrap a UDP payload with an explicit IPv4 packet id.
 pub fn wrap_udp_ipv4_payload_with_id(udp_payload: &[u8], packet_id: u16) -> Vec<u8> {
     let udp_len = 8 + udp_payload.len();
     let ip_len = 20 + udp_len;

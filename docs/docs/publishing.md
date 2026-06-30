@@ -146,8 +146,10 @@ The library crates are intended for crates.io publication:
 
 - `openipc-core`
 - `openipc-rtl88xx`
-- `openipc-native`
 - `openipc-web`
+
+`apps/openipc-cli`, `apps/openipc-station/src-tauri`, and the local Android USB
+plugin are versioned with the workspace but marked `publish = false`.
 
 `openipc-core` is the easiest crate to publish because it owns protocol logic
 and does not need USB access. The hardware and WASM crates depend on the

@@ -14,13 +14,20 @@ use crate::wfb::{
     WSESSION_HDR_LEN,
 };
 
+/// Key material used by the ground station when transmitting WFB uplink data.
+///
+/// This is the inverse of `WfbKeypair`: it contains the transmitter secret key
+/// and the receiver public key needed to encrypt WFB session packets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WfbTxKeypair {
+    /// Secret key for the local transmitter.
     pub tx_secretkey: [u8; CRYPTO_BOX_SECRETKEY_LEN],
+    /// Public key for the remote receiver.
     pub rx_publickey: [u8; CRYPTO_BOX_PUBLICKEY_LEN],
 }
 
 impl WfbTxKeypair {
+    /// Parse a concatenated transmitter-secret + receiver-public keypair.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, WfbError> {
         if bytes.len() != CRYPTO_BOX_SECRETKEY_LEN + CRYPTO_BOX_PUBLICKEY_LEN {
             return Err(WfbError::InvalidKeypair);
@@ -36,6 +43,12 @@ impl WfbTxKeypair {
     }
 }
 
+/// Stateful WFB transmitter for adaptive-link and other uplink payloads.
+///
+/// The transmitter owns the current WFB session key, fragments payloads into
+/// FEC blocks, emits parity fragments when configured, encrypts each block
+/// fragment, and can optionally wrap packets in radiotap + 802.11 headers for
+/// direct radio injection.
 #[derive(Debug, Clone)]
 pub struct WfbTransmitter {
     channel_id: ChannelId,
@@ -54,6 +67,10 @@ pub struct WfbTransmitter {
 }
 
 impl WfbTransmitter {
+    /// Create a transmitter for one WFB channel.
+    ///
+    /// `fec_k` is the number of source fragments per block and `fec_n` is the
+    /// total number of source + parity fragments transmitted for that block.
     pub fn new(
         channel_id: ChannelId,
         keypair: WfbTxKeypair,
@@ -84,27 +101,36 @@ impl WfbTransmitter {
         Ok(tx)
     }
 
+    /// Return the WFB channel this transmitter writes to.
     pub const fn channel_id(&self) -> ChannelId {
         self.channel_id
     }
 
+    /// Return the number of source fragments in each FEC block.
     pub const fn fec_k(&self) -> usize {
         self.fec_k
     }
 
+    /// Return the total number of source + parity fragments in each FEC block.
     pub const fn fec_n(&self) -> usize {
         self.fec_n
     }
 
+    /// Return the current encrypted WFB session packet without radio headers.
+    ///
+    /// Send this periodically before data packets so receivers can establish or
+    /// refresh the session key for this channel.
     pub fn session_forwarder_packet(&self) -> &[u8] {
         &self.session_packet
     }
 
+    /// Build the current session packet as a radiotap + 802.11 radio packet.
     pub fn session_radio_packet(&mut self, params: TxRadioParams) -> Vec<u8> {
         let packet = self.session_packet.clone();
         self.wrap_forwarder_packet(&packet, params)
     }
 
+    /// Fragment, encrypt, FEC-encode, and wrap one payload for radio injection.
     pub fn radio_packets_for_payload(
         &mut self,
         payload: &[u8],
@@ -117,6 +143,10 @@ impl WfbTransmitter {
             .collect())
     }
 
+    /// Fragment, encrypt, and FEC-encode one payload as WFB forwarder packets.
+    ///
+    /// The returned packets do not include radiotap or 802.11 headers, which
+    /// makes this useful when another layer owns radio framing.
     pub fn forwarder_packets_for_payload(
         &mut self,
         payload: &[u8],
@@ -263,7 +293,7 @@ mod tests {
 
     #[test]
     fn transmitted_session_and_payload_roundtrip() {
-        let channel = ChannelId::from_link_port(0x112233, crate::RadioPort::MavlinkTx);
+        let channel = ChannelId::from_link_port(0x112233, crate::RadioPort::TunnelTx);
         let (tx_keys, rx_keys) = linked_keypairs();
         let mut tx = WfbTransmitter::new(channel, tx_keys, 42, 1, 1).unwrap();
         let mut rx = WfbReceiver::new(channel, rx_keys, 0);

@@ -156,7 +156,8 @@ export default function Home(): JSX.Element {
               {`let packets = parse_rx_aggregate(&transfer)?;
 for packet in packets {
     let events = pipeline.push_80211_frame(packet.data)?;
-    // RtpPacket and VideoFrame events expose the layer you need.
+    // Recovered video payloads can be mirrored as RTP,
+    // then fed into RtpDepacketizer for Annex-B frames.
 }`}
             </pre>
           </div>

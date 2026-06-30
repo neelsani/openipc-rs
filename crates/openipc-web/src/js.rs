@@ -1,57 +1,8 @@
-use js_sys::{Array, Object, Reflect, Uint8Array};
-use openipc_core::realtek::RxPacketType;
-use openipc_core::{ChannelId, FecCounters, PayloadPipelineEvent, PipelineEvent};
+use js_sys::{Object, Reflect, Uint8Array};
+use openipc_core::FecCounters;
 use wasm_bindgen::prelude::*;
 
-use crate::video::video_frame_object;
-
-pub(crate) fn video_frames_from_events(events: Vec<PipelineEvent>) -> Array {
-    let frames = Array::new();
-    append_video_frames(&frames, events);
-    frames
-}
-
-pub(crate) fn append_video_frames(frames: &Array, events: Vec<PipelineEvent>) {
-    for event in events {
-        if let PipelineEvent::VideoFrame(frame) = event {
-            frames.push(&Uint8Array::from(frame.data.as_slice()));
-        }
-    }
-}
-
-pub(crate) fn append_video_frame_objects(
-    frames: &Array,
-    events: Vec<PipelineEvent>,
-) -> Result<(), JsValue> {
-    for event in events {
-        if let PipelineEvent::VideoFrame(frame) = event {
-            frames.push(&video_frame_object(frame)?.into());
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn append_payload_objects(
-    payloads: &Array,
-    events: Vec<PayloadPipelineEvent>,
-    channel_id: ChannelId,
-    payload_count: &mut usize,
-    payload_bytes: &mut usize,
-) -> Result<(), JsValue> {
-    for event in events {
-        if let PayloadPipelineEvent::Payload(payload) = event {
-            *payload_count += 1;
-            *payload_bytes += payload.data.len();
-            payloads.push(&raw_payload_object(payload, channel_id)?.into());
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn raw_payload_object(
-    payload: openipc_core::RecoveredPayload,
-    channel_id: ChannelId,
-) -> Result<Object, JsValue> {
+pub(crate) fn raw_payload_object(payload: openipc_core::RoutePayload) -> Result<Object, JsValue> {
     let object = Object::new();
     Reflect::set(
         &object,
@@ -63,16 +14,9 @@ pub(crate) fn raw_payload_object(
         &JsValue::from_str("packetSeq"),
         &JsValue::from_str(&payload.packet_seq.to_string()),
     )?;
-    set_number(&object, "channelId", channel_id.raw() as f64)?;
+    set_number(&object, "routeId", payload.route_id.raw() as f64)?;
+    set_number(&object, "channelId", payload.channel_id.raw() as f64)?;
     Ok(object)
-}
-
-pub(crate) fn accept_rx_packet(
-    attrib: openipc_core::realtek::RxPacketAttrib,
-    keep_corrupted: bool,
-) -> bool {
-    attrib.pkt_rpt_type == RxPacketType::NormalRx
-        && (keep_corrupted || (!attrib.crc_err && !attrib.icv_err))
 }
 
 pub(crate) fn set_number(object: &Object, key: &str, value: f64) -> Result<(), JsValue> {

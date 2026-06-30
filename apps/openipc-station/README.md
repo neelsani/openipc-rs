@@ -53,10 +53,15 @@ video-only overlay in the Tauri app, so the OSD stays visible in both modes.
 
 - Device/channel/key selection and persistent settings.
 - Start/stop receive, recording, decoder reset, and video fullscreen.
-- WebCodecs playback and canvas recording.
+- WebCodecs playback and canvas recording. Opus RTP payload type 98 can be
+  played from the main video RTP route, which is how the OpenIPC audio docs
+  describe mixed video/audio.
 - Link HUD, metrics graphs, latency diagnostics, and logs.
-- Raw payload counters for the default telemetry tap; protocol parsing is left
-  to future app code or downstream integrations.
+- Route manager for extra WFB payload outputs. Routes can inspect bytes, log a
+  throttled summary, forward to UDP in native/Tauri mode, or play filtered Opus
+  RTP with WebCodecs `AudioDecoder`.
+- Raw route counters and audio metrics. Protocol parsing beyond video/audio is
+  intentionally left to app code or downstream integrations.
 
 ## Android/Tauri
 

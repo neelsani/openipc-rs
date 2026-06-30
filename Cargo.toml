@@ -1,8 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
+    "apps/openipc-cli",
     "crates/openipc-core",
-    "crates/openipc-native",
     "crates/openipc-rtl88xx",
     "crates/openipc-web",
     "apps/openipc-station/src-tauri",

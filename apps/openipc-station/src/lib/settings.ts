@@ -1,9 +1,192 @@
 import type { VideoCodecPreference } from "@/video";
-import type { ChannelWidthMhz, Settings, VideoStats } from "./types";
+import type {
+  ChannelWidthMhz,
+  PayloadRouteConfig,
+  Settings,
+  VideoStats,
+} from "./types";
 
 export const DEFAULT_CHANNEL_ID = "1963316736";
 export const DEFAULT_TRANSFER_SIZE = 32 * 1024;
 export const SETTINGS_STORAGE_KEY = "openipc-rs.station.settings.v1";
+export const VIDEO_ROUTE_ID = 1;
+export const TELEMETRY_ROUTE_ID = 2;
+export const MAVLINK_ROUTE_ID = TELEMETRY_ROUTE_ID;
+export const AUDIO_ROUTE_ID = 3;
+export const DATA_ROUTE_ID = 4;
+export const RTP_PAYLOAD_TYPE_OPUS = 98;
+
+export const DEFAULT_LINK_ID = Math.trunc(Number(DEFAULT_CHANNEL_ID) / 256);
+
+export function channelIdForRadioPort(port: number): string {
+  return channelIdForLinkPort(DEFAULT_LINK_ID, port);
+}
+
+export function channelIdForLinkPort(linkId: number, port: number): string {
+  return String(Math.trunc(linkId) * 256 + normalizeRadioPort(port));
+}
+
+export type ChannelIdPreset = {
+  name: string;
+  channelId: string;
+  port: number;
+  hint: string;
+};
+
+export const CHANNEL_ID_PRESETS: ChannelIdPreset[] = [
+  {
+    name: "Video",
+    channelId: channelIdForRadioPort(0x00),
+    port: 0x00,
+    hint: "OpenIPC video RTP downlink",
+  },
+  {
+    name: "Telemetry",
+    channelId: channelIdForRadioPort(0x10),
+    port: 0x10,
+    hint: "OpenIPC telemetry downlink, usually MAVLink or MSP/OSD bytes",
+  },
+  {
+    name: "Tunnel / data",
+    channelId: channelIdForRadioPort(0x20),
+    port: 0x20,
+    hint: "OpenIPC tunnel/data downlink",
+  },
+  {
+    name: "Audio",
+    channelId: channelIdForRadioPort(0x30),
+    port: 0x30,
+    hint: "wfb-ng audio profile, ground receive side",
+  },
+  {
+    name: "Telemetry TX",
+    channelId: channelIdForRadioPort(0x90),
+    port: 0x90,
+    hint: "OpenIPC telemetry uplink",
+  },
+  {
+    name: "Tunnel TX",
+    channelId: channelIdForRadioPort(0xa0),
+    port: 0xa0,
+    hint: "OpenIPC tunnel/adaptive-link uplink",
+  },
+  {
+    name: "Audio TX",
+    channelId: channelIdForRadioPort(0xb0),
+    port: 0xb0,
+    hint: "wfb-ng audio opposite direction",
+  },
+];
+
+export function parseChannelId(value: string | number): number | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value >= 0 ? Math.trunc(value) : null;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const parsed =
+    trimmed.startsWith("0x") || trimmed.startsWith("0X")
+      ? Number.parseInt(trimmed.slice(2), 16)
+      : Number.parseInt(trimmed, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+export function linkIdFromChannelId(value: string | number): number | null {
+  const parsed = parseChannelId(value);
+  return parsed === null ? null : Math.trunc(parsed / 256);
+}
+
+export function radioPortFromChannelId(value: string | number): number | null {
+  const parsed = parseChannelId(value);
+  return parsed === null ? null : normalizeRadioPort(parsed);
+}
+
+export function parseRadioPort(value: string | number): number | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value >= 0 && value <= 255
+      ? Math.trunc(value)
+      : null;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const parsed =
+    trimmed.startsWith("0x") || trimmed.startsWith("0X")
+      ? Number.parseInt(trimmed.slice(2), 16)
+      : Number.parseInt(trimmed, 10);
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 255
+    ? Math.trunc(parsed)
+    : null;
+}
+
+export function formatLinkIdHex(value: string | number): string {
+  const parsed =
+    typeof value === "number" ? value : (linkIdFromChannelId(value) ?? null);
+  return parsed === null || !Number.isFinite(parsed)
+    ? "invalid"
+    : `0x${Math.trunc(parsed).toString(16).padStart(6, "0")}`;
+}
+
+export function formatRadioPortHex(value: string | number): string {
+  const parsed = parseRadioPort(value);
+  return parsed === null ? "invalid" : `0x${parsed.toString(16).padStart(2, "0")}`;
+}
+
+export function formatChannelIdHex(value: string | number): string {
+  const parsed = parseChannelId(value);
+  return parsed === null
+    ? "invalid"
+    : `0x${parsed.toString(16).padStart(8, "0")}`;
+}
+
+export function channelPresetForPort(port: number): ChannelIdPreset | null {
+  const normalized = normalizeRadioPort(port);
+  return CHANNEL_ID_PRESETS.find((preset) => preset.port === normalized) ?? null;
+}
+
+export function channelPresetForId(
+  value: string | number,
+): ChannelIdPreset | null {
+  const port = radioPortFromChannelId(value);
+  if (port === null) {
+    return null;
+  }
+  return channelPresetForPort(port);
+}
+
+function normalizeRadioPort(port: number): number {
+  return Math.trunc(port) & 0xff;
+}
+
+export const DEFAULT_PAYLOAD_ROUTES: PayloadRouteConfig[] = [
+  {
+    id: TELEMETRY_ROUTE_ID,
+    enabled: true,
+    name: "Telemetry",
+    channelId: channelIdForRadioPort(0x10),
+    action: "inspect",
+  },
+  {
+    id: AUDIO_ROUTE_ID,
+    enabled: true,
+    name: "Mixed RTP audio",
+    channelId: channelIdForRadioPort(0x00),
+    action: "audio",
+    payloadType: RTP_PAYLOAD_TYPE_OPUS,
+    sampleRate: 48_000,
+    channels: 1,
+  },
+  {
+    id: DATA_ROUTE_ID,
+    enabled: false,
+    name: "Data",
+    channelId: channelIdForRadioPort(0x20),
+    action: "log",
+  },
+];
 
 export const AVIATEUR_CHANNELS = [
   [1, "2412 MHz [1]"],
@@ -66,7 +249,9 @@ export const DEFAULT_SETTINGS: Settings = {
   channelWidthMhz: 20,
   channelOffset: 0,
   alinkTxPower: 20,
+  audioVolume: 80,
   darkMode: true,
+  payloadRoutes: DEFAULT_PAYLOAD_ROUTES,
 };
 
 export const DEFAULT_VIDEO_STATS: VideoStats = {
@@ -139,8 +324,86 @@ export function sanitizeSettings(value: Partial<Settings>): Settings {
       40,
       DEFAULT_SETTINGS.alinkTxPower,
     ),
+    audioVolume: clampInteger(
+      value.audioVolume,
+      0,
+      100,
+      DEFAULT_SETTINGS.audioVolume,
+    ),
     darkMode: value.darkMode !== false,
+    payloadRoutes: sanitizePayloadRoutes(value.payloadRoutes),
   };
+}
+
+export function sanitizePayloadRoutes(value: unknown): PayloadRouteConfig[] {
+  if (!Array.isArray(value)) {
+    return DEFAULT_PAYLOAD_ROUTES.map((route) => ({ ...route }));
+  }
+
+  const routes = value
+    .slice(0, 16)
+    .map((route, index): PayloadRouteConfig | null => {
+      if (!route || typeof route !== "object") {
+        return null;
+      }
+      const source = route as Partial<PayloadRouteConfig>;
+      const id = clampInteger(source.id, 1, 65_535, index + 10);
+      const action =
+        source.action === "log" ||
+        source.action === "udp" ||
+        source.action === "audio" ||
+        source.action === "inspect"
+          ? source.action
+          : "inspect";
+      const isOldDefaultAudioRoute =
+        id === AUDIO_ROUTE_ID &&
+        action === "audio" &&
+        source.name === "Opus audio" &&
+        source.channelId === channelIdForRadioPort(0x30);
+      return {
+        id,
+        enabled: isOldDefaultAudioRoute ? true : source.enabled === true,
+        name:
+          isOldDefaultAudioRoute
+            ? "Mixed RTP audio"
+            : typeof source.name === "string" && source.name.trim()
+              ? source.name.trim().slice(0, 32)
+              : `Route ${id}`,
+        channelId: isOldDefaultAudioRoute
+          ? channelIdForRadioPort(0x00)
+          : typeof source.channelId === "string" && source.channelId.trim()
+            ? source.channelId.trim()
+            : DEFAULT_CHANNEL_ID,
+        action,
+        payloadType:
+          source.payloadType === undefined
+            ? action === "audio"
+              ? RTP_PAYLOAD_TYPE_OPUS
+              : undefined
+            : clampInteger(source.payloadType, 0, 127, RTP_PAYLOAD_TYPE_OPUS),
+        udpHost:
+          typeof source.udpHost === "string" && source.udpHost.trim()
+            ? source.udpHost.trim().slice(0, 128)
+            : "127.0.0.1",
+        udpPort:
+          source.udpPort === undefined
+            ? 5600
+            : clampInteger(source.udpPort, 1, 65_535, 5600),
+        sampleRate:
+          source.sampleRate === undefined
+            ? 48_000
+            : clampInteger(source.sampleRate, 8_000, 96_000, 48_000),
+        channels:
+          source.channels === undefined
+            ? 1
+            : clampInteger(source.channels, 1, 2, 1),
+      };
+    })
+    .filter((route): route is PayloadRouteConfig => route !== null);
+
+  return routes.length > 0
+    ? routes
+    : DEFAULT_PAYLOAD_ROUTES.map((route) => ({ ...route }));
 }
 
 function oneOfNumber(

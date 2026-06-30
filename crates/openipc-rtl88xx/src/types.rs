@@ -5,6 +5,10 @@ use nusb::MaybeFuture;
 
 use crate::regs::{CHIP_VER_RTL_MASK, CHIP_VER_RTL_SHIFT, RF_TYPE_ID};
 
+/// Realtek USB IDs supported by the driver.
+///
+/// This table is the source of truth for desktop filtering, WebUSB filters,
+/// and the Android Tauri plugin's generated USB filter resources.
 pub const SUPPORTED_DEVICES: &[SupportedDevice] = &[
     SupportedDevice::new(
         0x0bda,
@@ -82,15 +86,21 @@ pub const SUPPORTED_DEVICES: &[SupportedDevice] = &[
     SupportedDevice::new(0x7392, 0xb611, ChipFamily::Rtl8821, "Edimax RTL8821AU"),
 ];
 
+/// Static metadata for one supported USB VID/PID pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SupportedDevice {
+    /// USB vendor id.
     pub vendor_id: u16,
+    /// USB product id.
     pub product_id: u16,
+    /// Expected Realtek chip family before hardware probing.
     pub family_hint: ChipFamily,
+    /// Human-readable adapter or chipset label.
     pub label: &'static str,
 }
 
 impl SupportedDevice {
+    /// Create a static supported-device entry.
     pub const fn new(
         vendor_id: u16,
         product_id: u16,
@@ -106,14 +116,19 @@ impl SupportedDevice {
     }
 }
 
+/// Realtek chip family supported by this driver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChipFamily {
+    /// RTL8812AU / RTL8811AU class.
     Rtl8812,
+    /// RTL8814AU class.
     Rtl8814,
+    /// RTL8821AU class.
     Rtl8821,
 }
 
 impl ChipFamily {
+    /// Return a human-readable chip-family name.
     pub const fn name(self) -> &'static str {
         match self {
             Self::Rtl8812 => "RTL8812/RTL8811",
@@ -123,18 +138,27 @@ impl ChipFamily {
     }
 }
 
+/// Number of transmit/receive RF paths reported by the adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RfType {
+    /// One transmit and one receive path.
     OneTOneR,
+    /// Two transmit and two receive paths.
     TwoTTwoR,
+    /// Four transmit and four receive paths.
     FourTFourR,
 }
 
+/// Chip information read from USB id and hardware registers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChipInfo {
+    /// Detected chip family.
     pub family: ChipFamily,
+    /// Detected RF path count.
     pub rf_type: RfType,
+    /// Realtek cut/revision value.
     pub cut_version: u8,
+    /// Raw SYS_CFG register value used during probing.
     pub sys_cfg: u32,
 }
 
@@ -172,6 +196,7 @@ impl ChipInfo {
         }
     }
 
+    /// Return the number of RF paths implied by [`Self::rf_type`].
     pub const fn total_rf_paths(self) -> usize {
         match self.rf_type {
             RfType::OneTOneR => 1,
@@ -181,10 +206,14 @@ impl ChipInfo {
     }
 }
 
+/// Configured WiFi channel width for monitor mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelWidth {
+    /// 20 MHz channel.
     Mhz20,
+    /// 40 MHz channel.
     Mhz40,
+    /// 80 MHz channel.
     Mhz80,
 }
 
@@ -198,10 +227,14 @@ impl ChannelWidth {
     }
 }
 
+/// Radio channel configuration for monitor-mode bring-up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RadioConfig {
+    /// Primary WiFi channel number.
     pub channel: u8,
+    /// Secondary-channel offset used for 40/80 MHz operation.
     pub channel_offset: u8,
+    /// Channel width.
     pub channel_width: ChannelWidth,
 }
 
@@ -215,12 +248,18 @@ impl Default for RadioConfig {
     }
 }
 
+/// Device open and endpoint selection options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DriverOptions {
+    /// Skip USB reset before claiming the adapter.
     pub skip_reset: bool,
+    /// Run hardware initialization after opening when used by high-level open helpers.
     pub initialize_hardware: bool,
+    /// Optional USB vendor-id filter.
     pub target_vendor_id: Option<u16>,
+    /// Optional USB product-id filter.
     pub target_product_id: Option<u16>,
+    /// Optional bulk-OUT endpoint override.
     pub tx_endpoint_override: Option<u8>,
 }
 
@@ -237,6 +276,7 @@ impl Default for DriverOptions {
 }
 
 impl DriverOptions {
+    /// Read driver options from `OPENIPC_RS_*` and devourer-compatible env vars.
     pub fn from_env() -> Self {
         #[cfg(target_arch = "wasm32")]
         {
@@ -259,14 +299,18 @@ impl DriverOptions {
     }
 }
 
+/// RTL8814 firmware download strategy.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Firmware8814Mode {
+    /// Kernel-faithful reserved-page/DDMA path.
     #[default]
     Kernel,
+    /// rtw88-style firmware path retained for bring-up experiments.
     Rtw88,
 }
 
 impl Firmware8814Mode {
+    /// Parse an environment/configuration string.
     pub fn from_env_value(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "kernel" | "default" | "kernel-faithful" => Some(Self::Kernel),
@@ -276,13 +320,20 @@ impl Firmware8814Mode {
     }
 }
 
+/// Monitor-mode hardware initialization options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MonitorOptions {
+    /// Ask hardware to pass packets even when CRC/ICV is marked bad.
     pub accept_bad_fcs: bool,
+    /// Skip TX power table programming during channel setup.
     pub skip_tx_power: bool,
+    /// Run IQK on chips where it is normally skipped.
     pub force_iqk: bool,
+    /// Disable IQK even where it is normally run.
     pub disable_iqk: bool,
+    /// RTL8814 firmware download path.
     pub firmware_8814_mode: Firmware8814Mode,
+    /// Optional RTL8814 firmware chunk size override.
     pub firmware_8814_chunk: Option<usize>,
 }
 
@@ -300,6 +351,7 @@ impl Default for MonitorOptions {
 }
 
 impl MonitorOptions {
+    /// Read monitor options from devourer-compatible env vars.
     pub fn from_env() -> Self {
         #[cfg(target_arch = "wasm32")]
         {
@@ -322,11 +374,13 @@ impl MonitorOptions {
         }
     }
 
+    /// Return a copy with `accept_bad_fcs` changed.
     pub const fn with_accept_bad_fcs(mut self, accept_bad_fcs: bool) -> Self {
         self.accept_bad_fcs = accept_bad_fcs;
         self
     }
 
+    /// Return whether IQK should run for the selected chip family.
     pub const fn should_run_iqk(self, family: ChipFamily) -> bool {
         if self.disable_iqk {
             return false;
@@ -339,34 +393,60 @@ impl MonitorOptions {
     }
 }
 
+/// Result status from monitor-mode initialization.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InitStatus {
+    /// The adapter already appeared to be initialized.
     AlreadyRunning,
+    /// Initialization ran during this call.
     Initialized,
 }
 
+/// Report returned after monitor-mode initialization.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitReport {
+    /// Chip information used for initialization.
     pub chip: ChipInfo,
+    /// Whether initialization was skipped or performed.
     pub status: InitStatus,
+    /// True if firmware was downloaded during initialization.
     pub firmware_downloaded: bool,
 }
 
+/// Error type returned by the Realtek USB driver.
 #[derive(Debug)]
 pub enum DriverError {
+    /// Error from nusb or platform USB access.
     Nusb(String),
+    /// No matching supported adapter was found.
     DeviceNotFound,
+    /// Required endpoint was missing.
     EndpointNotFound(&'static str),
+    /// Requested bulk-OUT endpoint override was not present.
     EndpointOverrideNotFound(u8),
-    RegisterReadSize { expected: usize, actual: usize },
+    /// A control read returned an unexpected byte count.
+    RegisterReadSize {
+        /// Number of bytes requested.
+        expected: usize,
+        /// Number of bytes returned by the device/backend.
+        actual: usize,
+    },
+    /// Firmware checksum C2H message did not arrive.
     FirmwareChecksumTimeout,
+    /// Firmware ready state did not arrive.
     FirmwareReadyTimeout,
+    /// Requested firmware path is not implemented for this chip.
     UnsupportedFirmwarePath(ChipFamily),
+    /// Thermal power tracking is not implemented for this chip.
     UnsupportedPowerTrackingPath(ChipFamily),
+    /// IQK calibration path is not implemented for this chip.
     UnsupportedIqkPath(ChipFamily),
+    /// TX power override was outside the Realtek TXAGC range.
     InvalidTxPower(u8),
+    /// Realtek RX aggregate parse error.
     InvalidTransfer(openipc_core::realtek::AggregateError),
-    TxBuild(openipc_core::realtek_tx::RealtekTxError),
+    /// Realtek TX descriptor/frame build error.
+    TxBuild(crate::tx::RealtekTxError),
 }
 
 impl fmt::Display for DriverError {
@@ -456,6 +536,7 @@ fn read_env_usize(name: &str) -> Option<usize> {
 
 impl std::error::Error for DriverError {}
 
+/// Return true if a USB VID/PID pair exists in [`SUPPORTED_DEVICES`].
 pub fn is_supported_id(vendor_id: u16, product_id: u16) -> bool {
     SUPPORTED_DEVICES
         .iter()
@@ -463,6 +544,10 @@ pub fn is_supported_id(vendor_id: u16, product_id: u16) -> bool {
 }
 
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+/// List all USB devices visible to desktop `nusb`.
+///
+/// The returned summaries include unsupported devices with `supported = false`
+/// so diagnostic tools can show what the OS sees.
 pub fn list_devices() -> Result<Vec<UsbDeviceSummary>, DriverError> {
     let devices = nusb::list_devices()
         .wait()
@@ -483,6 +568,7 @@ pub fn list_devices() -> Result<Vec<UsbDeviceSummary>, DriverError> {
 }
 
 #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+/// Return an explanatory error on platforms without blocking desktop USB listing.
 pub fn list_devices() -> Result<Vec<UsbDeviceSummary>, DriverError> {
     let message = if cfg!(target_os = "android") {
         "USB enumeration is unavailable in the Android app sandbox; use UsbManager and nusb::Device::from_fd"
@@ -492,6 +578,7 @@ pub fn list_devices() -> Result<Vec<UsbDeviceSummary>, DriverError> {
     Err(DriverError::Nusb(message.to_owned()))
 }
 
+/// List only supported Realtek rtl88xx adapters visible to desktop `nusb`.
 pub fn list_supported_devices() -> Result<Vec<UsbDeviceSummary>, DriverError> {
     Ok(list_devices()?
         .into_iter()
@@ -499,15 +586,24 @@ pub fn list_supported_devices() -> Result<Vec<UsbDeviceSummary>, DriverError> {
         .collect())
 }
 
+/// User-facing summary of one USB device observed by `nusb`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsbDeviceSummary {
+    /// USB vendor id.
     pub vendor_id: u16,
+    /// USB product id.
     pub product_id: u16,
+    /// Optional USB product string.
     pub product: Option<String>,
+    /// Optional USB manufacturer string.
     pub manufacturer: Option<String>,
+    /// Platform bus id reported by `nusb`.
     pub bus_id: String,
+    /// USB device address on the bus.
     pub device_address: u8,
+    /// USB hub port path.
     pub port_chain: Vec<u8>,
+    /// True if this VID/PID is in [`SUPPORTED_DEVICES`].
     pub supported: bool,
 }
 

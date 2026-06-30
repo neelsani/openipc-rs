@@ -25,6 +25,7 @@ mod power;
 mod regs;
 mod rtl_data;
 mod time;
+mod tx;
 mod types;
 
 pub use async_diagnostics::{BbDbgportRead, ThermalBucket, ThermalStatus};
@@ -32,12 +33,14 @@ pub use async_iqk::IqkReport;
 pub use async_phydm::{FalseAlarmCounters, PhydmDigState, PhydmWatchdogReport};
 pub use async_power_tracking::{PowerTrackingReport, PowerTrackingState};
 pub use device::RealtekDevice;
+pub use tx::{build_usb_tx_frame, RealtekTxError, RealtekTxOptions, TX_DESC_SIZE};
 pub use types::{
     is_supported_id, list_devices, list_supported_devices, ChannelWidth, ChipFamily, ChipInfo,
     DriverError, DriverOptions, Firmware8814Mode, InitReport, InitStatus, MonitorOptions,
     RadioConfig, RfType, SupportedDevice, UsbDeviceSummary, SUPPORTED_DEVICES,
 };
 
+/// Default native USB bulk-IN transfer size used for RX reads.
 pub const DEFAULT_RX_TRANSFER_SIZE: usize = openipc_core::realtek::DEFAULT_RX_TRANSFER_SIZE;
 
 #[cfg(test)]

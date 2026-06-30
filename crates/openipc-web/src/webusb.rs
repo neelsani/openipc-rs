@@ -1,28 +1,443 @@
 #[cfg(target_arch = "wasm32")]
-use js_sys::{Array, Object, Reflect, Uint8Array};
-#[cfg(target_arch = "wasm32")]
-use openipc_core::realtek_tx::RealtekTxOptions;
+use js_sys::{Array, Int8Array, Object, Reflect, Uint32Array, Uint8Array};
 #[cfg(target_arch = "wasm32")]
 use openipc_rtl88xx::is_supported_id;
 use openipc_rtl88xx::SUPPORTED_DEVICES;
 #[cfg(target_arch = "wasm32")]
 use openipc_rtl88xx::{
-    ChannelWidth, DriverOptions, FalseAlarmCounters, Firmware8814Mode, InitReport, InitStatus,
-    IqkReport, MonitorOptions, PhydmDigState, PhydmWatchdogReport, PowerTrackingReport,
-    PowerTrackingState, RadioConfig, RealtekDevice, ThermalBucket,
+    BbDbgportRead, ChannelWidth, DriverOptions, FalseAlarmCounters, Firmware8814Mode, InitReport,
+    InitStatus, IqkReport, MonitorOptions, PhydmDigState, PhydmWatchdogReport, PowerTrackingReport,
+    PowerTrackingState, RadioConfig, RealtekDevice, RealtekTxOptions, ThermalBucket, ThermalStatus,
 };
 use wasm_bindgen::prelude::*;
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
+/// WebUSB-backed Realtek rtl88xx device.
 pub struct WebUsbRealtekDevice {
     driver: RealtekDevice,
 }
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
+/// Monitor-mode initialization report returned to JavaScript.
+pub struct WebInitReport {
+    report: InitReport,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl From<InitReport> for WebInitReport {
+    fn from(report: InitReport) -> Self {
+        Self { report }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+impl WebInitReport {
+    #[wasm_bindgen(getter)]
+    pub fn chip(&self) -> String {
+        self.report.chip.family.name().to_owned()
+    }
+
+    #[wasm_bindgen(getter, js_name = rfPaths)]
+    pub fn rf_paths(&self) -> usize {
+        self.report.chip.total_rf_paths()
+    }
+
+    #[wasm_bindgen(getter, js_name = cutVersion)]
+    pub fn cut_version(&self) -> u8 {
+        self.report.chip.cut_version
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn status(&self) -> String {
+        init_status_name(&self.report.status).to_owned()
+    }
+
+    #[wasm_bindgen(getter, js_name = firmwareDownloaded)]
+    pub fn firmware_downloaded(&self) -> bool {
+        self.report.firmware_downloaded
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Thermal status returned to JavaScript.
+#[derive(Clone, Copy)]
+pub struct WebThermalStatus {
+    status: ThermalStatus,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl From<ThermalStatus> for WebThermalStatus {
+    fn from(status: ThermalStatus) -> Self {
+        Self { status }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+impl WebThermalStatus {
+    #[wasm_bindgen(getter)]
+    pub fn raw(&self) -> u8 {
+        self.status.raw
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn baseline(&self) -> u8 {
+        self.status.baseline
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn delta(&self) -> i16 {
+        self.status.delta
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn valid(&self) -> bool {
+        self.status.valid
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn bucket(&self) -> String {
+        thermal_bucket_name(self.status.bucket()).to_owned()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// RTL8814 queue-depth diagnostic values.
+#[derive(Clone, Copy)]
+pub struct WebQueueDepth8814 {
+    values: [u32; 5],
+}
+
+#[cfg(target_arch = "wasm32")]
+impl From<[u32; 5]> for WebQueueDepth8814 {
+    fn from(values: [u32; 5]) -> Self {
+        Self { values }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+impl WebQueueDepth8814 {
+    #[wasm_bindgen(getter)]
+    pub fn q0(&self) -> u32 {
+        self.values[0]
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn q1(&self) -> u32 {
+        self.values[1]
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn q2(&self) -> u32 {
+        self.values[2]
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn q3(&self) -> u32 {
+        self.values[3]
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn q4(&self) -> u32 {
+        self.values[4]
+    }
+
+    pub fn values(&self) -> Uint32Array {
+        Uint32Array::from(self.values.as_slice())
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Baseband debug-port read returned to JavaScript.
+#[derive(Clone, Copy)]
+pub struct WebBbDbgportRead {
+    read: BbDbgportRead,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl From<BbDbgportRead> for WebBbDbgportRead {
+    fn from(read: BbDbgportRead) -> Self {
+        Self { read }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+impl WebBbDbgportRead {
+    #[wasm_bindgen(getter)]
+    pub fn selector(&self) -> u32 {
+        self.read.selector
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn value(&self) -> u32 {
+        self.read.value
+    }
+
+    #[wasm_bindgen(getter, js_name = savedSelector)]
+    pub fn saved_selector(&self) -> u32 {
+        self.read.saved_selector
+    }
+
+    #[wasm_bindgen(getter, js_name = chipAlive)]
+    pub fn chip_alive(&self) -> bool {
+        self.read.chip_alive
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// PHY false-alarm counters returned to JavaScript.
+#[derive(Clone, Copy)]
+pub struct WebFalseAlarmCounters {
+    counters: FalseAlarmCounters,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl From<FalseAlarmCounters> for WebFalseAlarmCounters {
+    fn from(counters: FalseAlarmCounters) -> Self {
+        Self { counters }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+impl WebFalseAlarmCounters {
+    #[wasm_bindgen(getter, js_name = ofdmFail)]
+    pub fn ofdm_fail(&self) -> u32 {
+        self.counters.cnt_ofdm_fail
+    }
+
+    #[wasm_bindgen(getter, js_name = cckFail)]
+    pub fn cck_fail(&self) -> u32 {
+        self.counters.cnt_cck_fail
+    }
+
+    #[wasm_bindgen(getter, js_name = ofdmCca)]
+    pub fn ofdm_cca(&self) -> u32 {
+        self.counters.cnt_ofdm_cca
+    }
+
+    #[wasm_bindgen(getter, js_name = cckCca)]
+    pub fn cck_cca(&self) -> u32 {
+        self.counters.cnt_cck_cca
+    }
+
+    #[wasm_bindgen(getter, js_name = cckCrcOk)]
+    pub fn cck_crc_ok(&self) -> u32 {
+        self.counters.cnt_cck_crc32_ok
+    }
+
+    #[wasm_bindgen(getter, js_name = cckCrcError)]
+    pub fn cck_crc_error(&self) -> u32 {
+        self.counters.cnt_cck_crc32_error
+    }
+
+    #[wasm_bindgen(getter, js_name = ofdmCrcOk)]
+    pub fn ofdm_crc_ok(&self) -> u32 {
+        self.counters.cnt_ofdm_crc32_ok
+    }
+
+    #[wasm_bindgen(getter, js_name = ofdmCrcError)]
+    pub fn ofdm_crc_error(&self) -> u32 {
+        self.counters.cnt_ofdm_crc32_error
+    }
+
+    #[wasm_bindgen(getter, js_name = htCrcOk)]
+    pub fn ht_crc_ok(&self) -> u32 {
+        self.counters.cnt_ht_crc32_ok
+    }
+
+    #[wasm_bindgen(getter, js_name = htCrcError)]
+    pub fn ht_crc_error(&self) -> u32 {
+        self.counters.cnt_ht_crc32_error
+    }
+
+    #[wasm_bindgen(getter, js_name = vhtCrcOk)]
+    pub fn vht_crc_ok(&self) -> u32 {
+        self.counters.cnt_vht_crc32_ok
+    }
+
+    #[wasm_bindgen(getter, js_name = vhtCrcError)]
+    pub fn vht_crc_error(&self) -> u32 {
+        self.counters.cnt_vht_crc32_error
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn all(&self) -> u32 {
+        self.counters.cnt_all
+    }
+
+    #[wasm_bindgen(getter, js_name = ccaAll)]
+    pub fn cca_all(&self) -> u32 {
+        self.counters.cnt_cca_all
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Result from one PHYDM watchdog tick.
+#[derive(Clone, Copy)]
+pub struct WebPhydmWatchdogReport {
+    report: PhydmWatchdogReport,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl From<PhydmWatchdogReport> for WebPhydmWatchdogReport {
+    fn from(report: PhydmWatchdogReport) -> Self {
+        Self { report }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+impl WebPhydmWatchdogReport {
+    #[wasm_bindgen(getter, js_name = previousIgi)]
+    pub fn previous_igi(&self) -> u8 {
+        self.report.previous_igi
+    }
+
+    #[wasm_bindgen(getter, js_name = currentIgi)]
+    pub fn current_igi(&self) -> u8 {
+        self.report.current_igi
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn counters(&self) -> WebFalseAlarmCounters {
+        self.report.counters.into()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// RTL8812 thermal power-tracking report.
+#[derive(Clone, Copy)]
+pub struct WebPowerTrackingReport {
+    report: PowerTrackingReport,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl From<PowerTrackingReport> for WebPowerTrackingReport {
+    fn from(report: PowerTrackingReport) -> Self {
+        Self { report }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+impl WebPowerTrackingReport {
+    #[wasm_bindgen(getter)]
+    pub fn enabled(&self) -> bool {
+        self.report.enabled
+    }
+
+    #[wasm_bindgen(getter, js_name = thermalRaw)]
+    pub fn thermal_raw(&self) -> u8 {
+        self.report.thermal_raw
+    }
+
+    #[wasm_bindgen(getter, js_name = thermalAverage)]
+    pub fn thermal_average(&self) -> u8 {
+        self.report.thermal_average
+    }
+
+    #[wasm_bindgen(getter, js_name = eepromThermal)]
+    pub fn eeprom_thermal(&self) -> u8 {
+        self.report.eeprom_thermal
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn delta(&self) -> u8 {
+        self.report.delta
+    }
+
+    #[wasm_bindgen(getter, js_name = defaultOfdmIndex)]
+    pub fn default_ofdm_index(&self) -> u8 {
+        self.report.default_ofdm_index
+    }
+
+    #[wasm_bindgen(getter, js_name = finalOfdmIndex0)]
+    pub fn final_ofdm_index_0(&self) -> u8 {
+        self.report.final_ofdm_index[0]
+    }
+
+    #[wasm_bindgen(getter, js_name = finalOfdmIndex1)]
+    pub fn final_ofdm_index_1(&self) -> u8 {
+        self.report.final_ofdm_index[1]
+    }
+
+    #[wasm_bindgen(js_name = finalOfdmIndex)]
+    pub fn final_ofdm_index(&self) -> Uint8Array {
+        Uint8Array::from(self.report.final_ofdm_index.as_slice())
+    }
+
+    #[wasm_bindgen(getter, js_name = swingDelta0)]
+    pub fn swing_delta_0(&self) -> i8 {
+        self.report.swing_delta[0]
+    }
+
+    #[wasm_bindgen(getter, js_name = swingDelta1)]
+    pub fn swing_delta_1(&self) -> i8 {
+        self.report.swing_delta[1]
+    }
+
+    #[wasm_bindgen(js_name = swingDelta)]
+    pub fn swing_delta(&self) -> Int8Array {
+        Int8Array::from(self.report.swing_delta.as_slice())
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn applied(&self) -> bool {
+        self.report.applied
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// IQK calibration report returned to JavaScript.
+#[derive(Clone, Copy)]
+pub struct WebIqkReport {
+    report: IqkReport,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl From<IqkReport> for WebIqkReport {
+    fn from(report: IqkReport) -> Self {
+        Self { report }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+impl WebIqkReport {
+    #[wasm_bindgen(getter)]
+    pub fn chip(&self) -> String {
+        self.report.chip.family.name().to_owned()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn channel(&self) -> u8 {
+        self.report.channel
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn ran(&self) -> bool {
+        self.report.ran
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
 impl WebUsbRealtekDevice {
     #[wasm_bindgen(js_name = fromWebUsbDevice)]
+    /// Create a driver from a user-granted WebUSB `USBDevice`.
     pub async fn from_web_usb_device(
         device: web_sys::UsbDevice,
     ) -> Result<WebUsbRealtekDevice, JsValue> {
@@ -33,6 +448,7 @@ impl WebUsbRealtekDevice {
     }
 
     #[wasm_bindgen(js_name = fromWebUsbDeviceWithOptions)]
+    /// Create a driver with an optional bulk-OUT endpoint override.
     pub async fn from_web_usb_device_with_options(
         device: web_sys::UsbDevice,
         tx_endpoint_override: i32,
@@ -41,6 +457,7 @@ impl WebUsbRealtekDevice {
     }
 
     #[wasm_bindgen(js_name = fromWebUsbDeviceAdvanced)]
+    /// Create a driver with endpoint and VID/PID overrides.
     pub async fn from_web_usb_device_advanced(
         device: web_sys::UsbDevice,
         tx_endpoint_override: i32,
@@ -62,34 +479,38 @@ impl WebUsbRealtekDevice {
     }
 
     #[wasm_bindgen(js_name = bulkInEndpoint)]
+    /// Return the selected bulk-IN endpoint address.
     pub fn bulk_in_endpoint(&self) -> u8 {
         self.driver.bulk_in_ep
     }
 
     #[wasm_bindgen(js_name = bulkOutEndpoint)]
+    /// Return the selected bulk-OUT endpoint address.
     pub fn bulk_out_endpoint(&self) -> u8 {
         self.driver.bulk_out_ep
     }
 
     #[wasm_bindgen(js_name = initializeMonitor)]
+    /// Initialize the adapter for OpenIPC monitor-mode receive.
     pub async fn initialize_monitor(
         &self,
         channel: u8,
         channel_width_mhz: u16,
         channel_offset: u8,
-    ) -> Result<String, JsValue> {
+    ) -> Result<WebInitReport, JsValue> {
         self.initialize_monitor_with_options(channel, channel_width_mhz, channel_offset, false)
             .await
     }
 
     #[wasm_bindgen(js_name = initializeMonitorWithOptions)]
+    /// Initialize monitor mode with bad-FCS handling control.
     pub async fn initialize_monitor_with_options(
         &self,
         channel: u8,
         channel_width_mhz: u16,
         channel_offset: u8,
         accept_bad_fcs: bool,
-    ) -> Result<String, JsValue> {
+    ) -> Result<WebInitReport, JsValue> {
         let radio = RadioConfig {
             channel,
             channel_offset,
@@ -100,10 +521,11 @@ impl WebUsbRealtekDevice {
             .initialize_monitor_async(radio, accept_bad_fcs)
             .await
             .map_err(driver_error)?;
-        Ok(init_report_json(&report))
+        Ok(report.into())
     }
 
     #[wasm_bindgen(js_name = initializeMonitorAdvanced)]
+    /// Initialize monitor mode with advanced bring-up options.
     pub async fn initialize_monitor_advanced(
         &self,
         channel: u8,
@@ -115,7 +537,7 @@ impl WebUsbRealtekDevice {
         disable_iqk: bool,
         firmware_8814_mode: String,
         firmware_8814_chunk: i32,
-    ) -> Result<String, JsValue> {
+    ) -> Result<WebInitReport, JsValue> {
         let radio = RadioConfig {
             channel,
             channel_offset,
@@ -141,10 +563,11 @@ impl WebUsbRealtekDevice {
             .initialize_monitor_with_options_async(radio, options)
             .await
             .map_err(driver_error)?;
-        Ok(init_report_json(&report))
+        Ok(report.into())
     }
 
     #[wasm_bindgen(js_name = readRxTransfer)]
+    /// Read one Realtek bulk-IN transfer.
     pub async fn read_rx_transfer(&self, length: usize) -> Result<Uint8Array, JsValue> {
         let bytes = self
             .driver
@@ -155,6 +578,7 @@ impl WebUsbRealtekDevice {
     }
 
     #[wasm_bindgen(js_name = readRxTransfers)]
+    /// Read several Realtek bulk-IN transfers with multiple reads in flight.
     pub async fn read_rx_transfers(
         &self,
         length: usize,
@@ -173,6 +597,7 @@ impl WebUsbRealtekDevice {
     }
 
     #[wasm_bindgen(js_name = writeTxTransfer)]
+    /// Write one fully-built Realtek USB TX transfer.
     pub async fn write_tx_transfer(&self, transfer: &[u8]) -> Result<usize, JsValue> {
         self.driver
             .write_tx_transfer_async(transfer)
@@ -181,6 +606,7 @@ impl WebUsbRealtekDevice {
     }
 
     #[wasm_bindgen(js_name = sendPacket)]
+    /// Send one radiotap+802.11 packet through the Realtek adapter.
     pub async fn send_packet(
         &self,
         radiotap_packet: &[u8],
@@ -191,6 +617,7 @@ impl WebUsbRealtekDevice {
     }
 
     #[wasm_bindgen(js_name = sendPacketWithOptions)]
+    /// Send one radiotap+802.11 packet with descriptor compatibility options.
     pub async fn send_packet_with_options(
         &self,
         radiotap_packet: &[u8],
@@ -213,6 +640,7 @@ impl WebUsbRealtekDevice {
     }
 
     #[wasm_bindgen(js_name = setTxPowerOverride)]
+    /// Override Realtek TX power for adaptive-link uplink packets.
     pub async fn set_tx_power_override(
         &self,
         current_channel: u8,
@@ -225,36 +653,29 @@ impl WebUsbRealtekDevice {
     }
 
     #[wasm_bindgen(js_name = readThermalStatus)]
-    pub async fn read_thermal_status(&self) -> Result<String, JsValue> {
+    /// Read thermal status diagnostics.
+    pub async fn read_thermal_status(&self) -> Result<WebThermalStatus, JsValue> {
         let status = self
             .driver
             .read_thermal_status_async()
             .await
             .map_err(driver_error)?;
-        Ok(format!(
-            r#"{{"raw":{},"baseline":{},"delta":{},"valid":{},"bucket":"{}"}}"#,
-            status.raw,
-            status.baseline,
-            status.delta,
-            status.valid,
-            thermal_bucket_name(status.bucket())
-        ))
+        Ok(status.into())
     }
 
     #[wasm_bindgen(js_name = readQueueDepth8814)]
-    pub async fn read_queue_depth_8814(&self) -> Result<String, JsValue> {
+    /// Read RTL8814 queue-depth diagnostics.
+    pub async fn read_queue_depth_8814(&self) -> Result<WebQueueDepth8814, JsValue> {
         let regs = self
             .driver
             .read_queue_depth_8814_async()
             .await
             .map_err(driver_error)?;
-        Ok(format!(
-            r#"[{},{},{},{},{}]"#,
-            regs[0], regs[1], regs[2], regs[3], regs[4]
-        ))
+        Ok(regs.into())
     }
 
     #[wasm_bindgen(js_name = readBbReg)]
+    /// Read a baseband register with a mask.
     pub async fn read_bb_reg(&self, register: u16, mask: u32) -> Result<u32, JsValue> {
         self.driver
             .read_bb_reg_async(register, mask)
@@ -263,40 +684,41 @@ impl WebUsbRealtekDevice {
     }
 
     #[wasm_bindgen(js_name = readBbDbgport)]
-    pub async fn read_bb_dbgport(&self, selector: u32) -> Result<String, JsValue> {
+    /// Read the baseband debug port.
+    pub async fn read_bb_dbgport(&self, selector: u32) -> Result<WebBbDbgportRead, JsValue> {
         let read = self
             .driver
             .read_bb_dbgport_async(selector)
             .await
             .map_err(driver_error)?;
-        Ok(format!(
-            r#"{{"selector":{},"value":{},"savedSelector":{},"chipAlive":{}}}"#,
-            read.selector, read.value, read.saved_selector, read.chip_alive
-        ))
+        Ok(read.into())
     }
 
     #[wasm_bindgen(js_name = readFalseAlarmCounters)]
-    pub async fn read_false_alarm_counters(&self) -> Result<String, JsValue> {
+    /// Read PHY false-alarm counters.
+    pub async fn read_false_alarm_counters(&self) -> Result<WebFalseAlarmCounters, JsValue> {
         let counters = self
             .driver
             .read_false_alarm_counters_async()
             .await
             .map_err(driver_error)?;
-        Ok(false_alarm_counters_json(counters))
+        Ok(counters.into())
     }
 
     #[wasm_bindgen(js_name = runIqk)]
-    pub async fn run_iqk(&self, channel: u8) -> Result<String, JsValue> {
+    /// Run IQK calibration for the current channel.
+    pub async fn run_iqk(&self, channel: u8) -> Result<WebIqkReport, JsValue> {
         let chip = self.driver.probe_chip_async().await.map_err(driver_error)?;
         let report = self
             .driver
             .run_iqk_async(chip, channel)
             .await
             .map_err(driver_error)?;
-        Ok(iqk_report_json(report))
+        Ok(report.into())
     }
 
     #[wasm_bindgen(js_name = readRegisterU8)]
+    /// Read an 8-bit Realtek register.
     pub async fn read_register_u8(&self, register: u16) -> Result<u8, JsValue> {
         self.driver
             .read_u8_async(register)
@@ -305,6 +727,7 @@ impl WebUsbRealtekDevice {
     }
 
     #[wasm_bindgen(js_name = readRegisterU32)]
+    /// Read a 32-bit Realtek register.
     pub async fn read_register_u32(&self, register: u16) -> Result<u32, JsValue> {
         self.driver
             .read_u32_async(register)
@@ -315,6 +738,7 @@ impl WebUsbRealtekDevice {
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
+/// Stateful PHYDM watchdog helper for WebUSB apps.
 pub struct WebUsbPhydmWatchdog {
     state: PhydmDigState,
 }
@@ -330,18 +754,22 @@ impl WebUsbPhydmWatchdog {
     }
 
     #[wasm_bindgen(js_name = tick)]
-    pub async fn tick(&mut self, device: &WebUsbRealtekDevice) -> Result<String, JsValue> {
+    pub async fn tick(
+        &mut self,
+        device: &WebUsbRealtekDevice,
+    ) -> Result<WebPhydmWatchdogReport, JsValue> {
         let report = device
             .driver
             .run_phydm_watchdog_tick_async(&mut self.state)
             .await
             .map_err(driver_error)?;
-        Ok(phydm_watchdog_report_json(report))
+        Ok(report.into())
     }
 }
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
+/// Stateful RTL8812 power-tracking helper for WebUSB apps.
 pub struct WebUsbPowerTracking8812 {
     state: PowerTrackingState,
 }
@@ -380,7 +808,7 @@ impl WebUsbPowerTracking8812 {
         device: &WebUsbRealtekDevice,
         channel: u8,
         channel_width_mhz: u16,
-    ) -> Result<String, JsValue> {
+    ) -> Result<WebPowerTrackingReport, JsValue> {
         let report = device
             .driver
             .tick_power_tracking_8812_async(
@@ -390,7 +818,7 @@ impl WebUsbPowerTracking8812 {
             )
             .await
             .map_err(driver_error)?;
-        Ok(power_tracking_report_json(report))
+        Ok(report.into())
     }
 }
 
@@ -403,65 +831,6 @@ fn thermal_bucket_name(bucket: ThermalBucket) -> &'static str {
         ThermalBucket::Hot => "hot",
         ThermalBucket::Critical => "critical",
     }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn false_alarm_counters_json(counters: FalseAlarmCounters) -> String {
-    format!(
-        r#"{{"ofdmFail":{},"cckFail":{},"ofdmCca":{},"cckCca":{},"cckCrcOk":{},"cckCrcError":{},"ofdmCrcOk":{},"ofdmCrcError":{},"htCrcOk":{},"htCrcError":{},"vhtCrcOk":{},"vhtCrcError":{},"all":{},"ccaAll":{}}}"#,
-        counters.cnt_ofdm_fail,
-        counters.cnt_cck_fail,
-        counters.cnt_ofdm_cca,
-        counters.cnt_cck_cca,
-        counters.cnt_cck_crc32_ok,
-        counters.cnt_cck_crc32_error,
-        counters.cnt_ofdm_crc32_ok,
-        counters.cnt_ofdm_crc32_error,
-        counters.cnt_ht_crc32_ok,
-        counters.cnt_ht_crc32_error,
-        counters.cnt_vht_crc32_ok,
-        counters.cnt_vht_crc32_error,
-        counters.cnt_all,
-        counters.cnt_cca_all
-    )
-}
-
-#[cfg(target_arch = "wasm32")]
-fn phydm_watchdog_report_json(report: PhydmWatchdogReport) -> String {
-    format!(
-        r#"{{"previousIgi":{},"currentIgi":{},"counters":{}}}"#,
-        report.previous_igi,
-        report.current_igi,
-        false_alarm_counters_json(report.counters)
-    )
-}
-
-#[cfg(target_arch = "wasm32")]
-fn power_tracking_report_json(report: PowerTrackingReport) -> String {
-    format!(
-        r#"{{"enabled":{},"thermalRaw":{},"thermalAverage":{},"eepromThermal":{},"delta":{},"defaultOfdmIndex":{},"finalOfdmIndex":[{},{}],"swingDelta":[{},{}],"applied":{}}}"#,
-        report.enabled,
-        report.thermal_raw,
-        report.thermal_average,
-        report.eeprom_thermal,
-        report.delta,
-        report.default_ofdm_index,
-        report.final_ofdm_index[0],
-        report.final_ofdm_index[1],
-        report.swing_delta[0],
-        report.swing_delta[1],
-        report.applied
-    )
-}
-
-#[cfg(target_arch = "wasm32")]
-fn iqk_report_json(report: IqkReport) -> String {
-    format!(
-        r#"{{"chip":"{}","channel":{},"ran":{}}}"#,
-        report.chip.family.name(),
-        report.channel,
-        report.ran
-    )
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -507,19 +876,11 @@ fn optional_usize(value: i32, name: &str) -> Result<Option<usize>, JsValue> {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn init_report_json(report: &InitReport) -> String {
-    let status = match report.status {
+fn init_status_name(status: &InitStatus) -> &'static str {
+    match status {
         InitStatus::AlreadyRunning => "already_running",
         InitStatus::Initialized => "initialized",
-    };
-    format!(
-        r#"{{"chip":"{}","rfPaths":{},"cutVersion":{},"status":"{}","firmwareDownloaded":{}}}"#,
-        report.chip.family.name(),
-        report.chip.total_rf_paths(),
-        report.chip.cut_version,
-        status,
-        report.firmware_downloaded
-    )
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -528,6 +889,7 @@ fn driver_error(err: impl std::fmt::Display) -> JsValue {
 }
 
 #[wasm_bindgen(js_name = supportedUsbFilters)]
+/// Return WebUSB request-device filters as a JSON string.
 pub fn supported_usb_filters() -> String {
     // Kept as JSON to avoid forcing web-sys types into the Rust API.
     let mut json = String::from("[");
@@ -546,6 +908,7 @@ pub fn supported_usb_filters() -> String {
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(js_name = listAuthorizedUsbDevices)]
+/// List already-authorized supported WebUSB devices.
 pub async fn list_authorized_usb_devices() -> Result<Array, JsValue> {
     let devices = nusb::list_devices()
         .await

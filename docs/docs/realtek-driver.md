@@ -125,6 +125,12 @@ The HAL is async and transport-oriented. Native builds use `nusb` for desktop
 USB. Browser builds use the WebUSB-capable `nusb-webusb` package after the user
 grants the device in JavaScript.
 
+On native targets, the driver’s `*_async` methods are async-shaped wrappers
+around blocking `nusb` operations. They exist so the HAL register, firmware, and
+channel sequences can be shared with WebUSB. Native callers should run them from
+a worker/blocking context, not a latency-sensitive async executor. On wasm, the
+same calls resolve through real WebUSB promises.
+
 The browser still needs the same Realtek HAL work as native: WebUSB changes how
 control and bulk transfers are issued, not what registers or firmware steps the
 adapter needs.
@@ -223,7 +229,7 @@ an application adds its own configuration surface.
 When debugging a new adapter, start with:
 
 ```sh
-cargo run -p openipc-native -- list-supported
-cargo run -p openipc-native -- probe
-cargo run -p openipc-native -- recv --key gs.key --rf-channel 161 --max-transfers 100
+cargo run -p openipc-cli -- list-supported
+cargo run -p openipc-cli -- probe
+cargo run -p openipc-cli -- recv --key gs.key --rf-channel 161 --max-transfers 100
 ```

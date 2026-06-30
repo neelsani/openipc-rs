@@ -19,7 +19,7 @@ sequenceDiagram
     Rx->>Adaptive: RSSI/SNR samples
     Rx->>Adaptive: FEC recovered/lost deltas
     Adaptive->>Adaptive: score, fec_change, IDR code
-    Adaptive->>Tx: encrypted WFB feedback on port 160
+    Adaptive->>Tx: encrypted WFB feedback on tunnel TX port 0xa0
     Tx->>Air: radiotap + 802.11 bulk OUT
 ```
 
@@ -53,7 +53,8 @@ The text is prefixed with a 32-bit big-endian length and then wrapped into a
 ```
 
 That payload is encrypted, FEC-wrapped, converted to radiotap plus 802.11, and
-sent through the Realtek bulk-OUT endpoint on WFB radio port 160.
+sent through the Realtek bulk-OUT endpoint on WFB tunnel/data uplink port
+`0xa0` (`160` decimal), not the telemetry uplink port `0x90`.
 
 ## What Adaptive Link Does Not Mean
 

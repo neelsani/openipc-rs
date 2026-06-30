@@ -11,52 +11,42 @@ OpenIPC video without taking a dependency on a specific USB frontend.
 
 - Parse Realtek rtl88xx USB RX aggregates and 24-byte RX descriptors.
 - Filter OpenIPC/WFB 802.11 frames by channel id and radio port.
-- Handle WFB session packets, data decryption, and FEC recovery.
-- Expose recovered non-video WFB payload bytes from MAVLink, data, or custom
-  radio ports without parsing those application protocols.
+- Handle WFB session packets, optional session TLVs, data decryption, and FEC
+  recovery.
+- Expose recovered non-video WFB payload bytes from telemetry, tunnel/data,
+  audio, or custom radio ports without parsing those application protocols.
 - Parse RTP and depacketize H.264/H.265 into Annex-B access units.
+- Expose RTP payload bytes for app-owned sinks such as UDP forwarding or Opus
+  audio decoding.
 - Build adaptive-link feedback payloads and WFB uplink packets.
-- Parse legacy/HT/VHT radiotap TX modes and build Realtek USB TX descriptors
-  for monitor-injection frames.
+- Build radiotap + 802.11 WFB transmit frames. Hardware crates add their own
+  USB/driver descriptors before transmission.
 
 ## Basic Receive Shape
 
 ```rust
 use openipc_core::{
-    parse_rx_aggregate, ChannelId, FrameLayout, PipelineEvent, ReceiverPipeline,
+    ChannelId, FrameLayout, PayloadRouteId, ReceiverBatchOptions, ReceiverRuntime,
     WfbKeypair,
 };
-use openipc_core::realtek::RxPacketType;
+
+const VIDEO_ROUTE: PayloadRouteId = PayloadRouteId::new(1);
 
 fn push_transfer(
-    pipeline: &mut ReceiverPipeline,
+    receiver: &mut ReceiverRuntime,
     transfer: &[u8],
 ) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
-    let mut frames = Vec::new();
-
-    for packet in parse_rx_aggregate(transfer)? {
-        if packet.attrib.pkt_rpt_type != RxPacketType::NormalRx {
-            continue;
-        }
-        if packet.attrib.crc_err || packet.attrib.icv_err {
-            continue;
-        }
-
-        for event in pipeline.push_80211_frame(packet.data)? {
-            if let PipelineEvent::VideoFrame(frame) = event {
-                frames.push(frame.data);
-            }
-        }
-    }
-
-    Ok(frames)
+    let batch = receiver.push_rx_transfer(transfer, &ReceiverBatchOptions::default())?;
+    Ok(batch.frames.into_iter().map(|frame| frame.data).collect())
 }
 
-fn pipeline_from_keypair(keypair_bytes: &[u8]) -> Result<ReceiverPipeline, Box<dyn std::error::Error>> {
+fn receiver_from_keypair(keypair_bytes: &[u8]) -> Result<ReceiverRuntime, Box<dyn std::error::Error>> {
     let keypair = WfbKeypair::from_bytes(keypair_bytes)?;
-    Ok(ReceiverPipeline::with_keypair(
-        ChannelId::default_video(),
+    Ok(ReceiverRuntime::with_keyed_video_route(
         FrameLayout::WithFcs,
+        VIDEO_ROUTE,
+        ChannelId::default_video(),
+        0,
         keypair,
         0,
     )?)
@@ -65,77 +55,146 @@ fn pipeline_from_keypair(keypair_bytes: &[u8]) -> Result<ReceiverPipeline, Box<d
 
 The returned frame data is still encoded video. Feed it to WebCodecs, a native
 decoder, a file writer, or an RTP/Annex-B bridge depending on your application.
+Long-running receivers should treat per-frame WFB errors as dropped packets and
+continue scanning the current USB aggregate.
 
-## Event Model
+## Payload Routes And RTP
 
-`ReceiverPipeline` emits every useful stage it observes:
+`PayloadPipeline` is the lower-level channel-recovery state machine in
+`openipc-core`. It emits recovered bytes after channel filtering, WFB session
+handling, decryption, and FEC. It does not parse RTP, MAVLink, MSP, CRSF, IP,
+vendor data, or any other application protocol.
 
-- `IgnoredFrame` means the frame did not match the configured channel or could
-  not be parsed for this pipeline.
-- `SessionEstablished` means a WFB session packet updated the decrypt/FEC
-  state.
-- `WfbPayload` means a decrypted and FEC-recovered payload fragment was
-  accepted on the video channel.
-- `RtpPacket` means the recovered payload parsed as RTP. This is useful if an
-  app wants to mirror RTP to UDP or inspect packet timing.
-- `VideoFrame` means one complete encoded Annex-B access unit is ready for a
-  decoder or file writer.
+Most apps should start with `ReceiverRuntime`. It wraps `PayloadRouteManager`
+and the RTP depacketizer used for the configured video route. The route manager
+keeps one runtime per `(channel_id, key_slot)` and attaches one or more route
+IDs to that runtime. This avoids decrypting and FEC-recovering the same channel
+twice when you want multiple outputs, such as local video display plus RTP
+forwarding.
 
-One input 802.11 frame can produce more than one event. For example, a recovered
-RTP packet can be emitted first, and if that packet completes an access unit the
-same call can also emit `VideoFrame`. That is intentional: apps can subscribe to
-the boundary they care about without reparsing the transfer.
-
-## Raw Payload Bytes
-
-Use `PayloadPipeline` when you want recovered bytes from a non-video WFB
-channel without RTP or video assumptions. The crate does not care whether those
-bytes are MAVLink, MSP, CRSF, IP, vendor data, or another protocol:
+For OpenIPC video, configure one video route. Recovered payloads on that route
+are treated as RTP and are turned into Annex-B H.264/H.265 frames. If you also
+want RTP forwarding, ask `ReceiverRuntime` to tap the same route as raw payload
+bytes:
 
 ```rust
-use openipc_core::{
-    ChannelId, FrameLayout, PayloadPipeline, PayloadPipelineEvent, RadioPort,
-    WfbKeypair,
-};
+use openipc_core::{PayloadRouteId, ReceiverBatchOptions, ReceiverRuntime};
 
-fn telemetry_pipeline(
-    keypair_bytes: &[u8],
-    port: RadioPort,
-) -> Result<PayloadPipeline, Box<dyn std::error::Error>> {
-    let keypair = WfbKeypair::from_bytes(keypair_bytes)?;
-    Ok(PayloadPipeline::with_keypair(
-        ChannelId::from_link_port(7669206, port),
-        FrameLayout::WithFcs,
-        keypair,
-        0,
-    )?)
-}
+const VIDEO_ROUTE: PayloadRouteId = PayloadRouteId::new(1);
 
-fn handle_packet(pipeline: &mut PayloadPipeline, frame: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-    for event in pipeline.push_80211_frame(frame)? {
-        if let PayloadPipelineEvent::Payload(payload) = event {
-            println!("raw telemetry bytes: {}", payload.data.len());
-        }
+fn receive_with_rtp_tap(
+    receiver: &mut ReceiverRuntime,
+    transfer: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let batch = receiver.push_rx_transfer(
+        transfer,
+        &ReceiverBatchOptions {
+            raw_payload_routes: vec![VIDEO_ROUTE],
+            ..ReceiverBatchOptions::default()
+        },
+    )?;
+
+    for rtp in batch.raw_payloads {
+        println!("RTP bytes: {}", rtp.data.len());
+    }
+    for frame in batch.frames {
+        println!("Annex-B frame bytes: {}", frame.data.len());
     }
     Ok(())
 }
 ```
 
-`RadioPort::MavlinkRx` is the observed OpenIPC MAVLink downlink port. Use
-`RadioPort::DataRx` or `RadioPort::Custom(n)` for other payload channels.
-`openipc-core` does not parse MAVLink or any other telemetry protocol.
-Applications can parse, display, record, or inspect those bytes later.
+Add another route for a non-video WFB channel when you want recovered telemetry,
+IP/VPN, or custom bytes:
+
+```rust
+use openipc_core::{
+    ChannelId, PayloadRouteId, RadioPort, ReceiverBatchOptions, ReceiverRuntime,
+    WfbKeypair,
+};
+
+const TELEMETRY_ROUTE: PayloadRouteId = PayloadRouteId::new(2);
+
+fn add_telemetry_route(
+    receiver: &mut ReceiverRuntime,
+    keypair_bytes: &[u8],
+    port: RadioPort,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let keypair = WfbKeypair::from_bytes(keypair_bytes)?;
+    receiver.add_keyed_route(
+        TELEMETRY_ROUTE,
+        ChannelId::from_link_port(7669206, port),
+        0,
+        keypair,
+        0,
+    )?;
+    Ok(())
+}
+
+fn handle_transfer(
+    receiver: &mut ReceiverRuntime,
+    transfer: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let batch = receiver.push_rx_transfer(
+        transfer,
+        &ReceiverBatchOptions {
+            raw_payload_routes: vec![TELEMETRY_ROUTE],
+            ..ReceiverBatchOptions::default()
+        },
+    )?;
+    for payload in batch.raw_payloads {
+        println!(
+            "route={} channel=0x{:08x} bytes={}",
+            payload.route_id.raw(),
+            payload.channel_id.raw(),
+            payload.data.len()
+        );
+    }
+    Ok(())
+}
+```
+
+`RadioPort::TelemetryRx` is OpenIPC's observed telemetry downlink port. That
+stream may contain MAVLink, MSP/OSD, or another router-specific payload. Use
+`RadioPort::TunnelRx`, `RadioPort::AudioRx`, or `RadioPort::Custom(n)` for other
+payload channels. `openipc-core` does not parse MAVLink or any other telemetry
+protocol. Applications can parse, display, record, or inspect those bytes later.
+
+Audio follows the same rule, with one extra helper. OpenIPC-documented audio is
+usually Opus RTP payload type 98 mixed into the main video RTP route. Use
+`ReceiverBatchOptions::rtp_payload_taps` to copy only that payload type while
+the video depacketizer keeps consuming the same route. Custom wfb-ng profiles
+can also carry audio on a separate route such as `RadioPort::AudioRx`.
+`openipc-core` still does not own audio playback; it only provides recovered RTP
+packet bytes and metadata.
+
+`RtpDepacketizer` is also conservative about fragmented video. If a fragmented
+H.264/H.265 RTP access unit has a sequence gap, the partial frame is dropped and
+the depacketizer waits for the next clean fragment start.
 
 ## Crate Boundaries
 
 `openipc-core` intentionally has no USB device ownership. Pair it with:
 
 - `openipc-rtl88xx` for native or WebUSB Realtek adapter IO.
-- `openipc-native` for a CLI-style native receive loop.
 - `openipc-web` or `@openipc-rs/web` for browser/WASM applications.
+- `apps/openipc-cli` for CLI-style native receive-loop examples.
 
 ## Status
 
 The protocol pipeline has unit tests for parser, crypto, FEC, RTP, and uplink
 helpers. Live radio behavior still depends on the USB driver and adapter
 validation in higher-level crates.
+
+An optional PixelPilot/wfb-ng reference test can compare Rust FEC output against
+PixelPilot's vendored `zfex.c` implementation:
+
+```sh
+OPENIPC_PIXELPILOT_REF=/path/to/PixelPilot \
+  cargo test -p openipc-core --test pixelpilot_reference -- --ignored --nocapture
+```
+
+The test builds a temporary C harness, generates PixelPilot parity/recovery
+vectors, and compares them with `FecCode` plus a WFB-shaped
+`PlainAssembler` recovery case. It is ignored by default so normal CI does not
+depend on a PixelPilot checkout or a C compiler.

@@ -3,6 +3,7 @@ use tauri::{plugin::PluginApi, AppHandle, Runtime};
 
 use crate::{models::*, Error};
 
+/// Initialize the desktop placeholder implementation.
 pub fn init<R: Runtime, C: DeserializeOwned>(
     app: &AppHandle<R>,
     _api: PluginApi<R, C>,
@@ -10,17 +11,20 @@ pub fn init<R: Runtime, C: DeserializeOwned>(
     Ok(OpenIpcUsb { _app: app.clone() })
 }
 
+/// Desktop placeholder for the Android-only USB permission bridge.
 pub struct OpenIpcUsb<R: Runtime> {
     _app: AppHandle<R>,
 }
 
 impl<R: Runtime> OpenIpcUsb<R> {
+    /// Return an error because desktop listing is handled directly with nusb.
     pub fn list_devices(&self) -> crate::Result<Vec<AndroidUsbDevice>> {
         Err(Error::Message(
             "Android USB discovery is only available in the Android Tauri runtime".to_owned(),
         ))
     }
 
+    /// Return an error because desktop opening is handled directly with nusb.
     pub fn open_device(
         &self,
         _request: AndroidUsbOpenRequest,
@@ -30,6 +34,7 @@ impl<R: Runtime> OpenIpcUsb<R> {
         ))
     }
 
+    /// No-op close for desktop, where the plugin does not own file descriptors.
     pub fn close_device(&self, _request: AndroidUsbCloseRequest) -> crate::Result<()> {
         Ok(())
     }

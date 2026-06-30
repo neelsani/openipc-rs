@@ -40,7 +40,7 @@ flowchart TD
     G --> H["OpenIpcReceiver.pushRxTransferProfiled"]
     H --> I["OpenIpcVideoFrame[]"]
     I --> J["WebCodecs VideoDecoder"]
-    H --> K["raw payload bytes"]
+    H --> K["selected raw route payloads"]
 ```
 
 1. React calls `navigator.usb.requestDevice` from a user gesture.
@@ -48,9 +48,10 @@ flowchart TD
 3. React passes that object to `WebUsbRealtekDevice.fromWebUsbDevice`.
 4. Rust/WASM uses `nusb` to claim interface 0 and discover endpoints.
 5. The shared Rust Realtek HAL initializes monitor mode and channel settings.
-6. Bulk-IN transfer bytes feed the same Rust receiver pipeline used by native.
-7. Rust/WASM returns structured video frames, recovered raw payload bytes for
-   the configured telemetry port, link metrics, and debug metrics.
+6. Bulk-IN transfer bytes feed the same Rust payload and RTP stages used by
+   native.
+7. Rust/WASM returns structured video frames, selected raw route payload bytes,
+   link metrics, and debug metrics.
 8. React sends frames to WebCodecs and renders the decoded output.
 
 ## What Crosses The JS/WASM Boundary
@@ -59,19 +60,23 @@ The browser path keeps high-volume protocol work in Rust:
 
 1. JavaScript passes one USB transfer buffer to `OpenIpcReceiver`.
 2. Rust parses Realtek descriptors, filters packets, decrypts WFB, performs FEC
-   recovery, parses RTP for the video channel, and emits encoded video frames.
-3. Rust also watches a non-video payload channel and returns recovered bytes
-   without parsing the application protocol. The current SDK names this
-   convenience output `mavlinkPayloads` because it defaults to the observed
-   OpenIPC MAVLink downlink port.
-4. JavaScript receives frame objects, raw telemetry payloads, and metrics, then
-   feeds compressed video bytes to WebCodecs.
+   recovery, then feeds video-channel payload bytes into the RTP depacketizer to
+   emit encoded video frames.
+3. Rust copies recovered payload bytes only for the route IDs requested by the
+   app. For mixed Opus audio, it can additionally copy only matching RTP payload
+   types, such as payload type 98 from the video route.
+4. JavaScript receives frame objects, raw route payloads, and metrics, then
+   feeds compressed video bytes to WebCodecs. When an Opus route is configured,
+   JavaScript strips the RTP header and feeds the Opus payload to WebCodecs
+   `AudioDecoder`.
 
-The app does not pass every RTP packet back and forth. It does pass each USB
-transfer into WASM, each completed encoded frame back out, and each recovered
-telemetry/data payload back out. That is the right boundary for the current
-browser design because WebCodecs owns the decoded `VideoFrame` lifecycle and
-telemetry parsing is left to application code.
+The app does not pass every video RTP packet back and forth unless it asks for
+an unfiltered raw tap on the video route. The default mixed-audio path uses a
+filtered RTP tap, so only Opus packets cross back to JavaScript. It still passes
+each USB transfer into WASM and each completed encoded frame back out. That is
+the right boundary for the current browser design because WebCodecs owns the
+decoded `VideoFrame` and `AudioData` lifecycles, while telemetry parsing is left
+to application code.
 
 ## WebCodecs Boundary
 

@@ -1,5 +1,14 @@
 use super::*;
 
+const VIDEO_ROUTE_ID: PayloadRouteId = PayloadRouteId::new(1);
+const DEFAULT_KEY_SLOT: u64 = 0;
+
+pub(crate) struct UdpRouteSink {
+    route_id: PayloadRouteId,
+    dest: SocketAddr,
+    socket: UdpSocket,
+}
+
 impl AdaptiveRuntime {
     fn record_rx(&mut self, now_ms: u64, attrib: &RxPacketAttrib) {
         self.sender.record_rx_paths(now_ms, attrib.rssi, attrib.snr);
@@ -52,6 +61,36 @@ impl AdaptiveRuntime {
     }
 }
 
+fn udp_route_sinks(routes: &[PayloadRouteRequest]) -> Result<Vec<UdpRouteSink>, String> {
+    let mut sinks = Vec::new();
+    for route in routes
+        .iter()
+        .filter(|route| route.action == PayloadRouteAction::Udp)
+    {
+        let host = route
+            .udp_host
+            .as_deref()
+            .filter(|host| !host.trim().is_empty())
+            .unwrap_or("127.0.0.1");
+        let port = route.udp_port.unwrap_or(5600);
+        let dest = format!("{host}:{port}")
+            .to_socket_addrs()
+            .map_err(|err| format!("invalid UDP destination for {}: {err}", route.name))?;
+        let dest = dest
+            .into_iter()
+            .next()
+            .ok_or_else(|| format!("invalid UDP destination for {}", route.name))?;
+        let socket = UdpSocket::bind("0.0.0.0:0")
+            .map_err(|err| format!("bind UDP sink for {} failed: {err}", route.name))?;
+        sinks.push(UdpRouteSink {
+            route_id: PayloadRouteId::new(route.route_id),
+            dest,
+            socket,
+        });
+    }
+    Ok(sinks)
+}
+
 pub(crate) fn run_rx_worker(
     app: AppHandle,
     device: Arc<RealtekDevice>,
@@ -67,20 +106,50 @@ pub(crate) fn run_rx_worker(
         .parse::<u64>()
         .map_err(|err| format!("invalid minimum epoch: {err}"))?;
     let keypair = WfbKeypair::from_bytes(&keypair_bytes).map_err(|err| err.to_string())?;
-    let mut pipeline = ReceiverPipeline::with_keypair(
+    let mut receiver = ReceiverRuntime::with_keyed_video_route(
+        FrameLayout::WithFcs,
+        VIDEO_ROUTE_ID,
         ChannelId::new(request.channel_id),
-        FrameLayout::WithFcs,
+        DEFAULT_KEY_SLOT,
         keypair,
         minimum_epoch,
     )
     .map_err(|err| err.to_string())?;
-    let mut mavlink_pipeline = PayloadPipeline::with_keypair(
-        ChannelId::from_link_port(request.channel_id >> 8, RadioPort::MavlinkRx),
-        FrameLayout::WithFcs,
-        keypair,
-        minimum_epoch,
-    )
-    .map_err(|err| err.to_string())?;
+    let enabled_routes: Vec<_> = request
+        .payload_routes
+        .iter()
+        .filter(|route| route.enabled)
+        .cloned()
+        .collect();
+    for route in &enabled_routes {
+        let route_id = PayloadRouteId::new(route.route_id);
+        if route_id == VIDEO_ROUTE_ID {
+            continue;
+        }
+        receiver
+            .add_keyed_route(
+                route_id,
+                ChannelId::new(route.channel_id),
+                DEFAULT_KEY_SLOT,
+                keypair,
+                minimum_epoch,
+            )
+            .map_err(|err| format!("invalid route {}: {err}", route.name))?;
+    }
+    let raw_payload_routes: Vec<PayloadRouteId> = enabled_routes
+        .iter()
+        .filter(|route| route.action != PayloadRouteAction::Audio)
+        .map(|route| PayloadRouteId::new(route.route_id))
+        .collect();
+    let rtp_payload_taps: Vec<RtpPayloadTap> = enabled_routes
+        .iter()
+        .filter(|route| route.action == PayloadRouteAction::Audio)
+        .map(|route| RtpPayloadTap {
+            route_id: PayloadRouteId::new(route.route_id),
+            payload_type: route.payload_type.unwrap_or(RTP_PAYLOAD_TYPE_OPUS),
+        })
+        .collect();
+    let udp_sinks = udp_route_sinks(&enabled_routes)?;
     let mut ep_in = device.bulk_in_endpoint().map_err(|err| err.to_string())?;
     let mut ep_out = if request.adaptive_enabled {
         Some(device.bulk_out_endpoint().map_err(|err| err.to_string())?)
@@ -106,7 +175,7 @@ pub(crate) fn run_rx_worker(
         Some(AdaptiveRuntime {
             sender: AdaptiveLinkSender::new(link_id, tx_keypair, 0, 1, 5)
                 .map_err(|err| err.to_string())?,
-            last_counters: pipeline.fec_counters(),
+            last_counters: receiver.video_fec_counters(),
             tx_options: RealtekTxOptions {
                 current_channel: request.rf_channel,
                 is_8814a: chip_family == ChipFamily::Rtl8814,
@@ -150,13 +219,15 @@ pub(crate) fn run_rx_worker(
             match build_rx_batch(
                 bytes,
                 RxBatchContext {
-                    pipeline: &mut pipeline,
-                    mavlink_pipeline: &mut mavlink_pipeline,
+                    receiver: &mut receiver,
                     adaptive: adaptive.as_mut(),
                     ep_out: ep_out.as_mut(),
                     now_ms,
                     usb_read_ms,
                     loop_start,
+                    raw_payload_routes: raw_payload_routes.as_slice(),
+                    rtp_payload_taps: rtp_payload_taps.as_slice(),
+                    udp_sinks: udp_sinks.as_slice(),
                 },
             ) {
                 Ok(batch) => {
@@ -196,79 +267,51 @@ pub(crate) fn build_rx_batch(
     let packets =
         parse_rx_aggregate(bytes).map_err(|err| format!("RX aggregate parse failed: {err}"))?;
     let parse_ms = elapsed_ms(parse_start);
-
-    let mut frames = Vec::new();
-    let mut mavlink_payloads = Vec::new();
-    let mut accepted_packets = 0usize;
-    let mut crc_dropped = 0usize;
-    let mut icv_dropped = 0usize;
-    let mut report_dropped = 0usize;
-    let mut ignored_frames = 0usize;
-    let mut sessions = 0usize;
-    let mut wfb_payloads = 0usize;
-    let mut rtp_packets = 0usize;
-    let mut video_frames = 0usize;
-    let mut mavlink_payload_count = 0usize;
-    let mut mavlink_bytes = 0usize;
     let mut adaptive_rx_ms = 0.0;
 
-    let pipeline_start = Instant::now();
-    let packet_count = packets.len();
-    for packet in packets {
-        if packet.attrib.crc_err {
-            crc_dropped += 1;
-            continue;
-        }
-        if packet.attrib.icv_err {
-            icv_dropped += 1;
-            continue;
-        }
-        if packet.attrib.pkt_rpt_type != RxPacketType::NormalRx {
-            report_dropped += 1;
-            continue;
-        }
-        accepted_packets += 1;
-
-        if let Some(runtime) = context.adaptive.as_deref_mut() {
+    if let Some(runtime) = context.adaptive.as_deref_mut() {
+        for packet in &packets {
+            if packet.attrib.crc_err
+                || packet.attrib.icv_err
+                || packet.attrib.pkt_rpt_type != RxPacketType::NormalRx
+            {
+                continue;
+            }
             let adaptive_rx_start = Instant::now();
-            if context.pipeline.accepts_80211_frame(packet.data) {
+            if context.receiver.accepts_video_frame(packet.data) {
                 runtime.record_rx(context.now_ms, &packet.attrib);
             }
             adaptive_rx_ms += elapsed_ms(adaptive_rx_start);
         }
+    }
 
-        if let Ok(events) = context.mavlink_pipeline.push_80211_frame(packet.data) {
-            for event in events {
-                if let PayloadPipelineEvent::Payload(payload) = event {
-                    mavlink_payload_count += 1;
-                    mavlink_bytes += payload.data.len();
-                    mavlink_payloads.push(raw_payload_payload(
-                        payload,
-                        context.mavlink_pipeline.channel_id(),
-                    ));
-                }
-            }
-        }
-
-        let events = context
-            .pipeline
-            .push_80211_frame(packet.data)
-            .map_err(|err| format!("OpenIPC frame rejected: {err}"))?;
-        for event in events {
-            match event {
-                PipelineEvent::IgnoredFrame => ignored_frames += 1,
-                PipelineEvent::SessionEstablished { .. } => sessions += 1,
-                PipelineEvent::WfbPayload { .. } => wfb_payloads += 1,
-                PipelineEvent::RtpPacket { .. } => rtp_packets += 1,
-                PipelineEvent::VideoFrame(frame) => {
-                    video_frames += 1;
-                    frames.push(video_frame_payload(frame));
-                }
-            }
+    let pipeline_start = Instant::now();
+    let batch = context.receiver.push_rx_packets(
+        packets,
+        &ReceiverBatchOptions {
+            raw_payload_routes: context.raw_payload_routes.to_vec(),
+            rtp_payload_taps: context.rtp_payload_taps.to_vec(),
+            ..ReceiverBatchOptions::default()
+        },
+    );
+    let pipeline_ms = elapsed_ms(pipeline_start);
+    let counters = batch.fec_counters;
+    let batch_counters = batch.counters;
+    for payload in &batch.raw_payloads {
+        for sink in context
+            .udp_sinks
+            .iter()
+            .filter(|sink| sink.route_id == payload.route_id)
+        {
+            let _ = sink.socket.send_to(&payload.data, sink.dest);
         }
     }
-    let pipeline_ms = elapsed_ms(pipeline_start);
-    let counters = context.pipeline.fec_counters();
+    let frames = batch.frames.into_iter().map(video_frame_payload).collect();
+    let raw_payloads: Vec<_> = batch
+        .raw_payloads
+        .into_iter()
+        .map(raw_payload_payload)
+        .collect();
 
     let mut link_quality = None;
     let mut adaptive_quality_ms = 0.0;
@@ -293,21 +336,24 @@ pub(crate) fn build_rx_batch(
 
     Ok(RxBatchPayload {
         frames,
-        mavlink_payloads,
+        raw_payloads: raw_payloads.clone(),
+        mavlink_payloads: raw_payloads,
         transfer_bytes: bytes.len(),
-        packets: packet_count,
-        accepted_packets,
-        dropped_packets: crc_dropped + icv_dropped + report_dropped,
-        crc_dropped,
-        icv_dropped,
-        report_dropped,
-        ignored_frames,
-        sessions,
-        wfb_payloads,
-        rtp_packets,
-        video_frames,
-        mavlink_payload_count,
-        mavlink_bytes,
+        packets: batch_counters.packets,
+        accepted_packets: batch_counters.accepted_packets,
+        dropped_packets: batch_counters.dropped_packets,
+        crc_dropped: batch_counters.crc_dropped,
+        icv_dropped: batch_counters.icv_dropped,
+        report_dropped: batch_counters.report_dropped,
+        ignored_frames: batch_counters.ignored_frames,
+        sessions: batch_counters.sessions,
+        wfb_payloads: batch_counters.wfb_payloads,
+        rtp_packets: batch_counters.rtp_packets,
+        video_frames: batch_counters.video_frames,
+        raw_payload_count: batch_counters.raw_payload_count,
+        raw_payload_bytes: batch_counters.raw_payload_bytes,
+        mavlink_payload_count: batch_counters.raw_payload_count,
+        mavlink_bytes: batch_counters.raw_payload_bytes,
         parse_ms,
         pipeline_ms,
         total_ms: elapsed_ms(context.loop_start),

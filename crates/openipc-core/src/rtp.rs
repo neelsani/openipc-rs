@@ -1,37 +1,63 @@
+/// Error returned while parsing or depacketizing RTP video.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RtpError {
+    /// Packet is shorter than the RTP fixed header or declared extension.
     TooShort,
+    /// RTP version was not 2.
     InvalidVersion(u8),
+    /// RTP extension header length is malformed.
     InvalidExtension,
+    /// RTP padding length is malformed.
     InvalidPadding,
+    /// Packet has no payload after header/extension/padding.
     EmptyPayload,
+    /// Payload could not be interpreted as H.264 or H.265.
     UnsupportedPayload,
+    /// Fragmented access unit exceeded the configured size guard.
     FragmentOverflow,
 }
 
+/// Encoded video codec carried by a depacketized frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Codec {
+    /// H.264/AVC video.
     H264,
+    /// H.265/HEVC video.
     H265,
 }
 
+/// Dynamic RTP payload type used by OpenIPC for H.264.
 pub const RTP_PAYLOAD_TYPE_H264: u8 = 96;
+/// Dynamic RTP payload type used by OpenIPC for H.265.
 pub const RTP_PAYLOAD_TYPE_H265: u8 = 97;
+/// Dynamic RTP payload type used by OpenIPC/Majestic for Opus audio.
+pub const RTP_PAYLOAD_TYPE_OPUS: u8 = 98;
 
+/// Parsed RTP header metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RtpHeader {
+    /// RTP marker bit, usually set at an access-unit boundary.
     pub marker: bool,
+    /// RTP payload type.
     pub payload_type: u8,
+    /// RTP sequence number.
     pub sequence_number: u16,
+    /// RTP timestamp.
     pub timestamp: u32,
+    /// RTP synchronization source.
     pub ssrc: u32,
+    /// Number of CSRC entries.
     pub csrc_count: u8,
+    /// True if the packet has an RTP header extension.
     pub has_extension: bool,
+    /// Header length including CSRC and extension bytes.
     pub header_len: usize,
+    /// Payload length after header and padding removal.
     pub payload_len: usize,
 }
 
 impl RtpHeader {
+    /// Parse an RTP header and validate extension/padding bounds.
     pub fn parse(packet: &[u8]) -> Result<Self, RtpError> {
         if packet.len() < 12 {
             return Err(RtpError::TooShort);
@@ -89,16 +115,22 @@ impl RtpHeader {
         })
     }
 
+    /// Borrow this packet's payload using the parsed header offsets.
     pub fn payload<'a>(&self, packet: &'a [u8]) -> &'a [u8] {
         &packet[self.header_len..self.header_len + self.payload_len]
     }
 }
 
+/// Encoded Annex-B H.264/H.265 access unit emitted by [`RtpDepacketizer`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DepacketizedFrame {
+    /// Annex-B byte stream data including start codes.
     pub data: Vec<u8>,
+    /// RTP timestamp associated with the access unit.
     pub timestamp: u32,
+    /// True when the frame contains an IDR/keyframe entry point.
     pub is_keyframe: bool,
+    /// Video codec for this frame.
     pub codec: Codec,
 }
 
@@ -106,8 +138,14 @@ pub struct DepacketizedFrame {
 struct FragmentState {
     data: Vec<u8>,
     timestamp: u32,
+    next_sequence: Option<u16>,
+    corrupted: bool,
 }
 
+/// Stateful RTP depacketizer for OpenIPC H.264/H.265 video.
+///
+/// The depacketizer buffers fragmented NAL units, drops incomplete fragments
+/// across sequence gaps, and emits complete Annex-B access units.
 #[derive(Debug, Clone)]
 pub struct RtpDepacketizer {
     h264: FragmentState,
@@ -127,6 +165,7 @@ impl Default for RtpDepacketizer {
 }
 
 impl RtpDepacketizer {
+    /// Create a depacketizer with the default fragment-size guard.
     pub fn new() -> Self {
         Self {
             h264: FragmentState::default(),
@@ -140,9 +179,13 @@ impl RtpDepacketizer {
         }
     }
 
+    /// Push one RTP packet and return a complete frame when one is ready.
     pub fn push(&mut self, packet: &[u8]) -> Result<Option<DepacketizedFrame>, RtpError> {
         let header = RtpHeader::parse(packet)?;
         let payload = header.payload(packet);
+        if header.payload_type == RTP_PAYLOAD_TYPE_OPUS {
+            return Err(RtpError::UnsupportedPayload);
+        }
         let codec = codec_from_payload_type(header.payload_type)
             .or_else(|| detect_codec(payload))
             .ok_or(RtpError::UnsupportedPayload)?;
@@ -168,7 +211,7 @@ impl RtpDepacketizer {
                 Ok(None)
             }
             24 => self.h264_stap_a(payload, header.timestamp),
-            28 => self.h264_fu_a(payload, header.timestamp),
+            28 => self.h264_fu_a(payload, header),
             _ if self.has_decoder_config(Codec::H264) => Ok(Some(self.frame_with_prefix(
                 payload,
                 header.timestamp,
@@ -202,7 +245,7 @@ impl RtpDepacketizer {
                 Ok(None)
             }
             48 => self.h265_ap(payload, header.timestamp),
-            49 => self.h265_fu(payload, header.timestamp),
+            49 => self.h265_fu(payload, header),
             _ if self.has_decoder_config(Codec::H265) => Ok(Some(self.frame_with_prefix(
                 payload,
                 header.timestamp,
@@ -216,7 +259,7 @@ impl RtpDepacketizer {
     fn h264_fu_a(
         &mut self,
         payload: &[u8],
-        timestamp: u32,
+        header: RtpHeader,
     ) -> Result<Option<DepacketizedFrame>, RtpError> {
         if payload.len() < 2 {
             return Err(RtpError::UnsupportedPayload);
@@ -228,22 +271,26 @@ impl RtpDepacketizer {
         let nal_type = fu_header & 0x1f;
         if start {
             self.h264.data.clear();
-            self.h264.timestamp = timestamp;
+            self.h264.timestamp = header.timestamp;
+            self.h264.next_sequence = Some(header.sequence_number.wrapping_add(1));
+            self.h264.corrupted = false;
             self.h264.data.push((fu_indicator & 0xe0) | nal_type);
+        } else if !self.accept_fragment_sequence(Codec::H264, header.sequence_number) {
+            return Ok(None);
         }
-        self.append_fragment(Codec::H264, &payload[2..])?;
+        if !self.h264.corrupted {
+            self.append_fragment(Codec::H264, &payload[2..])?;
+        }
         if end {
-            if !self.has_decoder_config(Codec::H264) {
-                self.h264.data.clear();
+            if self.h264.corrupted || !self.has_decoder_config(Codec::H264) {
+                self.reset_fragment(Codec::H264);
                 return Ok(None);
             }
             let data = self.h264.data.clone();
-            Ok(Some(self.frame_with_prefix(
-                &data,
-                self.h264.timestamp,
-                nal_type == 5,
-                Codec::H264,
-            )))
+            let frame =
+                self.frame_with_prefix(&data, self.h264.timestamp, nal_type == 5, Codec::H264);
+            self.reset_fragment(Codec::H264);
+            Ok(Some(frame))
         } else {
             Ok(None)
         }
@@ -252,7 +299,7 @@ impl RtpDepacketizer {
     fn h265_fu(
         &mut self,
         payload: &[u8],
-        timestamp: u32,
+        header: RtpHeader,
     ) -> Result<Option<DepacketizedFrame>, RtpError> {
         if payload.len() < 3 {
             return Err(RtpError::UnsupportedPayload);
@@ -263,26 +310,61 @@ impl RtpDepacketizer {
         let nal_type = fu_header & 0x3f;
         if start {
             self.h265.data.clear();
-            self.h265.timestamp = timestamp;
+            self.h265.timestamp = header.timestamp;
+            self.h265.next_sequence = Some(header.sequence_number.wrapping_add(1));
+            self.h265.corrupted = false;
             self.h265.data.push((nal_type << 1) | (payload[0] & 0x01));
             self.h265.data.push(payload[1]);
+        } else if !self.accept_fragment_sequence(Codec::H265, header.sequence_number) {
+            return Ok(None);
         }
-        self.append_fragment(Codec::H265, &payload[3..])?;
+        if !self.h265.corrupted {
+            self.append_fragment(Codec::H265, &payload[3..])?;
+        }
         if end {
-            if !self.has_decoder_config(Codec::H265) {
-                self.h265.data.clear();
+            if self.h265.corrupted || !self.has_decoder_config(Codec::H265) {
+                self.reset_fragment(Codec::H265);
                 return Ok(None);
             }
             let data = self.h265.data.clone();
-            Ok(Some(self.frame_with_prefix(
+            let frame = self.frame_with_prefix(
                 &data,
                 self.h265.timestamp,
                 (16..=23).contains(&nal_type),
                 Codec::H265,
-            )))
+            );
+            self.reset_fragment(Codec::H265);
+            Ok(Some(frame))
         } else {
             Ok(None)
         }
+    }
+
+    fn accept_fragment_sequence(&mut self, codec: Codec, sequence_number: u16) -> bool {
+        let state = match codec {
+            Codec::H264 => &mut self.h264,
+            Codec::H265 => &mut self.h265,
+        };
+        let Some(expected) = state.next_sequence else {
+            return false;
+        };
+        state.next_sequence = Some(sequence_number.wrapping_add(1));
+        if sequence_number != expected {
+            state.data.clear();
+            state.corrupted = true;
+            return false;
+        }
+        true
+    }
+
+    fn reset_fragment(&mut self, codec: Codec) {
+        let state = match codec {
+            Codec::H264 => &mut self.h264,
+            Codec::H265 => &mut self.h265,
+        };
+        state.data.clear();
+        state.next_sequence = None;
+        state.corrupted = false;
     }
 
     fn h264_stap_a(
@@ -574,6 +656,22 @@ mod tests {
     }
 
     #[test]
+    fn opus_payload_type_is_not_sniffed_as_video() {
+        let mut depay = RtpDepacketizer::new();
+        prime_h264(&mut depay);
+        let err = depay
+            .push(&rtp_with_payload_type(
+                &[0x65, 0xaa],
+                RTP_PAYLOAD_TYPE_OPUS,
+                true,
+                1,
+                42,
+            ))
+            .unwrap_err();
+        assert_eq!(err, RtpError::UnsupportedPayload);
+    }
+
+    #[test]
     fn depacketizes_h265_single_nalu_by_payload_type() {
         let mut depay = RtpDepacketizer::new();
         prime_h265(&mut depay);
@@ -639,5 +737,39 @@ mod tests {
             ]
             .concat()
         );
+    }
+
+    #[test]
+    fn drops_h264_fu_a_after_sequence_gap() {
+        let mut depay = RtpDepacketizer::new();
+        prime_h264(&mut depay);
+        assert!(depay
+            .push(&rtp(&[0x7c, 0x85, 1, 2], false, 10, 99))
+            .unwrap()
+            .is_none());
+        assert!(depay
+            .push(&rtp(&[0x7c, 0x45, 3, 4], true, 12, 99))
+            .unwrap()
+            .is_none());
+
+        assert!(depay
+            .push(&rtp(&[0x7c, 0x85, 5, 6], false, 13, 100))
+            .unwrap()
+            .is_none());
+        let frame = depay
+            .push(&rtp(&[0x7c, 0x45, 7, 8], true, 14, 100))
+            .unwrap()
+            .unwrap();
+        assert!(frame.data.ends_with(&[0, 0, 0, 1, 0x65, 5, 6, 7, 8]));
+    }
+
+    #[test]
+    fn drops_fragment_end_without_start() {
+        let mut depay = RtpDepacketizer::new();
+        prime_h264(&mut depay);
+        assert!(depay
+            .push(&rtp(&[0x7c, 0x45, 1, 2], true, 10, 99))
+            .unwrap()
+            .is_none());
     }
 }

@@ -16,15 +16,21 @@ const FIFO_PAGE_INFO_REGS_8814: [u16; 5] = [
     REG_FIFOPAGE_INFO_5_8814,
 ];
 
+/// Thermal-meter readout and EFUSE baseline comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThermalStatus {
+    /// Raw thermal-meter value.
     pub raw: u8,
+    /// EFUSE thermal baseline.
     pub baseline: u8,
+    /// Difference between raw and baseline.
     pub delta: i16,
+    /// True when the baseline was programmed and the reading is meaningful.
     pub valid: bool,
 }
 
 impl ThermalStatus {
+    /// Classify the thermal delta into a coarse UI/debug bucket.
     pub const fn bucket(self) -> ThermalBucket {
         if !self.valid {
             ThermalBucket::Unknown
@@ -40,30 +46,43 @@ impl ThermalStatus {
     }
 }
 
+/// Coarse thermal status bucket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThermalBucket {
+    /// Baseline or reading is not valid.
     Unknown,
+    /// Thermal delta is low.
     Cool,
+    /// Thermal delta is elevated but normal.
     Warm,
+    /// Thermal delta is high.
     Hot,
+    /// Thermal delta is critical.
     Critical,
 }
 
+/// Result of a BB debug-port read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BbDbgportRead {
+    /// Debug selector requested by the caller.
     pub selector: u32,
+    /// Value read back through the debug port.
     pub value: u32,
+    /// Selector value that was present before the read.
     pub saved_selector: u32,
+    /// True if the debug-port read indicates the chip is still responsive.
     pub chip_alive: bool,
 }
 
 impl RealtekDevice {
+    /// Read the RF thermal meter and compare it to EFUSE baseline data.
     pub async fn read_thermal_status_async(&self) -> Result<ThermalStatus, DriverError> {
         let chip = self.probe_chip_async().await?;
         let efuse = self.read_efuse_info_async(chip).await?;
         self.read_thermal_status_with_efuse_async(chip, efuse).await
     }
 
+    /// Read RTL8814A FIFO page depth registers for queue diagnostics.
     pub async fn read_queue_depth_8814_async(&self) -> Result<[u32; 5], DriverError> {
         let chip = self.probe_chip_async().await?;
         if chip.family != ChipFamily::Rtl8814 {
@@ -77,10 +96,12 @@ impl RealtekDevice {
         Ok(out)
     }
 
+    /// Read a masked baseband register.
     pub async fn read_bb_reg_async(&self, register: u16, mask: u32) -> Result<u32, DriverError> {
         self.query_bb_reg_async(register, mask).await
     }
 
+    /// Read a baseband debug-port selector and restore the previous selector.
     pub async fn read_bb_dbgport_async(&self, selector: u32) -> Result<BbDbgportRead, DriverError> {
         let saved_selector = self.read_u32_async(BB_DBGPORT_SELECTOR_REG).await?;
         self.write_u32_async(BB_DBGPORT_SELECTOR_REG, selector)

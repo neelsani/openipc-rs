@@ -4,14 +4,19 @@ use crate::types::{ChipFamily, ChipInfo, DriverError};
 
 const RF_REG_MASK: u32 = 0x000f_ffff;
 
+/// Report returned after an IQK calibration attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IqkReport {
+    /// Chip information used for the IQK path.
     pub chip: ChipInfo,
+    /// RF channel used for calibration.
     pub channel: u8,
+    /// True when the selected chip path actually ran IQK.
     pub ran: bool,
 }
 
 impl RealtekDevice {
+    /// Run IQK calibration for the selected chip/channel when supported.
     pub async fn run_iqk_async(
         &self,
         chip: ChipInfo,

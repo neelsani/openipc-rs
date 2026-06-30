@@ -34,14 +34,12 @@ pub(crate) fn video_frame_payload(frame: DepacketizedFrame) -> VideoFramePayload
     }
 }
 
-pub(crate) fn raw_payload_payload(
-    payload: openipc_core::RecoveredPayload,
-    channel_id: ChannelId,
-) -> RawPayloadPayload {
+pub(crate) fn raw_payload_payload(payload: openipc_core::RoutePayload) -> RawPayloadPayload {
     RawPayloadPayload {
         data_base64: BASE64.encode(&payload.data),
         packet_seq: payload.packet_seq.to_string(),
-        channel_id: channel_id.raw(),
+        route_id: payload.route_id.raw(),
+        channel_id: payload.channel_id.raw(),
     }
 }
 

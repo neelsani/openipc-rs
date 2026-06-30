@@ -21,7 +21,7 @@ material only; `openipc-rs` builds independently.
 openipc-rs/
   crates/openipc-core/        protocol, WFB, RTP, video, adaptive link
   crates/openipc-rtl88xx/     shared async Realtek rtl88xx USB/HAL driver
-  crates/openipc-native/      native CLI utilities
+  apps/openipc-cli/           native CLI utilities
   crates/openipc-web/         wasm-bindgen SDK
   apps/openipc-station/       browser and Tauri station UI
   plugins/tauri-plugin-openipc-usb/

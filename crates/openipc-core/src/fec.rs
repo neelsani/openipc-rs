@@ -6,12 +6,18 @@ const PRIMITIVE_POLY: &[u8; 9] = b"101110001";
 
 static GF_TABLES: OnceLock<GfTables> = OnceLock::new();
 
+/// Reed-Solomon FEC error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FecError {
+    /// FEC parameters are outside `0 < k <= n < 256`.
     InvalidParameters,
+    /// Fewer than `k` usable fragments were available.
     NotEnoughFragments,
+    /// A fragment index was outside the configured block.
     InvalidFragmentIndex(usize),
+    /// The decode matrix could not be inverted.
     SingularMatrix,
+    /// Recovered output did not match expected primary slots.
     OutputSlotMismatch,
 }
 
@@ -29,6 +35,7 @@ impl std::fmt::Display for FecError {
 
 impl std::error::Error for FecError {}
 
+/// Reed-Solomon FEC code used by WFB blocks.
 #[derive(Debug, Clone)]
 pub struct FecCode {
     k: usize,
@@ -37,8 +44,9 @@ pub struct FecCode {
 }
 
 impl FecCode {
+    /// Create an FEC code with `k` primary fragments and `n-k` parity fragments.
     pub fn new(k: usize, n: usize) -> Result<Self, FecError> {
-        if k == 0 || n == 0 || k > n || n > 256 {
+        if k == 0 || n == 0 || k > n || n >= 256 {
             return Err(FecError::InvalidParameters);
         }
 
@@ -71,14 +79,17 @@ impl FecCode {
         Ok(Self { k, n, enc_matrix })
     }
 
+    /// Return the number of primary fragments.
     pub const fn k(&self) -> usize {
         self.k
     }
 
+    /// Return the total number of primary plus parity fragments.
     pub const fn n(&self) -> usize {
         self.n
     }
 
+    /// Generate parity fragments for a full primary block.
     pub fn encode(&self, primary: &[Vec<u8>], block_size: usize) -> Result<Vec<Vec<u8>>, FecError> {
         if primary.len() != self.k || primary.iter().any(|fragment| fragment.len() < block_size) {
             return Err(FecError::InvalidParameters);
@@ -95,6 +106,7 @@ impl FecCode {
         Ok(fecs)
     }
 
+    /// Recover missing primary fragments in-place.
     pub fn recover_primary(
         &self,
         fragments: &mut [Option<Vec<u8>>],

@@ -1,4 +1,6 @@
+/// 802.11 data frame type used for ordinary injected payloads.
 pub const FRAME_TYPE_DATA: u8 = 0x08;
+/// 802.11 RTS frame type used by OpenIPC adaptive-link uplink packets.
 pub const FRAME_TYPE_RTS: u8 = 0xb4;
 
 const IEEE80211_RADIOTAP_MCS_HAVE_BW: u8 = 0x01;
@@ -20,19 +22,28 @@ const RADIOTAP_PRESENT_MCS: u32 = 1 << 19;
 const RADIOTAP_PRESENT_VHT: u32 = 1 << 21;
 const RADIOTAP_TX_FLAGS_NO_ACK: u16 = 0x0008;
 
+/// Length of the legacy-rate radiotap header built by this crate.
 pub const RADIOTAP_LEGACY_LEN: usize = 13;
+/// Length of the HT/MCS radiotap header built by this crate.
 pub const RADIOTAP_HT_LEN: usize = 13;
+/// Length of the VHT radiotap header built by this crate.
 pub const RADIOTAP_VHT_LEN: usize = 22;
 
+/// Channel bandwidth requested for an injected frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelBandwidth {
+    /// 20 MHz channel.
     Mhz20,
+    /// 40 MHz channel.
     Mhz40,
+    /// 80 MHz channel.
     Mhz80,
+    /// 160 MHz channel.
     Mhz160,
 }
 
 impl ChannelBandwidth {
+    /// Convert this bandwidth to the compact bit pattern used in Realtek TX descriptors.
     pub const fn realtek_desc_bits(self) -> u8 {
         match self {
             Self::Mhz20 => 0,
@@ -58,27 +69,42 @@ impl ChannelBandwidth {
     }
 }
 
+/// Physical-layer rate family for a transmit packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TxModeKind {
+    /// Legacy 802.11a/b/g rate.
     Legacy,
+    /// 802.11n HT MCS rate.
     Ht,
+    /// 802.11ac VHT MCS rate.
     Vht,
 }
 
+/// Parsed or requested TX mode for radiotap and Realtek descriptor generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TxMode {
+    /// Rate family.
     pub kind: TxModeKind,
+    /// Legacy rate in 500 kbps units, matching the radiotap rate field.
     pub legacy_rate_500kbps: u8,
+    /// HT MCS index for HT frames.
     pub ht_mcs: u8,
+    /// VHT MCS index for VHT frames.
     pub vht_mcs: u8,
+    /// VHT spatial stream count.
     pub vht_nss: u8,
+    /// Requested channel bandwidth.
     pub bandwidth: ChannelBandwidth,
+    /// Use short guard interval when supported.
     pub short_gi: bool,
+    /// Use LDPC coding when supported.
     pub ldpc: bool,
+    /// Use STBC when supported.
     pub stbc: bool,
 }
 
 impl TxMode {
+    /// Build a legacy TX mode from a radiotap 500 kbps rate value.
     pub const fn legacy(rate_500kbps: u8) -> Self {
         Self {
             kind: TxModeKind::Legacy,
@@ -93,14 +119,17 @@ impl TxMode {
         }
     }
 
+    /// Build the default OpenIPC legacy 6 Mbps TX mode.
     pub const fn legacy_6m() -> Self {
         Self::legacy(12)
     }
 
+    /// Build a legacy 1 Mbps TX mode.
     pub const fn legacy_1m() -> Self {
         Self::legacy(2)
     }
 
+    /// Build an HT TX mode with the supplied MCS index.
     pub const fn ht(mcs: u8) -> Self {
         Self {
             kind: TxModeKind::Ht,
@@ -115,6 +144,7 @@ impl TxMode {
         }
     }
 
+    /// Build a VHT TX mode with the supplied stream count and MCS index.
     pub const fn vht(nss: u8, mcs: u8) -> Self {
         Self {
             kind: TxModeKind::Vht,
@@ -136,19 +166,29 @@ impl Default for TxMode {
     }
 }
 
+/// Compact radio parameters used when building OpenIPC uplink radiotap headers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TxRadioParams {
+    /// MCS index for HT/VHT rates.
     pub mcs_index: u8,
+    /// Number of spatial streams for VHT rates.
     pub nss: u8,
+    /// Requested channel bandwidth.
     pub bandwidth: ChannelBandwidth,
+    /// Use short guard interval when supported.
     pub short_gi: bool,
+    /// STBC stream count encoded into radiotap.
     pub stbc: u8,
+    /// Use LDPC coding when supported.
     pub ldpc: bool,
+    /// Emit a VHT header instead of an HT header.
     pub vht: bool,
+    /// 802.11 frame type to use when wrapping WFB packets.
     pub frame_type: u8,
 }
 
 impl TxRadioParams {
+    /// Return the default OpenIPC adaptive-link uplink radio parameters.
     pub const fn openipc_uplink_default() -> Self {
         Self {
             mcs_index: 0,
@@ -169,21 +209,33 @@ impl Default for TxRadioParams {
     }
 }
 
+/// Decoded radiotap TX information in the older OpenIPC adaptive-link shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RadiotapTxInfo {
+    /// Whether this packet used VHT rather than HT/legacy radiotap fields.
     pub vht: bool,
+    /// MCS index when present.
     pub mcs_index: u8,
+    /// Number of spatial streams.
     pub nss: u8,
+    /// Channel bandwidth.
     pub bandwidth: ChannelBandwidth,
+    /// Whether short guard interval was requested.
     pub short_gi: bool,
+    /// STBC stream count.
     pub stbc: u8,
+    /// Whether LDPC coding was requested.
     pub ldpc: bool,
 }
 
+/// Error returned while parsing a radiotap TX header.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RadiotapError {
+    /// Packet is too short to contain the radiotap fixed header.
     TooShort,
+    /// Radiotap length field is zero, out of range, or inconsistent.
     InvalidLength,
+    /// The header uses fields this minimal parser does not support.
     UnsupportedHeader,
 }
 
@@ -199,6 +251,7 @@ impl std::fmt::Display for RadiotapError {
 
 impl std::error::Error for RadiotapError {}
 
+/// Build an HT or VHT radiotap header from compact OpenIPC TX parameters.
 pub fn build_radiotap_header(params: TxRadioParams) -> Vec<u8> {
     if params.vht {
         build_vht_radiotap_header(params)
@@ -207,6 +260,7 @@ pub fn build_radiotap_header(params: TxRadioParams) -> Vec<u8> {
     }
 }
 
+/// Build a radiotap header for a parsed or requested stream TX mode.
 pub fn build_stream_radiotap(mode: TxMode) -> Vec<u8> {
     match mode.kind {
         TxModeKind::Legacy => build_legacy_radiotap_header(mode),
@@ -232,6 +286,7 @@ pub fn build_stream_radiotap(mode: TxMode) -> Vec<u8> {
     }
 }
 
+/// Build a legacy-rate radiotap header.
 pub fn build_legacy_radiotap_header(mode: TxMode) -> Vec<u8> {
     vec![
         0x00,
@@ -250,6 +305,7 @@ pub fn build_legacy_radiotap_header(mode: TxMode) -> Vec<u8> {
     ]
 }
 
+/// Build an HT/MCS radiotap header.
 pub fn build_ht_radiotap_header(params: TxRadioParams) -> Vec<u8> {
     let known = IEEE80211_RADIOTAP_MCS_HAVE_MCS
         | IEEE80211_RADIOTAP_MCS_HAVE_BW
@@ -282,6 +338,7 @@ pub fn build_ht_radiotap_header(params: TxRadioParams) -> Vec<u8> {
     ]
 }
 
+/// Build a VHT radiotap header.
 pub fn build_vht_radiotap_header(params: TxRadioParams) -> Vec<u8> {
     let mut flags = 0u8;
     if params.stbc != 0 {
@@ -325,6 +382,7 @@ pub fn build_vht_radiotap_header(params: TxRadioParams) -> Vec<u8> {
     ]
 }
 
+/// Return the radiotap header length from a radiotap packet.
 pub fn radiotap_len(packet: &[u8]) -> Result<usize, RadiotapError> {
     if packet.len() < 4 {
         return Err(RadiotapError::TooShort);
@@ -336,6 +394,7 @@ pub fn radiotap_len(packet: &[u8]) -> Result<usize, RadiotapError> {
     Ok(len)
 }
 
+/// Parse a human-readable TX mode such as `6M`, `MCS0/SGI`, or `VHT1SS_MCS3/80`.
 pub fn parse_tx_mode_str(spec: &str) -> TxMode {
     let trimmed = spec
         .chars()
@@ -369,6 +428,7 @@ pub fn parse_tx_mode_str(spec: &str) -> TxMode {
     mode
 }
 
+/// Parse supported radiotap TX fields into a `TxMode`.
 pub fn parse_radiotap_tx_mode(packet: &[u8]) -> Result<Option<TxMode>, RadiotapError> {
     let len = radiotap_len(packet)?;
     if len < 8 || packet.len() < len {
@@ -444,6 +504,7 @@ pub fn parse_radiotap_tx_mode(packet: &[u8]) -> Result<Option<TxMode>, RadiotapE
     Ok(mode)
 }
 
+/// Parse supported radiotap TX fields into compact adaptive-link TX info.
 pub fn parse_radiotap_tx_info(packet: &[u8]) -> Result<RadiotapTxInfo, RadiotapError> {
     match parse_radiotap_tx_mode(packet)? {
         Some(mode) => Ok(RadiotapTxInfo {

@@ -1,11 +1,11 @@
+#[cfg(not(target_arch = "wasm32"))]
+use crate::tx::{build_usb_tx_frame, RealtekTxOptions};
 use nusb::descriptors::TransferType;
 #[cfg(not(target_arch = "wasm32"))]
 use nusb::transfer::{Buffer, Bulk, ControlIn, ControlOut, ControlType, In, Out, Recipient};
 #[cfg(not(target_arch = "wasm32"))]
 use nusb::MaybeFuture;
 use openipc_core::realtek::{parse_rx_aggregate, RealtekRxPacket};
-#[cfg(not(target_arch = "wasm32"))]
-use openipc_core::realtek_tx::{build_usb_tx_frame, RealtekTxOptions};
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::regs::*;
@@ -20,18 +20,26 @@ use crate::{
     PowerTrackingReport, PowerTrackingState, ThermalStatus,
 };
 
+/// Claimed Realtek rtl88xx USB adapter.
+///
+/// Use this type for native monitor-mode initialization, bulk receive, driver
+/// diagnostics, and adaptive-link transmit. Browser/WASM callers normally
+/// construct the same driver through the `openipc-web` WebUSB bindings.
 pub struct RealtekDevice {
     pub(crate) device: nusb::Device,
     pub(crate) interface: nusb::Interface,
     pub(crate) vendor_id: u16,
     pub(crate) product_id: u16,
+    /// Selected bulk-IN endpoint address.
     pub bulk_in_ep: u8,
+    /// Selected bulk-OUT endpoint address.
     pub bulk_out_ep: u8,
     pub(crate) bulk_out_ep_count: usize,
 }
 
 impl RealtekDevice {
     #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+    /// Open the first visible adapter matching [`DriverOptions`].
     pub fn open_first(options: DriverOptions) -> Result<Self, DriverError> {
         let info = nusb::list_devices()
             .wait()
@@ -51,6 +59,7 @@ impl RealtekDevice {
     }
 
     #[cfg(target_os = "android")]
+    /// Android does not support desktop enumeration; use `nusb::Device::from_fd`.
     pub fn open_first(_options: DriverOptions) -> Result<Self, DriverError> {
         Err(DriverError::Nusb(
             "Android USB discovery must use UsbManager and nusb::Device::from_fd".to_owned(),
@@ -58,6 +67,10 @@ impl RealtekDevice {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Build a driver from an already-open `nusb::Device`.
+    ///
+    /// This is the path used by Android after `UsbManager` grants permission
+    /// and the app passes a file descriptor to `nusb::Device::from_fd`.
     pub fn from_nusb_device(
         device: nusb::Device,
         options: DriverOptions,
@@ -96,11 +109,13 @@ impl RealtekDevice {
         })
     }
 
+    /// Return the USB connection speed reported by `nusb`, if known.
     pub fn device_speed(&self) -> Option<nusb::Speed> {
         self.device.speed()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Probe chip family, RF path count, and cut version from hardware.
     pub fn probe_chip(&self) -> Result<ChipInfo, DriverError> {
         let sys_cfg = self.read_u32(REG_SYS_CFG)?;
         Ok(ChipInfo::from_probe(
@@ -111,11 +126,13 @@ impl RealtekDevice {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Initialize the adapter for OpenIPC monitor-mode receive.
     pub fn initialize_monitor(&self, radio: RadioConfig) -> Result<InitReport, DriverError> {
         block_on_ready(self.initialize_monitor_async(radio, false))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Initialize monitor mode with explicit bring-up options.
     pub fn initialize_monitor_with_options(
         &self,
         radio: RadioConfig,
@@ -125,6 +142,7 @@ impl RealtekDevice {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Initialize monitor mode while controlling bad-FCS acceptance.
     pub fn initialize_monitor_accept_bad_fcs(
         &self,
         radio: RadioConfig,
@@ -134,6 +152,7 @@ impl RealtekDevice {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Open and clear the selected bulk-IN endpoint.
     pub fn bulk_in_endpoint(&self) -> Result<nusb::Endpoint<Bulk, In>, DriverError> {
         let mut ep = self
             .interface
@@ -146,6 +165,7 @@ impl RealtekDevice {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Open and clear the selected bulk-OUT endpoint.
     pub fn bulk_out_endpoint(&self) -> Result<nusb::Endpoint<Bulk, Out>, DriverError> {
         let mut ep = self
             .interface
@@ -158,6 +178,7 @@ impl RealtekDevice {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Build a Realtek TX descriptor for a radiotap+802.11 packet and send it.
     pub fn send_packet(
         &self,
         radiotap_packet: &[u8],
@@ -179,21 +200,25 @@ impl RealtekDevice {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Override the Realtek TXAGC index used for adaptive-link uplink packets.
     pub fn set_tx_power_override(&self, current_channel: u8, power: u8) -> Result<(), DriverError> {
         block_on_ready(self.set_tx_power_override_async(current_channel, power))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Read current thermal status.
     pub fn read_thermal_status(&self) -> Result<ThermalStatus, DriverError> {
         block_on_ready(self.read_thermal_status_async())
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Read RTL8814 queue-depth diagnostics.
     pub fn read_queue_depth_8814(&self) -> Result<[u32; 5], DriverError> {
         block_on_ready(self.read_queue_depth_8814_async())
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Read several bulk-IN transfers with multiple URBs in flight.
     pub fn read_rx_transfers(
         &self,
         length: usize,
@@ -203,26 +228,31 @@ impl RealtekDevice {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Read a baseband register through the Realtek PHY helpers.
     pub fn read_bb_reg(&self, register: u16, mask: u32) -> Result<u32, DriverError> {
         block_on_ready(self.read_bb_reg_async(register, mask))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Read a value through the baseband debug port.
     pub fn read_bb_dbgport(&self, selector: u32) -> Result<BbDbgportRead, DriverError> {
         block_on_ready(self.read_bb_dbgport_async(selector))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Read PHY false-alarm counters.
     pub fn read_false_alarm_counters(&self) -> Result<FalseAlarmCounters, DriverError> {
         block_on_ready(self.read_false_alarm_counters_async())
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Run IQK calibration for the selected chip/channel.
     pub fn run_iqk(&self, chip: ChipInfo, channel: u8) -> Result<IqkReport, DriverError> {
         block_on_ready(self.run_iqk_async(chip, channel))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Run one PHYDM watchdog/DIG update tick.
     pub fn run_phydm_watchdog_tick(
         &self,
         state: &mut PhydmDigState,
@@ -231,6 +261,7 @@ impl RealtekDevice {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Initialize RTL8812 thermal power tracking state.
     pub fn init_power_tracking_8812(
         &self,
         state: &mut PowerTrackingState,
@@ -239,6 +270,7 @@ impl RealtekDevice {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Clear RTL8812 thermal power tracking state.
     pub fn clear_power_tracking_8812(
         &self,
         state: &mut PowerTrackingState,
@@ -247,6 +279,7 @@ impl RealtekDevice {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Run one RTL8812 thermal power tracking update tick.
     pub fn tick_power_tracking_8812(
         &self,
         state: &mut PowerTrackingState,
@@ -257,6 +290,7 @@ impl RealtekDevice {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Send a radiotap+802.11 packet using an already-open bulk-OUT endpoint.
     pub fn send_packet_on(
         ep: &mut nusb::Endpoint<Bulk, Out>,
         radiotap_packet: &[u8],
@@ -268,6 +302,7 @@ impl RealtekDevice {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Send a fully-built Realtek USB TX frame on an existing endpoint.
     pub fn send_usb_tx_frame_on(
         ep: &mut nusb::Endpoint<Bulk, Out>,
         usb_frame: &[u8],
@@ -279,6 +314,7 @@ impl RealtekDevice {
         Ok(completion.actual_len)
     }
 
+    /// Parse a Realtek RX aggregate using the shared core parser.
     pub fn parse_rx_transfer<'a>(
         &self,
         transfer: &'a [u8],
@@ -287,6 +323,7 @@ impl RealtekDevice {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Perform a Realtek vendor control read.
     pub fn read_register(&self, register: u16, len: u16) -> Result<Vec<u8>, DriverError> {
         self.interface
             .control_in(
@@ -305,6 +342,7 @@ impl RealtekDevice {
     }
 
     #[cfg(target_arch = "wasm32")]
+    /// Blocking vendor reads are unavailable on WASM; use async WebUSB APIs.
     pub fn read_register(&self, register: u16, _len: u16) -> Result<Vec<u8>, DriverError> {
         Err(DriverError::Nusb(format!(
             "blocking vendor read 0x{register:04x} is unavailable on wasm"
@@ -312,6 +350,7 @@ impl RealtekDevice {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Perform a Realtek vendor control write.
     pub fn write_register(&self, register: u16, bytes: &[u8]) -> Result<(), DriverError> {
         self.interface
             .control_out(
@@ -332,12 +371,14 @@ impl RealtekDevice {
     }
 
     #[cfg(target_arch = "wasm32")]
+    /// Blocking vendor writes are unavailable on WASM; use async WebUSB APIs.
     pub fn write_register(&self, register: u16, _bytes: &[u8]) -> Result<(), DriverError> {
         Err(DriverError::Nusb(format!(
             "blocking vendor write 0x{register:04x} is unavailable on wasm"
         )))
     }
 
+    /// Read an 8-bit little-endian register value.
     pub fn read_u8(&self, register: u16) -> Result<u8, DriverError> {
         let bytes = self.read_register(register, 1)?;
         bytes.first().copied().ok_or(DriverError::RegisterReadSize {
@@ -346,6 +387,7 @@ impl RealtekDevice {
         })
     }
 
+    /// Read a 16-bit little-endian register value.
     pub fn read_u16(&self, register: u16) -> Result<u16, DriverError> {
         let bytes = self.read_register(register, 2)?;
         let array: [u8; 2] =
@@ -359,6 +401,7 @@ impl RealtekDevice {
         Ok(u16::from_le_bytes(array))
     }
 
+    /// Read a 32-bit little-endian register value.
     pub fn read_u32(&self, register: u16) -> Result<u32, DriverError> {
         let bytes = self.read_register(register, 4)?;
         let array: [u8; 4] =
@@ -372,14 +415,17 @@ impl RealtekDevice {
         Ok(u32::from_le_bytes(array))
     }
 
+    /// Write an 8-bit register value.
     pub fn write_u8(&self, register: u16, value: u8) -> Result<(), DriverError> {
         self.write_register(register, &[value])
     }
 
+    /// Write a 16-bit little-endian register value.
     pub fn write_u16(&self, register: u16, value: u16) -> Result<(), DriverError> {
         self.write_register(register, &value.to_le_bytes())
     }
 
+    /// Write a 32-bit little-endian register value.
     pub fn write_u32(&self, register: u16, value: u32) -> Result<(), DriverError> {
         self.write_register(register, &value.to_le_bytes())
     }

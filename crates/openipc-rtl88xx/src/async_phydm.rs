@@ -21,32 +21,55 @@ const DIG_MIN: u8 = 0x1c;
 const DIG_MAX: u8 = 0x26;
 const DIG_MAX_OF_MIN: u8 = 0x2a;
 
+/// PHY false-alarm and CRC counters used by DIG/watchdog logic.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FalseAlarmCounters {
+    /// OFDM false-alarm fail count.
     pub cnt_ofdm_fail: u32,
+    /// CCK false-alarm fail count.
     pub cnt_cck_fail: u32,
+    /// OFDM clear-channel assessment count.
     pub cnt_ofdm_cca: u32,
+    /// CCK clear-channel assessment count.
     pub cnt_cck_cca: u32,
+    /// CCK CRC OK count.
     pub cnt_cck_crc32_ok: u32,
+    /// CCK CRC error count.
     pub cnt_cck_crc32_error: u32,
+    /// OFDM CRC OK count.
     pub cnt_ofdm_crc32_ok: u32,
+    /// OFDM CRC error count.
     pub cnt_ofdm_crc32_error: u32,
+    /// HT CRC OK count.
     pub cnt_ht_crc32_ok: u32,
+    /// HT CRC error count.
     pub cnt_ht_crc32_error: u32,
+    /// VHT CRC OK count.
     pub cnt_vht_crc32_ok: u32,
+    /// VHT CRC error count.
     pub cnt_vht_crc32_error: u32,
+    /// Combined false-alarm count.
     pub cnt_all: u32,
+    /// Combined CCA count.
     pub cnt_cca_all: u32,
 }
 
+/// State carried between PHYDM DIG watchdog ticks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhydmDigState {
+    /// True after the first initialization tick.
     pub initialized: bool,
+    /// Current initial-gain index.
     pub cur_ig_value: u8,
+    /// Configured minimum DIG value.
     pub dm_dig_min: u8,
+    /// Configured maximum DIG value.
     pub dm_dig_max: u8,
+    /// DIG max-of-min clamp value.
     pub dig_max_of_min: u8,
+    /// Current RX gain range minimum.
     pub rx_gain_range_min: u8,
+    /// Current RX gain range maximum.
     pub rx_gain_range_max: u8,
 }
 
@@ -64,14 +87,19 @@ impl Default for PhydmDigState {
     }
 }
 
+/// Report from one PHYDM watchdog/DIG tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhydmWatchdogReport {
+    /// False-alarm counters sampled during the tick.
     pub counters: FalseAlarmCounters,
+    /// Initial-gain value before the tick.
     pub previous_igi: u8,
+    /// Initial-gain value after the tick.
     pub current_igi: u8,
 }
 
 impl RealtekDevice {
+    /// Read PHY false-alarm and CRC counters used by DIG/watchdog logic.
     pub async fn read_false_alarm_counters_async(&self) -> Result<FalseAlarmCounters, DriverError> {
         let _ = self
             .query_bb_reg_async(REG_OFDM_FA_TYPE1, B_MASK_DWORD)
@@ -140,6 +168,7 @@ impl RealtekDevice {
         })
     }
 
+    /// Reset PHY false-alarm counters after a watchdog sample.
     pub async fn reset_false_alarm_counters_async(&self) -> Result<(), DriverError> {
         self.set_bb_reg_async(0x09a4, BIT17, 1).await?;
         self.set_bb_reg_async(0x09a4, BIT17, 0).await?;
@@ -149,6 +178,7 @@ impl RealtekDevice {
         self.set_bb_reg_async(0x0b58, BIT0, 0).await
     }
 
+    /// Initialize dynamic initial-gain state from the current baseband register.
     pub async fn init_phydm_dig_async(&self, state: &mut PhydmDigState) -> Result<(), DriverError> {
         state.cur_ig_value = self.query_bb_reg_async(0x0c50, 0xff).await? as u8;
         state.dm_dig_min = DIG_MIN;
@@ -160,6 +190,7 @@ impl RealtekDevice {
         Ok(())
     }
 
+    /// Run one PHYDM/DIG watchdog tick and apply the next initial-gain value.
     pub async fn run_phydm_watchdog_tick_async(
         &self,
         state: &mut PhydmDigState,

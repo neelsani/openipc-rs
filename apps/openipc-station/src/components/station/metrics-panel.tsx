@@ -136,6 +136,46 @@ export function MetricsPanel({ api }: { api: StationApi }) {
 
       <div>
         <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Routes / Audio
+        </h4>
+        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+          <Graph
+            label="Audio packets"
+            value={`${ser.audioPackets[ser.audioPackets.length - 1] || 0}/s`}
+            data={ser.audioPackets}
+            color="var(--chart-1)"
+          />
+          <Graph
+            label="Audio queue"
+            value={`${Math.round(state.audio.queuedMs)} ms`}
+            data={ser.audioQueue}
+            color="var(--chart-3)"
+          />
+        </div>
+        {state.routeStats.length > 0 && (
+          <div className="mt-2 overflow-hidden rounded-lg border border-border">
+            <table className="w-full font-mono text-[11px]">
+              <tbody>
+                {state.routeStats.map((route) => (
+                  <tr key={route.routeId} className="border-t border-border first:border-t-0">
+                    <td className="px-2 py-1 text-foreground">{route.name}</td>
+                    <td className="px-2 py-1 text-muted-foreground">{route.action}</td>
+                    <td className="px-2 py-1 text-right text-muted-foreground">
+                      {route.packets.toLocaleString()} pkt
+                    </td>
+                    <td className="px-2 py-1 text-right text-muted-foreground">
+                      {route.lastBytes} B
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div>
+        <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
           Latency
         </h4>
         <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">

@@ -2251,6 +2251,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
+name = "openipc-cli"
+version = "0.1.18"
+dependencies = [
+ "nusb-webusb",
+ "openipc-core",
+ "openipc-rtl88xx",
+]
+
+[[package]]
 name = "openipc-core"
 version = "0.1.18"
 dependencies = [
@@ -2260,15 +2269,6 @@ dependencies = [
  "poly1305 0.9.0",
  "rand_core",
  "subtle",
-]
-
-[[package]]
-name = "openipc-native"
-version = "0.1.18"
-dependencies = [
- "nusb-webusb",
- "openipc-core",
- "openipc-rtl88xx",
 ]
 
 [[package]]

@@ -1,6 +1,36 @@
 import type { Config } from "@docusaurus/types";
 import type * as Preset from "@docusaurus/preset-classic";
 
+const REPO_URL = "https://github.com/neelsani/openipc-rs";
+
+function clean(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function buildInfo() {
+  const enabled = clean(process.env.OPENIPC_BUILD_METADATA) === "true";
+  const commit = enabled
+    ? (clean(process.env.OPENIPC_GIT_COMMIT)?.slice(0, 40) ?? null)
+    : null;
+  const shortCommit =
+    commit === null
+      ? null
+      : (clean(process.env.OPENIPC_GIT_SHORT_COMMIT) ?? commit.slice(0, 7));
+
+  return {
+    commit,
+    shortCommit,
+    tag: commit === null ? null : clean(process.env.OPENIPC_GIT_TAG),
+    dirty: false,
+    repoUrl: REPO_URL,
+    commitUrl: commit ? `${REPO_URL}/commit/${commit}` : REPO_URL,
+  };
+}
+
 const config: Config = {
   title: "openipc-rs",
   tagline: "Rust crates, WebUSB SDK, and station app for OpenIPC video",
@@ -11,6 +41,9 @@ const config: Config = {
 
   organizationName: "neelsani",
   projectName: "openipc-rs",
+  customFields: {
+    buildInfo: buildInfo(),
+  },
 
   onBrokenLinks: "throw",
   markdown: {
@@ -65,6 +98,10 @@ const config: Config = {
           sidebarId: "mainSidebar",
           position: "left",
           label: "Docs",
+        },
+        {
+          type: "custom-buildInfo",
+          position: "right",
         },
         {
           href: "https://github.com/neelsani/openipc-rs",

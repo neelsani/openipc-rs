@@ -26,6 +26,46 @@
   --ifm-background-surface-color: #171a1d;
 }
 
+.navbarBuildInfo {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  height: 1.8rem;
+  margin-inline: 0.25rem;
+  border: 1px solid var(--ifm-color-emphasis-300);
+  border-radius: 999px;
+  padding: 0 0.55rem;
+  color: var(--ifm-color-emphasis-700);
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.76rem;
+  font-weight: 650;
+  line-height: 1;
+  text-decoration: none;
+}
+
+.navbarBuildInfo:hover {
+  color: var(--ifm-navbar-link-hover-color);
+  text-decoration: none;
+  background: var(--ifm-color-emphasis-100);
+}
+
+.navbarBuildInfo__icon {
+  width: 0.9rem;
+  height: 0.9rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
+.navbarBuildInfo__tag {
+  border-radius: 999px;
+  padding: 0.12rem 0.38rem;
+  background: color-mix(in srgb, var(--ifm-color-primary) 16%, transparent);
+  color: var(--ifm-color-primary);
+}
+
 .homePage {
   background: var(--ifm-background-color);
 }

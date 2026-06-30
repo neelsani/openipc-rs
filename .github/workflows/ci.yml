@@ -18,6 +18,12 @@ concurrency:
 
 env:
     CARGO_TERM_COLOR: always
+    OPENIPC_BUILD_METADATA: ${{ github.event_name == 'push' && 'true' || 'false' }}
+    OPENIPC_GIT_COMMIT: ${{ github.sha }}
+    OPENIPC_GIT_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+    VITE_OPENIPC_BUILD_METADATA: ${{ github.event_name == 'push' && 'true' || 'false' }}
+    VITE_OPENIPC_GIT_COMMIT: ${{ github.sha }}
+    VITE_OPENIPC_GIT_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
 
 jobs:
     rust:

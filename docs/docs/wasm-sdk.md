@@ -112,13 +112,13 @@ The Rust core uses `ReceiverRuntime` with an internal `PayloadRouteManager` to
 keep one WFB runtime per channel/key slot and fan recovered payloads out by
 route ID.
 
-## Opus Audio Route
+## Audio Route
 
-Station can play Opus when the air unit sends Opus RTP packets. The common
-OpenIPC setup mixes Opus RTP payload type 98 into the main video RTP route, so
-the WASM SDK exposes filtered RTP taps: Rust copies only the selected payload
-type back to JavaScript while the video depacketizer keeps consuming the same
-route.
+Station can play audio when the air unit sends a supported RTP audio codec. The
+currently implemented decoder path is Opus. The common OpenIPC setup mixes Opus
+RTP payload type 98 into the main video RTP route, so the WASM SDK exposes
+filtered RTP taps: Rust copies only the selected payload type back to JavaScript
+while the video depacketizer keeps consuming the same route.
 
 Opus RTP is simple: once the RTP header is removed, the remaining bytes are the
 Opus payload. Convert RTP timestamps with the fixed Opus RTP clock rate of
@@ -153,8 +153,8 @@ for (const payload of batch.rawPayloads) {
 ```
 
 `parseRtp` and `rtpTimestampToUs` are small app-side helpers. The station app
-keeps them outside the WASM SDK so apps can choose their own payload type,
-clocking, queueing, and audio output strategy.
+keeps them outside the WASM SDK so apps can choose their own codec, payload
+type, clocking, queueing, and audio output strategy.
 For a separate wfb-ng audio profile, register `AUDIO_ROUTE` against that audio
 channel id instead of `channelId`.
 

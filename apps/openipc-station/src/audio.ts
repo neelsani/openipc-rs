@@ -1,4 +1,4 @@
-import type { AudioStats } from "@/lib/types";
+import type { AudioCodecPreference, AudioStats } from "@/lib/types";
 
 export type RtpPacketView = {
   payloadType: number;
@@ -144,6 +144,7 @@ export class OpusAudioPlayer {
     packet: Uint8Array,
     options: {
       enabled: boolean;
+      codec: AudioCodecPreference;
       payloadType: number;
       sampleRate: number;
       channels: number;
@@ -153,6 +154,7 @@ export class OpusAudioPlayer {
     if (!rtp || rtp.payloadType !== options.payloadType) {
       return false;
     }
+    const codec = resolveAudioCodec(options.codec, rtp.payloadType);
 
     this.statsValue.enabled = options.enabled;
     this.statsValue.packets += 1;
@@ -161,8 +163,14 @@ export class OpusAudioPlayer {
       this.publish();
       return true;
     }
+    if (codec !== "opus") {
+      this.statsValue.supported = false;
+      this.statsValue.decoderName = `Audio codec unknown`;
+      this.publish();
+      return true;
+    }
 
-    const configured = await this.configure(options.sampleRate, options.channels);
+    const configured = await this.configure(codec, options.sampleRate, options.channels);
     if (!configured || !this.decoder) {
       this.publish();
       return true;
@@ -185,8 +193,12 @@ export class OpusAudioPlayer {
     return true;
   }
 
-  private async configure(sampleRate: number, channels: number): Promise<boolean> {
-    const key = `${sampleRate}:${channels}`;
+  private async configure(
+    codec: "opus",
+    sampleRate: number,
+    channels: number,
+  ): Promise<boolean> {
+    const key = `${codec}:${sampleRate}:${channels}`;
     if (this.decoder && this.decoderKey === key) {
       return true;
     }
@@ -197,7 +209,7 @@ export class OpusAudioPlayer {
     }
 
     const config: AudioDecoderConfig = {
-      codec: "opus",
+      codec,
       sampleRate,
       numberOfChannels: channels,
     };
@@ -340,4 +352,14 @@ export class OpusAudioPlayer {
 
 function messageFrom(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function resolveAudioCodec(
+  preference: AudioCodecPreference,
+  payloadType: number,
+): "opus" | null {
+  if (preference === "opus") {
+    return "opus";
+  }
+  return payloadType === 98 ? "opus" : null;
 }

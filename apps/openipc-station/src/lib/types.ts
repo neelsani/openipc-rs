@@ -159,6 +159,7 @@ export type Settings = {
 };
 
 export type PayloadRouteAction = "inspect" | "log" | "udp" | "audio";
+export type AudioCodecPreference = "auto" | "opus";
 
 export type PayloadRouteConfig = {
   id: number;
@@ -166,6 +167,7 @@ export type PayloadRouteConfig = {
   name: string;
   channelId: string;
   action: PayloadRouteAction;
+  audioCodec?: AudioCodecPreference;
   payloadType?: number;
   udpHost?: string;
   udpPort?: number;

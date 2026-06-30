@@ -806,6 +806,7 @@ export function useOpenIpcRuntime() {
       if (route.action === "audio") {
         const matched = await audioPlayer().pushRtpPacket(payload.data, {
           enabled: route.enabled,
+          codec: route.audioCodec ?? "auto",
           payloadType: route.payloadType ?? RTP_PAYLOAD_TYPE_OPUS,
           sampleRate: route.sampleRate ?? 48_000,
           channels: route.channels ?? 1,

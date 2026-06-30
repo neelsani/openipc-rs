@@ -462,6 +462,10 @@ export function SettingsPanel({ api }: { api: StationApi }) {
                           .value as PayloadRouteConfig["action"];
                         patchRoute(route.id, {
                           action,
+                          audioCodec:
+                            action === "audio"
+                              ? (route.audioCodec ?? "auto")
+                              : route.audioCodec,
                           payloadType:
                             action === "audio"
                               ? (route.payloadType ?? RTP_PAYLOAD_TYPE_OPUS)
@@ -472,7 +476,7 @@ export function SettingsPanel({ api }: { api: StationApi }) {
                     >
                       <option value="inspect">Inspect</option>
                       <option value="log">Log</option>
-                      <option value="audio">Opus audio</option>
+                      <option value="audio">Audio</option>
                       <option value="udp" disabled={!udpAvailable}>
                         UDP forward{udpAvailable ? "" : " (native only)"}
                       </option>
@@ -482,7 +486,25 @@ export function SettingsPanel({ api }: { api: StationApi }) {
 
                 {route.action === "audio" && (
                   <div className="mt-2 space-y-2">
-                    <div className="grid grid-cols-3 gap-2">
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                      <label className="space-y-1">
+                        <span className="text-[10px] text-muted-foreground">
+                          Codec
+                        </span>
+                        <select
+                          value={route.audioCodec ?? "auto"}
+                          onChange={(event) =>
+                            patchRoute(route.id, {
+                              audioCodec: event.target
+                                .value as PayloadRouteConfig["audioCodec"],
+                            })
+                          }
+                          className="w-full rounded-md border border-border bg-input/40 px-2 py-1 text-xs text-foreground"
+                        >
+                          <option value="auto">Auto</option>
+                          <option value="opus">Opus</option>
+                        </select>
+                      </label>
                       <label className="space-y-1">
                         <span className="text-[10px] text-muted-foreground">
                           RTP PT

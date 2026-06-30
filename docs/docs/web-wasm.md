@@ -63,20 +63,21 @@ The browser path keeps high-volume protocol work in Rust:
    recovery, then feeds video-channel payload bytes into the RTP depacketizer to
    emit encoded video frames.
 3. Rust copies recovered payload bytes only for the route IDs requested by the
-   app. For mixed Opus audio, it can additionally copy only matching RTP payload
-   types, such as payload type 98 from the video route.
+   app. For mixed audio, it can additionally copy only matching RTP payload
+   types, such as the documented OpenIPC Opus payload type 98 from the video
+   route.
 4. JavaScript receives frame objects, raw route payloads, and metrics, then
-   feeds compressed video bytes to WebCodecs. When an Opus route is configured,
-   JavaScript strips the RTP header and feeds the Opus payload to WebCodecs
+   feeds compressed video bytes to WebCodecs. When an audio route is configured,
+   JavaScript strips the RTP header and feeds the codec payload to WebCodecs
    `AudioDecoder`.
 
 The app does not pass every video RTP packet back and forth unless it asks for
 an unfiltered raw tap on the video route. The default mixed-audio path uses a
-filtered RTP tap, so only Opus packets cross back to JavaScript. It still passes
-each USB transfer into WASM and each completed encoded frame back out. That is
-the right boundary for the current browser design because WebCodecs owns the
-decoded `VideoFrame` and `AudioData` lifecycles, while telemetry parsing is left
-to application code.
+filtered RTP tap, so only matching audio packets cross back to JavaScript. It
+still passes each USB transfer into WASM and each completed encoded frame back
+out. That is the right boundary for the current browser design because WebCodecs
+owns the decoded `VideoFrame` and `AudioData` lifecycles, while telemetry
+parsing is left to application code.
 
 ## WebCodecs Boundary
 

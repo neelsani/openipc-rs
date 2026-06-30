@@ -58,8 +58,9 @@ video-only overlay in the Tauri app, so the OSD stays visible in both modes.
   describe mixed video/audio.
 - Link HUD, metrics graphs, latency diagnostics, and logs.
 - Route manager for extra WFB payload outputs. Routes can inspect bytes, log a
-  throttled summary, forward to UDP in native/Tauri mode, or play filtered Opus
-  RTP with WebCodecs `AudioDecoder`.
+  throttled summary, forward to UDP in native/Tauri mode, or play filtered audio
+  RTP with WebCodecs `AudioDecoder`. The current implemented audio codec is
+  Opus, with an Auto mode for the documented OpenIPC payload type 98 stream.
 - Raw route counters and audio metrics. Protocol parsing beyond video/audio is
   intentionally left to app code or downstream integrations.
 

@@ -17,8 +17,8 @@ the frame stop moving?
 - RTP packets and extracted Annex-B frames.
 - Raw payload count and recovered route bytes for configured telemetry, data,
   RTP mirror, or audio routes.
-- Opus audio packets, decoded audio frames, audio queue depth, and audio
-  decoder errors when an audio route is enabled.
+- Audio packets, decoded audio frames, queue depth, and decoder errors when an
+  audio route is enabled. The current decoder implementation is Opus.
 - WebCodecs decoder name, codec string, resolution, decode errors, and render
   FPS.
 - WebCodecs capability probe: `VideoDecoder`, `EncodedVideoChunk`, H.264, H.265,
@@ -73,7 +73,7 @@ failure boundary.
 | Video works but no raw payloads      | Air unit is not sending on the expected route channel, that channel's session packet has not arrived, or the link id/key does not match.       |
 | WFB payloads but no video frames     | RTP packetization issue, unsupported payload type, codec fragmentation issue, or waiting for a keyframe/access unit.                           |
 | Video frames but black output        | WebCodecs unsupported codec/config, decoder reset, or no keyframe yet.                                                                         |
-| Raw audio packets but no audio       | Wrong RTP payload type, WebCodecs `AudioDecoder` lacks Opus support, muted/suspended AudioContext, or unsupported channel/sample-rate config.  |
+| Raw audio packets but no audio       | Wrong RTP payload type or codec setting, WebCodecs `AudioDecoder` lacks Opus support, muted/suspended AudioContext, or unsupported channel/sample-rate config. |
 | Good decode FPS but low render FPS   | Canvas/rendering path or recording overhead.                                                                                                   |
 
 ## Logs

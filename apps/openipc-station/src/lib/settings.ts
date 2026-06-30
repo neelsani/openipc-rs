@@ -175,6 +175,7 @@ export const DEFAULT_PAYLOAD_ROUTES: PayloadRouteConfig[] = [
     name: "Mixed RTP audio",
     channelId: channelIdForRadioPort(0x00),
     action: "audio",
+    audioCodec: "auto",
     payloadType: RTP_PAYLOAD_TYPE_OPUS,
     sampleRate: 48_000,
     channels: 1,
@@ -375,6 +376,12 @@ export function sanitizePayloadRoutes(value: unknown): PayloadRouteConfig[] {
             ? source.channelId.trim()
             : DEFAULT_CHANNEL_ID,
         action,
+        audioCodec:
+          source.audioCodec === "opus" || source.audioCodec === "auto"
+            ? source.audioCodec
+            : action === "audio"
+              ? "auto"
+              : undefined,
         payloadType:
           source.payloadType === undefined
             ? action === "audio"

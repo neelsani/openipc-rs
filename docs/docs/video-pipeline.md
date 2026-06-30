@@ -82,11 +82,12 @@ should not stop the receive loop.
 
 Non-video WFB channels use the same payload recovery machinery and stop at
 recovered bytes. Add another route for MAVLink, MSP, CRSF, data ports, or custom
-radio ports. Opus audio can either be a separate wfb-ng audio route or a
-filtered RTP tap on the main video route for payload type 98. The station route
-manager can inspect bytes, log a throttled summary, forward them over UDP in
-native/Tauri mode, or decode Opus RTP in the browser frontend. It does not parse
-MAVLink messages.
+radio ports. Audio can either be a separate wfb-ng audio route or a filtered RTP
+tap on the main video route. The station route manager can inspect bytes, log a
+throttled summary, forward them over UDP in native/Tauri mode, or decode audio
+RTP in the browser frontend. The currently implemented audio decoder is Opus;
+Auto mode recognizes the documented OpenIPC Opus payload type 98 stream. It does
+not parse MAVLink messages.
 
 ## Annex-B Frames
 
@@ -121,9 +122,8 @@ flowchart LR
 
 ## Recording
 
-The station records rendered video from the canvas. When an Opus route or
+The station records rendered video from the canvas. When an audio route or
 filtered mixed-audio tap is enabled and the browser/WebView can decode it, the
-Opus audio mix is attached to the same `MediaRecorder` stream. That means
-recording captures what the frontend actually played, not the raw RF stream.
-For protocol debugging, use the native CLI to write Annex-B output or save USB
-captures.
+audio mix is attached to the same `MediaRecorder` stream. That means recording
+captures what the frontend actually played, not the raw RF stream. For protocol
+debugging, use the native CLI to write Annex-B output or save USB captures.

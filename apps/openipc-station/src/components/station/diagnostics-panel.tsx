@@ -92,7 +92,7 @@ export function DiagnosticsPanel({ api }: { api: StationApi }) {
               <Health ok={v.rtpPackets > 0} label="RTP packets arriving" />
               <Health
                 ok={!state.audio.enabled || state.audio.supported}
-                label="Opus audio decoder"
+                label="Audio decoder"
               />
               <Health ok={v.videoFrames > 0} label="Video frames extracted" />
               <Health

@@ -101,8 +101,8 @@ apps should prefer `withKeypairOnly(...)`, `addKeyedRoute(...)`, and
 
 The underlying Rust core is generic: `ReceiverRuntime` uses route IDs for
 configured WFB channels and can expose raw payload bytes for telemetry,
-tunnel/data, RTP mirroring, Opus audio, or custom channel IDs. Parse MAVLink,
-MSP, CRSF, IP, Opus, or vendor data in your app layer.
+tunnel/data, RTP mirroring, audio, or custom channel IDs. Parse MAVLink, MSP,
+CRSF, IP, audio codecs, or vendor data in your app layer.
 
 Use `fromWebUsbDeviceWithOptions(device, txEndpointOverride)` if a hardware
 variant needs a specific bulk-OUT endpoint. Pass `-1` for the default endpoint
@@ -259,13 +259,14 @@ while (running) {
 }
 ```
 
-## Opus Audio
+## Audio
 
 OpenIPC audio is commonly Opus RTP payload type 98 mixed into the main video RTP
 route. Use the filtered RTP tap API to copy only those packets back to
 JavaScript while Rust continues depacketizing H.264/H.265 video from the same
 route. If you use a custom wfb-ng profile with a separate audio radio port,
-register that route id and tap payload type 98 on that route instead.
+register that route id and tap payload type on that route instead. The station
+currently implements Opus decoding; its Auto mode recognizes payload type 98.
 
 Opus has no extra RTP depacketization step here: after the RTP header is
 removed, the remaining bytes are the Opus payload for `EncodedAudioChunk`.

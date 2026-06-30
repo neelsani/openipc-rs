@@ -153,6 +153,12 @@ impl RealtekDevice {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Best-effort monitor-mode shutdown for chips that need explicit deinit.
+    pub fn shutdown_monitor(&self) -> Result<(), DriverError> {
+        block_on_ready(self.shutdown_monitor_async())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     /// Open and clear the selected bulk-IN endpoint.
     pub fn bulk_in_endpoint(&self) -> Result<nusb::Endpoint<Bulk, In>, DriverError> {
         let mut ep = self

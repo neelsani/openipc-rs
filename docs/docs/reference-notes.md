@@ -124,3 +124,31 @@ feed them into `RtpDepacketizer` for Annex-B output.
 PixelPilot is also a useful reminder that playback is a product feature, not
 just a parser feature. Resolution, decoder status, render FPS, bitrate, and
 error counters need to be visible when debugging field behavior.
+
+### PixelPilot Parity Checklist
+
+The Rust core and Station app intentionally match PixelPilot at the wire
+boundaries:
+
+- `0x08 0x01` 802.11 data frames with mirrored `57:42:<channel_id>` source and
+  destination fields;
+- 24-byte 802.11 headers and trailing 4-byte FCS removed before WFB parsing;
+- one WFB session/FEC state machine per `(channel_id, key slot)`;
+- session packets accepted only for the configured channel and non-decreasing
+  epoch;
+- repeated session packets with the same session key ignored without resetting
+  the FEC assembler;
+- WFB VDM Reed-Solomon FEC with the same primary/parity block semantics as
+  wfb-ng;
+- video RTP payload types `96` for H.264 and `97` for H.265;
+- Opus RTP payload type `98`, either mixed into the video route or carried by
+  the optional audio profile route;
+- adaptive-link feedback on tunnel uplink port `0xa0`, wrapped as IPv4/UDP to
+  `10.5.0.10:9999`, with the same `fec_change` thresholds as PixelPilot.
+
+The scheduling is different by design. PixelPilot uses native threads and UDP
+handoffs between its USB/WFB layer and player. `openipc-rs` keeps the same bytes
+in memory: the native/Tauri worker or browser/WebUSB loop pushes RX transfers
+into `ReceiverRuntime`, then the app forwards raw route payloads or feeds
+Annex-B frames to WebCodecs. That difference should improve latency and reduce
+copies without changing the protocol behavior.

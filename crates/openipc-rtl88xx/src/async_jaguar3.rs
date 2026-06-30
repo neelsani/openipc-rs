@@ -158,6 +158,12 @@ impl RealtekDevice {
         })
     }
 
+    pub(crate) async fn shutdown_monitor_jaguar3_async(&self) -> Result<(), DriverError> {
+        self.write_u16_async(REG_CR, 0x0000).await?;
+        self.write_u32_async(REG_RCR, 0x0000_0000).await?;
+        self.power_off_8822c_async().await
+    }
+
     async fn pre_init_system_cfg_8822c_async(&self) -> Result<(), DriverError> {
         self.write_u8_async(REG_RSV_CTRL, 0).await?;
         if self.read_u8_async(REG_SYS_CFG2 + 3).await.unwrap_or(0) == 0x20 {

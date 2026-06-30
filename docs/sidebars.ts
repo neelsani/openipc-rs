@@ -20,7 +20,12 @@ const sidebars: SidebarsConfig = {
     {
       type: "category",
       label: "Protocol And Hardware",
-      items: ["video-pipeline", "adaptive-link", "realtek-driver"],
+      items: [
+        "video-pipeline",
+        "adaptive-link",
+        "realtek-driver",
+        "devourer-parity",
+      ],
     },
     {
       type: "category",

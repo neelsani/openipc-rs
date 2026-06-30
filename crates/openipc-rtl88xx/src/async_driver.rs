@@ -190,6 +190,27 @@ impl RealtekDevice {
         })
     }
 
+    /// Best-effort monitor-mode shutdown.
+    ///
+    /// This mirrors devourer's explicit Jaguar3 `Stop()` path: halt TRX, close
+    /// the receive filter, and run the card-disable power sequence so the USB
+    /// adapter can re-enumerate cleanly after sustained monitor/TX use. Older
+    /// Jaguar1-family chips do not currently need extra shutdown writes here.
+    pub async fn shutdown_monitor_async(&self) -> Result<(), DriverError> {
+        let chip = self.probe_chip_async().await?;
+        self.shutdown_monitor_for_chip_async(chip).await
+    }
+
+    pub(crate) async fn shutdown_monitor_for_chip_async(
+        &self,
+        chip: ChipInfo,
+    ) -> Result<(), DriverError> {
+        match chip.family {
+            ChipFamily::Rtl8822c => self.shutdown_monitor_jaguar3_async().await,
+            ChipFamily::Rtl8812 | ChipFamily::Rtl8814 | ChipFamily::Rtl8821 => Ok(()),
+        }
+    }
+
     /// Read one USB bulk-IN transfer from the receive endpoint.
     #[cfg(target_arch = "wasm32")]
     pub async fn read_rx_transfer_async(&self, length: usize) -> Result<Vec<u8>, DriverError> {

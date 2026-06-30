@@ -78,28 +78,34 @@ const initReport = await radio.initializeMonitorWithOptions(
 );
 console.log(initReport.chip, initReport.status);
 
-while (running) {
-  if (radio.rxDescriptorKind() === "jaguar3") {
-    await radio.runJaguar3CoexKeepalive();
-    await jaguar3Power?.tick(radio);
-  }
-  const transfers = await radio.readRxTransfers(32768, 4);
-  for (const transfer of transfers) {
-    const batch = receiver.pushRxTransferProfiledWithRouteIds(
-      transfer,
-      false,
-      new Uint32Array([2]),
-    );
-    for (const frame of batch.frames) {
-      // frame.data is encoded H.264/H.265 Annex-B data.
-      // Feed it into WebCodecs as an EncodedVideoChunk.
+try {
+  while (running) {
+    if (radio.rxDescriptorKind() === "jaguar3") {
+      await radio.runJaguar3CoexKeepalive();
+      await jaguar3Power?.tick(radio);
     }
+    const transfers = await radio.readRxTransfers(32768, 4);
+    for (const transfer of transfers) {
+      const batch = receiver.pushRxTransferProfiledWithRouteIds(
+        transfer,
+        false,
+        new Uint32Array([2]),
+      );
+      for (const frame of batch.frames) {
+        // frame.data is encoded H.264/H.265 Annex-B data.
+        // Feed it into WebCodecs as an EncodedVideoChunk.
+      }
 
-    for (const payload of batch.rawPayloads) {
-      // payload.data is raw recovered bytes for the requested route.
-      // The SDK does not parse MAVLink/MSP/CRSF/IP/vendor data for you.
-      console.log(payload.routeId, payload.channelId.toString(16), payload.data.byteLength);
+      for (const payload of batch.rawPayloads) {
+        // payload.data is raw recovered bytes for the requested route.
+        // The SDK does not parse MAVLink/MSP/CRSF/IP/vendor data for you.
+        console.log(payload.routeId, payload.channelId.toString(16), payload.data.byteLength);
+      }
     }
+  }
+} finally {
+  if (radio.rxDescriptorKind() === "jaguar3") {
+    await radio.shutdownMonitor().catch(() => undefined);
   }
 }
 ```

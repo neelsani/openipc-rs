@@ -82,27 +82,33 @@ const jaguar3Power =
 const initReport = await radio.initializeMonitor(36, 20, 0);
 console.log(initReport.chip, initReport.status);
 
-while (true) {
+try {
+  while (true) {
+    if (radio.rxDescriptorKind() === "jaguar3") {
+      await radio.runJaguar3CoexKeepalive();
+      await jaguar3Power?.tick(radio);
+    }
+    const transfer = await radio.readRxTransfer(32768);
+    const batch = receiver.pushRxTransferProfiledWithRouteIds(
+      transfer,
+      false,
+      new Uint32Array([2]),
+    );
+
+    for (const frame of batch.frames) {
+      // frame.data is encoded Annex-B H.264/H.265.
+      console.log(frame.codec, frame.data.byteLength, frame.isKeyFrame);
+    }
+
+    for (const payload of batch.rawPayloads) {
+      // payload.data is raw recovered bytes from the requested route.
+      // The SDK does not parse MAVLink, MSP, or other telemetry messages.
+      console.log(payload.routeId, payload.packetSeq, payload.data.byteLength);
+    }
+  }
+} finally {
   if (radio.rxDescriptorKind() === "jaguar3") {
-    await radio.runJaguar3CoexKeepalive();
-    await jaguar3Power?.tick(radio);
-  }
-  const transfer = await radio.readRxTransfer(32768);
-  const batch = receiver.pushRxTransferProfiledWithRouteIds(
-    transfer,
-    false,
-    new Uint32Array([2]),
-  );
-
-  for (const frame of batch.frames) {
-    // frame.data is encoded Annex-B H.264/H.265.
-    console.log(frame.codec, frame.data.byteLength, frame.isKeyFrame);
-  }
-
-  for (const payload of batch.rawPayloads) {
-    // payload.data is raw recovered bytes from the requested route.
-    // The SDK does not parse MAVLink, MSP, or other telemetry messages.
-    console.log(payload.routeId, payload.packetSeq, payload.data.byteLength);
+    await radio.shutdownMonitor().catch(() => undefined);
   }
 }
 ```

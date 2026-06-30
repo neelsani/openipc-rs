@@ -22,7 +22,7 @@ lists.
 - Jaguar3 RTL8812CU/RTL8822CU support from devourer: PIDs `0bda:c812`,
   `0bda:c82c`, `0bda:c82e`, 48-byte TX descriptors with checksum, Jaguar3 RX
   descriptor parsing, firmware/table loading, 5/10 MHz channel widths, and
-  WiFi-only coex keepalive hooks.
+  WiFi-only coex keepalive plus clean shutdown hooks.
 - EFUSE logical-map parsing for MAC address, RFE type, amplifier flags, TX BB
   swing values, thermal baseline, and TX-power PG blocks.
 - RFE-aware MAC/BB/RF table loading, including conditional RF table entries.
@@ -85,6 +85,7 @@ fn receive_one_transfer() -> Result<(), Box<dyn std::error::Error>> {
         bulk_in.submit(completion.buffer);
     }
 
+    let _ = device.shutdown_monitor();
     Ok(())
 }
 ```
@@ -146,9 +147,9 @@ backend.
 
 Jaguar3 note: the Rust driver tracks devourer's RTL8812CU/RTL8822CU cold-start
 path for firmware, tables, descriptors, narrowband tuning, TX power override,
-DACK/IQK, thermal-power/LCK tracking, and coex keepalive. That still needs
-cold-plug register-trace comparison and sustained on-air testing before this
-family should be called fully validated on real hardware.
+DACK/IQK, thermal-power/LCK tracking, coex keepalive, and monitor shutdown.
+That still needs cold-plug register-trace comparison and sustained on-air
+testing before this family should be called fully validated on real hardware.
 
 One naming caveat: the native `*_async` methods are async-shaped compatibility
 APIs around blocking `nusb` calls (`wait` and blocking bulk transfers). They are

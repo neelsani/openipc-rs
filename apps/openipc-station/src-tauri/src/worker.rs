@@ -417,6 +417,11 @@ pub(crate) fn run_rx_worker(
         ep_in.submit(completion.buffer);
     }
 
+    drop(ep_in);
+    drop(ep_out);
+    if let Err(err) = device.shutdown_monitor() {
+        emit_log(&app, "warn", format!("monitor shutdown failed: {err}"));
+    }
     emit_stopped(&app, "stopped", "Native RX loop stopped".to_owned());
     Ok(())
 }

@@ -266,6 +266,7 @@ declare module "@openipc/wasm" {
       firmware8814Mode: string,
       firmware8814Chunk: number,
     ): Promise<WebInitReport>;
+    shutdownMonitor(): Promise<void>;
     readRxTransfer(length: number): Promise<Uint8Array>;
     readRxTransfers(length: number, inFlight: number): Promise<Uint8Array[]>;
     writeTxTransfer(data: Uint8Array): Promise<number>;

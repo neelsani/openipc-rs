@@ -82,7 +82,7 @@ Platform-specific filters are derived from this table:
 - Jaguar3 RTL8812CU/RTL8822CU firmware download, MAC/USB setup, RFE-aware
   BB/AGC/RF tables, 24-byte RX descriptor parsing, 48-byte checksummed TX
   descriptor construction, 5/10 MHz narrowband channel setup, and WiFi-only
-  coex/H2C keepalive hooks,
+  coex/H2C keepalive hooks plus clean monitor shutdown,
 - EFUSE logical-map parsing for MAC address, RFE type, amplifier flags, TX BB
   swing bytes, thermal baseline, and TX-power PG blocks,
 - LLT/page setup and queue/FIFO setup,
@@ -222,10 +222,10 @@ Current status:
   supported PIDs, descriptor layouts, firmware download, MAC/USB setup,
   generated BB/AGC/RF/cal-init tables, 5/10 MHz narrowband retiming, monitor
   filters, TX descriptor checksum, TX power override, DACK, IQK,
-  thermal-power/LCK tracking, and coex/H2C keepalive are implemented. This is
-  still not a substitute for hardware proof: RTL8812CU/RTL8822CU should only be
-  called on-air validated after cold-plug register traces and sustained TX/RX
-  runs match devourer on real adapters.
+  thermal-power/LCK tracking, coex/H2C keepalive, and devourer-style clean
+  shutdown are implemented. This is still not a substitute for hardware proof:
+  RTL8812CU/RTL8822CU should only be called on-air validated after cold-plug
+  register traces and sustained TX/RX runs match devourer on real adapters.
 - Newer devourer runtime TX-mode behavior is mirrored: radiotap RATE/MCS/VHT
   wins, a programmatic default can fill rate-less packets, 5 GHz CCK TX is
   clamped to OFDM, and the newer 8812/8821/8814 descriptor differences are
@@ -251,3 +251,6 @@ cargo run -p openipc-cli -- list-supported
 cargo run -p openipc-cli -- probe
 cargo run -p openipc-cli -- recv --key gs.key --rf-channel 161 --max-transfers 100
 ```
+
+For the detailed source-to-source audit checklist, see
+[Devourer Parity Audit](devourer-parity.md).

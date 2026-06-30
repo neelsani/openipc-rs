@@ -31,10 +31,11 @@ sequenceDiagram
 - WFB FEC recovered and lost counters,
 - packet-loss events that should request an IDR/keyframe burst.
 
-The scoring logic is intentionally close to aviateur and the standalone
-`adaptive-link` receiver tools: keep a short window of signal/FEC state, turn it
-into a quality score, and periodically send that score back over the uplink
-radio port.
+The scoring logic follows the working PixelPilot/OpenIPC shape where it matters
+on the wire: Realtek raw RSSI is mapped into the `1000..2000` score range, FEC
+loss/recovery deltas drive `fec_change`, and the packet is sent periodically on
+the tunnel uplink. The app still exposes raw RSSI and SNR separately so the UI
+can show the underlying radio data rather than only the score.
 
 ## Feedback Format
 
@@ -55,6 +56,19 @@ The text is prefixed with a 32-bit big-endian length and then wrapped into a
 That payload is encrypted, FEC-wrapped, converted to radiotap plus 802.11, and
 sent through the Realtek bulk-OUT endpoint on WFB tunnel/data uplink port
 `0xa0` (`160` decimal), not the telemetry uplink port `0x90`.
+
+The default `fec_change` thresholds match PixelPilot:
+
+| Condition                           | `fec_change` |
+| ----------------------------------- | ------------ |
+| lost packets in the last second > 2 | 5            |
+| recovered packets > 30              | 4            |
+| recovered packets > 24              | 3            |
+| recovered packets > 14              | 2            |
+| recovered packets > 8               | 1            |
+
+The transmitter-side adaptive-link process decides what those values mean for
+bitrate, GOP, FEC denominator, and keyframe requests.
 
 ## What Adaptive Link Does Not Mean
 

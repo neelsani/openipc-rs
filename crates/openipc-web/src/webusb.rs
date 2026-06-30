@@ -631,6 +631,15 @@ impl WebUsbRealtekDevice {
         Ok(report.into())
     }
 
+    #[wasm_bindgen(js_name = shutdownMonitor)]
+    /// Best-effort monitor-mode shutdown for chips that need explicit deinit.
+    pub async fn shutdown_monitor(&self) -> Result<(), JsValue> {
+        self.driver
+            .shutdown_monitor_async()
+            .await
+            .map_err(driver_error)
+    }
+
     #[wasm_bindgen(js_name = readRxTransfer)]
     /// Read one Realtek bulk-IN transfer.
     pub async fn read_rx_transfer(&self, length: usize) -> Result<Uint8Array, JsValue> {

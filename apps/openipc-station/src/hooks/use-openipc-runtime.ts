@@ -150,6 +150,7 @@ const DIAGNOSTIC_STAGE_ORDER: DiagnosticStageId[] = [
   "adaptiveQuality",
   "txPower",
   "adaptiveTx",
+  "driverShutdown",
   "decodeConfig",
   "decodeEnqueue",
   "decodeToRender",
@@ -167,6 +168,7 @@ const DIAGNOSTIC_STAGE_LABELS: Record<DiagnosticStageId, string> = {
   adaptiveQuality: "Link quality",
   txPower: "TX power",
   adaptiveTx: "Adaptive TX",
+  driverShutdown: "Driver shutdown",
   decodeConfig: "Decoder config",
   decodeEnqueue: "Decode enqueue",
   decodeToRender: "Decode to render",
@@ -184,6 +186,7 @@ const DIAGNOSTIC_SLOW_MS: Record<DiagnosticStageId, number> = {
   adaptiveQuality: 4,
   txPower: 15,
   adaptiveTx: 15,
+  driverShutdown: 120,
   decodeConfig: 20,
   decodeEnqueue: 8,
   decodeToRender: 50,
@@ -2301,6 +2304,22 @@ export function useOpenIpcRuntime() {
         appendLog("error", messageFrom(error));
         runningRef.current = false;
       }
+    }
+
+    if (device.rxDescriptorKind() === "jaguar3") {
+      const shutdownStart = performance.now();
+      await device
+        .shutdownMonitor()
+        .then(() => {
+          recordDiagnosticStage(
+            "driverShutdown",
+            performance.now() - shutdownStart,
+          );
+          appendLog("info", "Jaguar3 monitor shutdown complete");
+        })
+        .catch((error) =>
+          appendLog("warn", `Monitor shutdown failed: ${messageFrom(error)}`),
+        );
     }
 
     setRunning(false);

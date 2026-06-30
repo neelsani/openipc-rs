@@ -324,6 +324,19 @@ mod tests {
         (word >> offset) & ((1u32 << len) - 1)
     }
 
+    fn checksum_8822c_descriptor(desc: &[u8]) -> u16 {
+        let mut copy = desc.to_vec();
+        copy[28] = 0;
+        copy[29] = 0;
+        let pkt_offset = test_bits(read_le32(&copy, 4), 24, 5) as usize;
+        let pairs = (pkt_offset + (TX_DESC_SIZE_8822C >> 3)) << 1;
+        let mut checksum = 0u16;
+        for idx in 0..pairs {
+            checksum ^= le16(&copy, 2 * idx) ^ le16(&copy, 2 * idx + 1);
+        }
+        checksum
+    }
+
     #[test]
     fn builds_descriptor_and_strips_radiotap() {
         let params = TxRadioParams::default();
@@ -482,5 +495,33 @@ mod tests {
         assert_eq!(test_bits(read_le32(&usb, 16), 0, 7), 0x0c);
         assert_eq!(test_bits(read_le32(&usb, 32), 15, 1), 1);
         assert_ne!(test_bits(read_le32(&usb, 28), 0, 16), 0);
+        assert_eq!(
+            test_bits(read_le32(&usb, 28), 0, 16) as u16,
+            checksum_8822c_descriptor(&usb[..TX_DESC_SIZE_8822C])
+        );
+    }
+
+    #[test]
+    fn jaguar3_descriptor_clamps_5ghz_cck_to_ofdm() {
+        let mut packet = vec![
+            0x00, 0x00, 0x0c, 0x00, 0x00, 0x80, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00,
+        ];
+        packet.extend_from_slice(&build_wfb_header_with_frame_type(
+            ChannelId::default_video(),
+            [0x10, 0x00],
+            FRAME_TYPE_RTS,
+        ));
+
+        let usb = build_usb_tx_frame(
+            &packet,
+            RealtekTxOptions {
+                current_channel: 161,
+                descriptor: RealtekTxDescriptor::Jaguar3,
+                tx_mode_default: Some(TxMode::legacy_1m()),
+                ..RealtekTxOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(test_bits(read_le32(&usb, 16), 0, 7), 0x04);
     }
 }

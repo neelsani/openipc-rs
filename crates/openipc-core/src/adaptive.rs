@@ -227,16 +227,16 @@ impl AdaptiveLink {
     /// Build the adaptive-link UDP payload.
     pub fn feedback_udp_payload(&mut self, now_ms: u64) -> Vec<u8> {
         let quality = self.quality(now_ms);
-        if quality.lost_last_second > 2 || quality.recovered_last_second > 30 {
+        if quality.lost_last_second > 2 {
             self.fec_controller.bump(now_ms, 5);
+        } else if quality.recovered_last_second > 30 {
+            self.fec_controller.bump(now_ms, 4);
         } else if quality.recovered_last_second > 24 {
             self.fec_controller.bump(now_ms, 3);
-        } else if quality.recovered_last_second > 22 {
+        } else if quality.recovered_last_second > 14 {
             self.fec_controller.bump(now_ms, 2);
-        } else if quality.recovered_last_second > 18 {
+        } else if quality.recovered_last_second > 8 {
             self.fec_controller.bump(now_ms, 1);
-        } else if quality.recovered_last_second < 18 {
-            self.fec_controller.bump(now_ms, 0);
         }
 
         let fec_change = self.fec_controller.value(now_ms);
@@ -431,10 +431,11 @@ fn avg_signal(entries: &[SignalEntry]) -> (f64, f64) {
     (sum0 as f64 / count, sum1 as f64 / count)
 }
 
-fn link_score(rssi: f64, snr: f64) -> i32 {
-    (0.5 * map_range(rssi, 50.0, 110.0, 1000.0, 2000.0)
-        + 0.5 * map_range(snr, 20.0, 50.0, 1000.0, 2000.0))
-    .round() as i32
+fn link_score(rssi: f64, _snr: f64) -> i32 {
+    // PixelPilot maps the Realtek raw RSSI byte from 0..80 onto the
+    // adaptive-link score range. Keep SNR in the public report and message
+    // fields, but use the same score scale for transmitter decisions.
+    map_range(rssi, 0.0, 80.0, 1000.0, 2000.0).round() as i32
 }
 
 fn map_range(input: f64, input_min: f64, input_max: f64, output_min: f64, output_max: f64) -> f64 {
@@ -475,6 +476,7 @@ mod tests {
         let quality = link.quality(1_050);
         assert_eq!(quality.rssi, [80, 70]);
         assert_eq!(quality.snr, [35, 25]);
+        assert_eq!(quality.link_score, [2000, 1875]);
         assert_eq!(quality.recovered_last_second, 2);
 
         let payload = link.feedback_udp_payload(1_050);
@@ -484,6 +486,31 @@ mod tests {
         assert!(text.contains(":2:0:"));
         assert_eq!(text.trim_end().split(':').count(), 10);
         assert_eq!(quality.idr_code, "");
+    }
+
+    #[test]
+    fn fec_change_thresholds_match_pixelpilot_defaults() {
+        fn fec_change_for(recovered: u32, lost: u32) -> i32 {
+            let mut link = AdaptiveLink::new();
+            link.set_keyframe_request_messages(0);
+            link.record_rx(1_000, 80, 70, 35, 25);
+            link.record_fec(1_000, recovered + lost, recovered, lost);
+            let payload = link.feedback_udp_payload(1_000);
+            let text = std::str::from_utf8(&payload[4..]).unwrap();
+            text.trim_end()
+                .split(':')
+                .nth(9)
+                .unwrap()
+                .parse::<i32>()
+                .unwrap()
+        }
+
+        assert_eq!(fec_change_for(8, 0), 0);
+        assert_eq!(fec_change_for(9, 0), 1);
+        assert_eq!(fec_change_for(15, 0), 2);
+        assert_eq!(fec_change_for(25, 0), 3);
+        assert_eq!(fec_change_for(31, 0), 4);
+        assert_eq!(fec_change_for(0, 3), 5);
     }
 
     #[test]

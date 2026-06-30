@@ -414,6 +414,30 @@ mod tests {
         desc
     }
 
+    fn jaguar3_descriptor(
+        pkt_len: u16,
+        drvinfo_units: u8,
+        shift: u8,
+        rx_rate: u8,
+        c2h: bool,
+    ) -> [u8; RX_DESC_SIZE] {
+        let mut desc = [0; RX_DESC_SIZE];
+        let mut d0 = 0u32;
+        put_bits(&mut d0, 0, 14, pkt_len as u32);
+        put_bits(&mut d0, 14, 1, 1);
+        put_bits(&mut d0, 15, 1, 1);
+        put_bits(&mut d0, 16, 4, drvinfo_units as u32);
+        put_bits(&mut d0, 24, 2, shift as u32);
+        let mut d2 = 0u32;
+        put_bits(&mut d2, 28, 1, u32::from(c2h));
+        let mut d3 = 0u32;
+        put_bits(&mut d3, 0, 7, rx_rate as u32);
+        desc[0..4].copy_from_slice(&d0.to_le_bytes());
+        desc[8..12].copy_from_slice(&d2.to_le_bytes());
+        desc[12..16].copy_from_slice(&d3.to_le_bytes());
+        desc
+    }
+
     #[test]
     fn parses_single_rx_packet() {
         let mut aggregate = Vec::new();
@@ -462,5 +486,37 @@ mod tests {
         assert_eq!(packets.len(), 2);
         assert_eq!(packets[0].data, &[1, 2, 3, 4, 5]);
         assert_eq!(packets[1].data, &[6, 7, 8]);
+    }
+
+    #[test]
+    fn jaguar3_descriptor_matches_devourer_field_positions() {
+        let mut aggregate = Vec::new();
+        aggregate.extend_from_slice(&jaguar3_descriptor(4, 1, 2, 0x2c, false));
+        aggregate.extend_from_slice(&[41, 42, 0, 0, 0, 0, 0, 0]);
+        aggregate.extend_from_slice(&[0xaa, 0xbb]);
+        aggregate.extend_from_slice(&[1, 2, 3, 4]);
+
+        let packets = parse_rx_aggregate_with_kind(&aggregate, RxDescriptorKind::Jaguar3).unwrap();
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].attrib.pkt_len, 4);
+        assert_eq!(packets[0].attrib.drvinfo_sz, 8);
+        assert_eq!(packets[0].attrib.shift_sz, 2);
+        assert_eq!(packets[0].attrib.data_rate, 0x2c);
+        assert!(packets[0].attrib.crc_err);
+        assert!(packets[0].attrib.icv_err);
+        assert_eq!(packets[0].attrib.pkt_rpt_type, RxPacketType::NormalRx);
+        assert_eq!(packets[0].data, &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn jaguar3_c2h_bit_is_report_type() {
+        let mut aggregate = Vec::new();
+        aggregate.extend_from_slice(&jaguar3_descriptor(3, 0, 0, 0, true));
+        aggregate.extend_from_slice(&[0x61, 0x01, 0x02]);
+
+        let packets = parse_rx_aggregate_with_kind(&aggregate, RxDescriptorKind::Jaguar3).unwrap();
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].attrib.pkt_rpt_type, RxPacketType::C2hPacket);
+        assert_eq!(packets[0].data, &[0x61, 0x01, 0x02]);
     }
 }

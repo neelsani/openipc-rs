@@ -65,16 +65,16 @@ failure boundary.
 
 ## Common Patterns
 
-| Symptom                              | Likely Boundary                                                                                                                                |
-| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| No USB bytes                         | Device permission, driver claim, endpoint discovery, channel setup, or no RF traffic.                                                          |
-| USB bytes but no accepted packets    | Realtek descriptor parsing, CRC/ICV drops, wrong channel, or unsupported descriptor variant.                                                   |
-| Accepted packets but no WFB payloads | Wrong channel id, wrong radio port, or frame layout mismatch.                                                                                  |
-| Video works but no raw payloads      | Air unit is not sending on the expected route channel, that channel's session packet has not arrived, or the link id/key does not match.       |
-| WFB payloads but no video frames     | RTP packetization issue, unsupported payload type, codec fragmentation issue, or waiting for a keyframe/access unit.                           |
-| Video frames but black output        | WebCodecs unsupported codec/config, decoder reset, or no keyframe yet.                                                                         |
+| Symptom                              | Likely Boundary                                                                                                                                                |
+| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| No USB bytes                         | Device permission, driver claim, endpoint discovery, channel setup, or no RF traffic.                                                                          |
+| USB bytes but no accepted packets    | Realtek descriptor parsing, CRC/ICV drops, wrong channel, or unsupported descriptor variant.                                                                   |
+| Accepted packets but no WFB payloads | Wrong channel id, wrong radio port, or frame layout mismatch.                                                                                                  |
+| Video works but no raw payloads      | Air unit is not sending on the expected route channel, that channel's session packet has not arrived, or the link id/key does not match.                       |
+| WFB payloads but no video frames     | RTP packetization issue, unsupported payload type, codec fragmentation issue, or waiting for a keyframe/access unit.                                           |
+| Video frames but black output        | WebCodecs unsupported codec/config, decoder reset, or no keyframe yet.                                                                                         |
 | Raw audio packets but no audio       | Wrong RTP payload type or codec setting, WebCodecs `AudioDecoder` lacks Opus support, muted/suspended AudioContext, or unsupported channel/sample-rate config. |
-| Good decode FPS but low render FPS   | Canvas/rendering path or recording overhead.                                                                                                   |
+| Good decode FPS but low render FPS   | Canvas/rendering path or recording overhead.                                                                                                                   |
 
 ## Logs
 

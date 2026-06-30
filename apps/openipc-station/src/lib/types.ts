@@ -72,6 +72,7 @@ export type DiagnosticStageId =
   | "adaptiveQuality"
   | "txPower"
   | "adaptiveTx"
+  | "driverShutdown"
   | "decodeConfig"
   | "decodeEnqueue"
   | "decodeToRender"

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.20 - 2026-06-30
+
+### Changes
+- Fix Linux TUN clippy warning (3a6689b)
+
+
 ## 0.1.19 - 2026-06-30
 
 ### Changes

@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.19 - 2026-06-30
+
+### Changes
+- Add routed payload pipeline and mixed RTP audio
+
+Introduce shared receiver route fanout with filtered RTP payload taps, wire route manager/audio support through WASM and Tauri station runtimes, and update docs around OpenIPC radio ports, audio, telemetry, and native CLI structure. (d78be69)
+- Generalize audio route settings
+
+Rename the route action to Audio, add an audio codec preference with Auto and Opus modes, wire codec selection through playback, and refresh station/docs wording around audio route configuration. (1c14c84)
+- Add native VPN bridge for OpenIPC tunnel
+
+Add a dedicated Station VPN tab, native TUN/Wintun bridge support, and Android VpnService integration for the OpenIPC tunnel/data path. Keep VPN separate from custom payload routes and report interface/IP status back to the UI. (4e8fabc)
+
+### Refactors
+- Refactor webusb and split codebase easy readbility. (3e8edad)
+
+
 ## 0.1.18 - 2026-06-29
 
 ### Changes

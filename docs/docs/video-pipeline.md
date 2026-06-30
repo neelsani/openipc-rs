@@ -89,6 +89,11 @@ RTP in the browser frontend. The currently implemented audio decoder is Opus;
 Auto mode recognizes the documented OpenIPC Opus payload type 98 stream. It does
 not parse MAVLink messages.
 
+The OpenIPC tunnel/data channel is handled by Station's separate VPN tab rather
+than the custom route builder. That keeps the fixed tunnel RX/TX pair
+(`0x20`/`0xa0`) out of user-defined payload routing while still using the same
+core route machinery internally.
+
 ## Annex-B Frames
 
 Annex-B is the byte-stream form of H.264/H.265 where NAL units are separated by

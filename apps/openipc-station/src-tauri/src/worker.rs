@@ -1,12 +1,25 @@
 use super::*;
 
 const VIDEO_ROUTE_ID: PayloadRouteId = PayloadRouteId::new(1);
+// Internal only: keep the fixed VPN bridge out of user-defined route ids.
+const VPN_ROUTE_ID: PayloadRouteId = PayloadRouteId::new(u64::MAX);
 const DEFAULT_KEY_SLOT: u64 = 0;
+const TUN_TX_SESSION_INTERVAL_MS: u64 = 1000;
+const TUN_TX_DRAIN_LIMIT: usize = 32;
 
 pub(crate) struct UdpRouteSink {
     route_id: PayloadRouteId,
     dest: SocketAddr,
     socket: UdpSocket,
+}
+
+pub(crate) struct TunRuntime {
+    route_id: PayloadRouteId,
+    bridge: crate::tun_bridge::TunBridge,
+    tx: WfbTransmitter,
+    tx_options: RealtekTxOptions,
+    tx_params: TxRadioParams,
+    last_session_ms: Option<u64>,
 }
 
 impl AdaptiveRuntime {
@@ -61,6 +74,89 @@ impl AdaptiveRuntime {
     }
 }
 
+impl TunRuntime {
+    fn new(
+        route_id: PayloadRouteId,
+        link_id: u32,
+        keypair_bytes: &[u8],
+        chip_family: ChipFamily,
+        rf_channel: u8,
+        raw_fd: Option<i32>,
+    ) -> Result<Self, String> {
+        let bridge = crate::tun_bridge::TunBridge::open_default(raw_fd)?;
+        let tx_keypair = WfbTxKeypair::from_bytes(keypair_bytes).map_err(|err| err.to_string())?;
+        let tx = WfbTransmitter::new(
+            ChannelId::from_link_port(link_id, RadioPort::TunnelTx),
+            tx_keypair,
+            0,
+            1,
+            5,
+        )
+        .map_err(|err| err.to_string())?;
+        Ok(Self {
+            route_id,
+            bridge,
+            tx,
+            tx_options: realtek_tx_options(chip_family, rf_channel),
+            tx_params: TxRadioParams::openipc_uplink_default(),
+            last_session_ms: None,
+        })
+    }
+
+    fn name(&self) -> &str {
+        self.bridge.name()
+    }
+
+    fn handles_route(&self, route_id: PayloadRouteId) -> bool {
+        self.route_id == route_id
+    }
+
+    fn write_downlink_payload(&mut self, payload: &[u8]) -> Result<usize, String> {
+        self.bridge
+            .write_downlink_payload(payload)
+            .map_err(|err| format!("write TUN downlink failed: {err}"))
+    }
+
+    fn tick(
+        &mut self,
+        now_ms: u64,
+        ep_out: &mut nusb::Endpoint<Bulk, Out>,
+    ) -> Result<usize, String> {
+        let mut sent = 0usize;
+        let session_due = match self.last_session_ms {
+            Some(last) => now_ms.saturating_sub(last) >= TUN_TX_SESSION_INTERVAL_MS,
+            None => true,
+        };
+        if session_due {
+            let frame = self.tx.session_radio_packet(self.tx_params);
+            RealtekDevice::send_packet_on(ep_out, &frame, self.tx_options)
+                .map_err(|err| err.to_string())?;
+            self.last_session_ms = Some(now_ms);
+            sent += 1;
+        }
+
+        for _ in 0..TUN_TX_DRAIN_LIMIT {
+            let Some(payload) = self
+                .bridge
+                .read_uplink_payload()
+                .map_err(|err| format!("read TUN uplink failed: {err}"))?
+            else {
+                break;
+            };
+            let frames = self
+                .tx
+                .radio_packets_for_payload(&payload, self.tx_params)
+                .map_err(|err| err.to_string())?;
+            for frame in frames {
+                RealtekDevice::send_packet_on(ep_out, &frame, self.tx_options)
+                    .map_err(|err| err.to_string())?;
+                sent += 1;
+            }
+        }
+        Ok(sent)
+    }
+}
+
 fn udp_route_sinks(routes: &[PayloadRouteRequest]) -> Result<Vec<UdpRouteSink>, String> {
     let mut sinks = Vec::new();
     for route in routes
@@ -89,6 +185,15 @@ fn udp_route_sinks(routes: &[PayloadRouteRequest]) -> Result<Vec<UdpRouteSink>, 
         });
     }
     Ok(sinks)
+}
+
+fn realtek_tx_options(chip_family: ChipFamily, rf_channel: u8) -> RealtekTxOptions {
+    RealtekTxOptions {
+        current_channel: rf_channel,
+        is_8814a: chip_family == ChipFamily::Rtl8814,
+        legacy_8812_descriptor: std::env::var_os("DEVOURER_TX_LEGACY_8812_DESC").is_some(),
+        ..RealtekTxOptions::default()
+    }
 }
 
 pub(crate) fn run_rx_worker(
@@ -136,10 +241,23 @@ pub(crate) fn run_rx_worker(
             )
             .map_err(|err| format!("invalid route {}: {err}", route.name))?;
     }
+    let link_id = request.channel_id >> 8;
+    if request.vpn_enabled {
+        receiver
+            .add_keyed_route(
+                VPN_ROUTE_ID,
+                ChannelId::from_link_port(link_id, RadioPort::TunnelRx),
+                DEFAULT_KEY_SLOT,
+                keypair,
+                minimum_epoch,
+            )
+            .map_err(|err| format!("invalid VPN tunnel route: {err}"))?;
+    }
     let raw_payload_routes: Vec<PayloadRouteId> = enabled_routes
         .iter()
         .filter(|route| route.action != PayloadRouteAction::Audio)
         .map(|route| PayloadRouteId::new(route.route_id))
+        .chain(request.vpn_enabled.then_some(VPN_ROUTE_ID))
         .collect();
     let rtp_payload_taps: Vec<RtpPayloadTap> = enabled_routes
         .iter()
@@ -151,8 +269,41 @@ pub(crate) fn run_rx_worker(
         .collect();
     let udp_sinks = udp_route_sinks(&enabled_routes)?;
     let mut ep_in = device.bulk_in_endpoint().map_err(|err| err.to_string())?;
-    let mut ep_out = if request.adaptive_enabled {
+    let mut ep_out = if request.adaptive_enabled || request.vpn_enabled {
         Some(device.bulk_out_endpoint().map_err(|err| err.to_string())?)
+    } else {
+        None
+    };
+    let mut tun = if request.vpn_enabled {
+        let tun = TunRuntime::new(
+            VPN_ROUTE_ID,
+            link_id,
+            &keypair_bytes,
+            chip_family,
+            request.rf_channel,
+            request.vpn_tun_fd,
+        )?;
+        emit_vpn_status(
+            &app,
+            VpnStatusPayload {
+                interface_name: tun.name().to_owned(),
+                local_ip: crate::tun_bridge::OPENIPC_VPN_ADDRESS,
+                prefix_length: crate::tun_bridge::OPENIPC_VPN_PREFIX_LEN,
+                rx_port: RadioPort::TunnelRx.as_u8(),
+                tx_port: RadioPort::TunnelTx.as_u8(),
+            },
+        );
+        emit_log(
+            &app,
+            "info",
+            format!(
+                "VPN tunnel active on {} as {}/{} (RX port 0x20, TX port 0xa0)",
+                tun.name(),
+                crate::tun_bridge::OPENIPC_VPN_ADDRESS,
+                crate::tun_bridge::OPENIPC_VPN_PREFIX_LEN
+            ),
+        );
+        Some(tun)
     } else {
         None
     };
@@ -171,17 +322,11 @@ pub(crate) fn run_rx_worker(
             ),
         );
         let tx_keypair = WfbTxKeypair::from_bytes(&keypair_bytes).map_err(|err| err.to_string())?;
-        let link_id = request.channel_id >> 8;
         Some(AdaptiveRuntime {
             sender: AdaptiveLinkSender::new(link_id, tx_keypair, 0, 1, 5)
                 .map_err(|err| err.to_string())?,
             last_counters: receiver.video_fec_counters(),
-            tx_options: RealtekTxOptions {
-                current_channel: request.rf_channel,
-                is_8814a: chip_family == ChipFamily::Rtl8814,
-                legacy_8812_descriptor: std::env::var_os("DEVOURER_TX_LEGACY_8812_DESC").is_some(),
-                ..RealtekTxOptions::default()
-            },
+            tx_options: realtek_tx_options(chip_family, request.rf_channel),
         })
     } else {
         None
@@ -202,7 +347,7 @@ pub(crate) fn run_rx_worker(
         let read_start = Instant::now();
         let Some(completion) = ep_in.wait_next_complete(Duration::from_millis(1000)) else {
             let now_ms = unix_time_ms();
-            tick_adaptive_idle(&mut adaptive, ep_out.as_mut(), now_ms);
+            tick_tx_idle(&mut adaptive, &mut tun, ep_out.as_mut(), now_ms);
             continue;
         };
         let usb_read_ms = elapsed_ms(read_start);
@@ -228,6 +373,7 @@ pub(crate) fn run_rx_worker(
                     raw_payload_routes: raw_payload_routes.as_slice(),
                     rtp_payload_taps: rtp_payload_taps.as_slice(),
                     udp_sinks: udp_sinks.as_slice(),
+                    tun: tun.as_mut(),
                 },
             ) {
                 Ok(batch) => {
@@ -245,18 +391,21 @@ pub(crate) fn run_rx_worker(
     Ok(())
 }
 
-pub(crate) fn tick_adaptive_idle(
+pub(crate) fn tick_tx_idle(
     adaptive: &mut Option<AdaptiveRuntime>,
+    tun: &mut Option<TunRuntime>,
     ep_out: Option<&mut nusb::Endpoint<Bulk, Out>>,
     now_ms: u64,
 ) {
-    let Some(runtime) = adaptive.as_mut() else {
-        return;
-    };
     let Some(ep_out) = ep_out else {
         return;
     };
-    let _ = runtime.tick(now_ms, ep_out);
+    if let Some(runtime) = adaptive.as_mut() {
+        let _ = runtime.tick(now_ms, ep_out);
+    }
+    if let Some(runtime) = tun.as_mut() {
+        let _ = runtime.tick(now_ms, ep_out);
+    }
 }
 
 pub(crate) fn build_rx_batch(
@@ -298,6 +447,11 @@ pub(crate) fn build_rx_batch(
     let counters = batch.fec_counters;
     let batch_counters = batch.counters;
     for payload in &batch.raw_payloads {
+        if let Some(runtime) = context.tun.as_deref_mut() {
+            if runtime.handles_route(payload.route_id) {
+                runtime.write_downlink_payload(&payload.data)?;
+            }
+        }
         for sink in context
             .udp_sinks
             .iter()
@@ -307,9 +461,11 @@ pub(crate) fn build_rx_batch(
         }
     }
     let frames = batch.frames.into_iter().map(video_frame_payload).collect();
+    let tun_route_id = context.tun.as_ref().map(|runtime| runtime.route_id);
     let raw_payloads: Vec<_> = batch
         .raw_payloads
         .into_iter()
+        .filter(|payload| Some(payload.route_id) != tun_route_id)
         .map(raw_payload_payload)
         .collect();
 
@@ -324,13 +480,23 @@ pub(crate) fn build_rx_batch(
         link_quality = Some(runtime.quality(context.now_ms));
         adaptive_quality_ms = elapsed_ms(quality_start);
 
-        if let Some(ep_out) = context.ep_out {
+        if let Some(ep_out) = context.ep_out.as_deref_mut() {
             let tx_start = Instant::now();
             match runtime.tick(context.now_ms, ep_out) {
                 Ok(count) => adaptive_tx_frames = count,
                 Err(_) => adaptive_tx_errors = 1,
             }
             adaptive_tx_ms = elapsed_ms(tx_start);
+        }
+    }
+    if let Some(runtime) = context.tun {
+        if let Some(ep_out) = context.ep_out {
+            let tx_start = Instant::now();
+            match runtime.tick(context.now_ms, ep_out) {
+                Ok(count) => adaptive_tx_frames += count,
+                Err(_) => adaptive_tx_errors += 1,
+            }
+            adaptive_tx_ms += elapsed_ms(tx_start);
         }
     }
 

@@ -53,3 +53,25 @@ pub struct AndroidUsbCloseRequest {
     /// File descriptor returned by `AndroidUsbOpenedDevice`.
     pub fd: i32,
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+/// Result of opening an Android VpnService TUN interface.
+pub struct AndroidVpnOpened {
+    /// File descriptor for the Android VPN/TUN interface.
+    pub fd: i32,
+    /// Human-readable interface/session name.
+    pub interface_name: String,
+    /// IPv4 address configured on the interface.
+    pub address: String,
+    /// CIDR prefix length configured on the interface.
+    pub prefix_length: u8,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+/// Request used to close a descriptor opened by the Android VPN bridge.
+pub struct AndroidVpnCloseRequest {
+    /// File descriptor returned by `AndroidVpnOpened`.
+    pub fd: i32,
+}

@@ -9,8 +9,11 @@ import android.content.IntentFilter
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbManager
+import android.net.VpnService
 import android.os.Build
+import androidx.activity.result.ActivityResult
 import androidx.appcompat.app.AppCompatActivity
+import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
@@ -103,6 +106,36 @@ class OpenIpcUsbPlugin(private val stationActivity: Activity) : Plugin(stationAc
     invoke.resolve()
   }
 
+  @Command
+  fun openVpn(invoke: Invoke) {
+    val prepareIntent = VpnService.prepare(stationActivity)
+    if (prepareIntent != null) {
+      startActivityForResult(invoke, prepareIntent, "vpnPrepared")
+      return
+    }
+    OpenIpcVpnService.open(stationActivity, invoke)
+  }
+
+  @ActivityCallback
+  fun vpnPrepared(invoke: Invoke, result: ActivityResult) {
+    if (result.resultCode != Activity.RESULT_OK) {
+      invoke.reject("Android VPN permission was not granted")
+      return
+    }
+    OpenIpcVpnService.open(stationActivity, invoke)
+  }
+
+  @Command
+  fun closeVpn(invoke: Invoke) {
+    val fd = invoke.getArgs().getInteger("fd")
+    if (fd == null) {
+      invoke.reject("closeVpn requires an fd")
+      return
+    }
+    OpenIpcVpnService.close(fd)
+    invoke.resolve()
+  }
+
   override fun onDestroy(activity: AppCompatActivity) {
     try {
       activity.unregisterReceiver(permissionReceiver)
@@ -111,6 +144,7 @@ class OpenIpcUsbPlugin(private val stationActivity: Activity) : Plugin(stationAc
     }
     openConnections.values.forEach { it.close() }
     openConnections.clear()
+    OpenIpcVpnService.closeAll()
   }
 
   @Synchronized

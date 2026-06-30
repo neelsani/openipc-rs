@@ -22,3 +22,16 @@ pub(crate) async fn close_device<R: Runtime>(
 ) -> Result<()> {
     app.openipc_usb().close_device(request)
 }
+
+#[command]
+pub(crate) async fn open_vpn<R: Runtime>(app: AppHandle<R>) -> Result<AndroidVpnOpened> {
+    app.openipc_usb().open_vpn()
+}
+
+#[command]
+pub(crate) async fn close_vpn<R: Runtime>(
+    app: AppHandle<R>,
+    request: AndroidVpnCloseRequest,
+) -> Result<()> {
+    app.openipc_usb().close_vpn(request)
+}

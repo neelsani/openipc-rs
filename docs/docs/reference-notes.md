@@ -42,6 +42,12 @@ Packet flow:
 5. Primary fragments emit RTP packets.
 6. RTP packets go to playback or optional UDP output.
 
+For the tunnel/data path, aviateur creates a native TUN interface at
+`10.5.0.3/24`. Downlink tunnel payloads arrive from WFB on radio port `0x20`,
+drop a two-byte big-endian length prefix, and are written to the TUN device.
+Uplink IP packets read from TUN receive the same length prefix and are sent
+over radio port `0xa0`.
+
 `openipc-rs` mirrors the protocol behavior in shared Rust, while keeping UI,
 USB permissions, and rendering at platform edges.
 
@@ -77,7 +83,8 @@ Observed PixelPilot channel map:
 - telemetry downlink: port `0x10`, channel `0x7505d610`, recovered bytes often
   carry MAVLink or MSP/OSD data,
 - generic data/tunnel RX: port `0x20`, channel `0x7505d620`, recovered bytes go
-  to UDP `8000`,
+  to UDP `8000` and PixelPilot's VPN service writes them into a `10.5.0.3/24`
+  TUN interface,
 - audio RX in the wfb-ng audio profile: port `0x30`, channel `0x7505d630`,
 - telemetry TX in wfb-ng profiles: port `0x90`, channel `0x7505d690`,
 - generic tunnel/adaptive uplink TX: port `0xa0`, channel `0x7505d6a0`,

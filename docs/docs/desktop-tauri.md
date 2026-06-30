@@ -45,6 +45,32 @@ fullscreen API and apply a video-only overlay class, because embedded WebViews
 do not consistently support element fullscreen. The canvas and OSD stay inside
 the video region in both modes.
 
+## VPN Tunnel
+
+Station has a dedicated VPN tab for the OpenIPC tunnel/data ports. It is
+disabled by default and is intentionally separate from the payload route
+builder. When enabled, Station listens for recovered WFB payloads on tunnel RX
+port `0x20`, writes the contained IP packets into an OS VPN/TUN interface,
+reads packets back from that interface, wraps them with OpenIPC's two-byte
+tunnel length prefix, and sends them over tunnel TX port `0xa0`.
+
+The native bridge uses the Rust `tun` crate. On desktop Unix builds it creates a
+`10.5.0.3/24` interface and keeps it nonblocking so the existing receive loop
+can service USB, adaptive-link feedback, and tunnel uplink without creating a
+separate worker thread. Creating the interface may require root or network
+administration privileges depending on the OS. After receive starts, the VPN
+tab shows the actual interface name, local IP, and tunnel RX/TX ports reported
+by the native backend.
+
+On Windows, Station uses the same bridge through Wintun. The Windows target may
+need Wintun installed or bundled next to the app, depending on how the final
+installer is packaged.
+
+Browser/WebUSB builds cannot create OS network interfaces, so the VPN tab is
+shown as unavailable there. Android uses the local `tauri-plugin-openipc-usb`
+plugin to request `VpnService` consent, create the VPN/TUN file descriptor, and
+pass it to the Rust backend before receive starts.
+
 ## Build
 
 Check the source-level desktop build without bundling installers:
@@ -82,9 +108,10 @@ Android apps should discover devices through Android's own USB APIs:
 
 OpenIPC Station includes this bridge as the local Tauri plugin
 `plugins/tauri-plugin-openipc-usb`. The plugin owns the Android library project,
-Kotlin `UsbManager` code, manifest USB-host feature, Rust command wrappers, and
-Tauri permissions. Tauri includes it during Android dev/build like any other
-mobile plugin; no generated `src-tauri/gen/android` source edits are required.
+Kotlin `UsbManager` code, `VpnService` bridge, manifest USB-host/VPN entries,
+Rust command wrappers, and Tauri permissions. Tauri includes it during Android
+dev/build like any other mobile plugin; no generated `src-tauri/gen/android`
+source edits are required.
 
 ```sh
 cd apps/openipc-station

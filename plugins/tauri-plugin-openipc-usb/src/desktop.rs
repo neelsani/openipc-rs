@@ -38,4 +38,16 @@ impl<R: Runtime> OpenIpcUsb<R> {
     pub fn close_device(&self, _request: AndroidUsbCloseRequest) -> crate::Result<()> {
         Ok(())
     }
+
+    /// Return an error because desktop VPN is opened directly by the station backend.
+    pub fn open_vpn(&self) -> crate::Result<AndroidVpnOpened> {
+        Err(Error::Message(
+            "Android VPN open is only available in the Android Tauri runtime".to_owned(),
+        ))
+    }
+
+    /// No-op close for desktop, where the plugin does not own VPN descriptors.
+    pub fn close_vpn(&self, _request: AndroidVpnCloseRequest) -> crate::Result<()> {
+        Ok(())
+    }
 }

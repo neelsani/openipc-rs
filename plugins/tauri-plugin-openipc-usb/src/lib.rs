@@ -50,6 +50,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::list_devices,
             commands::open_device,
             commands::close_device,
+            commands::open_vpn,
+            commands::close_vpn,
         ])
         .setup(|app, api| {
             #[cfg(mobile)]

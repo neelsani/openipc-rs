@@ -3,6 +3,7 @@ use super::*;
 pub(crate) const RX_BATCH_EVENT: &str = "openipc://rx-batch";
 pub(crate) const LOG_EVENT: &str = "openipc://log";
 pub(crate) const STOPPED_EVENT: &str = "openipc://stopped";
+pub(crate) const VPN_STATUS_EVENT: &str = "openipc://vpn-status";
 pub(crate) const RX_TRANSFERS_IN_FLIGHT: usize = 4;
 
 #[derive(Default)]
@@ -86,6 +87,8 @@ pub(crate) struct StartRxRequest {
     pub(crate) minimum_epoch: String,
     pub(crate) transfer_size: usize,
     pub(crate) adaptive_enabled: bool,
+    pub(crate) vpn_enabled: bool,
+    pub(crate) vpn_tun_fd: Option<i32>,
     pub(crate) rf_channel: u8,
     pub(crate) alink_tx_power: u8,
     #[serde(default)]
@@ -204,6 +207,16 @@ pub(crate) struct StoppedPayload {
     pub(crate) message: String,
 }
 
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct VpnStatusPayload {
+    pub(crate) interface_name: String,
+    pub(crate) local_ip: &'static str,
+    pub(crate) prefix_length: u8,
+    pub(crate) rx_port: u8,
+    pub(crate) tx_port: u8,
+}
+
 pub(crate) struct AdaptiveRuntime {
     pub(crate) sender: AdaptiveLinkSender,
     pub(crate) last_counters: FecCounters,
@@ -220,4 +233,5 @@ pub(crate) struct RxBatchContext<'a> {
     pub(crate) raw_payload_routes: &'a [PayloadRouteId],
     pub(crate) rtp_payload_taps: &'a [RtpPayloadTap],
     pub(crate) udp_sinks: &'a [crate::worker::UdpRouteSink],
+    pub(crate) tun: Option<&'a mut crate::worker::TunRuntime>,
 }

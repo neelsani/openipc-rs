@@ -4,6 +4,7 @@ import { useState, type ReactNode } from "react";
 import {
   Activity,
   ScrollText,
+  Shield,
   SlidersHorizontal,
   Stethoscope,
 } from "lucide-react";
@@ -13,8 +14,9 @@ import { SettingsPanel } from "./settings-panel";
 import { MetricsPanel } from "./metrics-panel";
 import { DiagnosticsPanel } from "./diagnostics-panel";
 import { LogsPanel } from "./logs-panel";
+import { VpnPanel } from "./vpn-panel";
 
-type Tab = "settings" | "metrics" | "diagnostics" | "logs";
+type Tab = "settings" | "vpn" | "metrics" | "diagnostics" | "logs";
 
 const TABS: { id: Tab; label: string; icon: ReactNode }[] = [
   {
@@ -26,6 +28,11 @@ const TABS: { id: Tab; label: string; icon: ReactNode }[] = [
     id: "metrics",
     label: "Metrics",
     icon: <Activity className="h-3.5 w-3.5" />,
+  },
+  {
+    id: "vpn",
+    label: "VPN",
+    icon: <Shield className="h-3.5 w-3.5" />,
   },
   {
     id: "diagnostics",
@@ -74,6 +81,7 @@ export function Inspector({
       </div>
       <div className="scroll-rail flex-1 lg:min-h-0 lg:overflow-y-auto">
         {tab === "settings" && <SettingsPanel api={api} />}
+        {tab === "vpn" && <VpnPanel api={api} />}
         {tab === "metrics" && <MetricsPanel api={api} />}
         {tab === "diagnostics" && <DiagnosticsPanel api={api} />}
         {tab === "logs" && <LogsPanel api={api} />}

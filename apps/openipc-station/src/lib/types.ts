@@ -134,6 +134,14 @@ export type UsbInfo = {
   bulkOut: number;
 };
 
+export type VpnStatus = {
+  interfaceName: string;
+  localIp: string;
+  prefixLength: number;
+  rxPort: number;
+  txPort: number;
+};
+
 export type InitReport = {
   chip: string;
   rfPaths: number;
@@ -154,6 +162,7 @@ export type Settings = {
   channelOffset: number;
   alinkTxPower: number;
   audioVolume: number;
+  vpnEnabled: boolean;
   darkMode: boolean;
   payloadRoutes: PayloadRouteConfig[];
 };

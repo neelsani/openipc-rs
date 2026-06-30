@@ -49,6 +49,7 @@ import type {
   RtpClockState,
   RuntimeState,
   UsbInfo,
+  VpnStatus,
   WebCodecsCapabilities,
   VideoStats,
 } from "@/lib/types";
@@ -68,6 +69,8 @@ import {
   listenTauriEvent,
   tauriAndroidUsbCloseDevice,
   tauriAndroidUsbOpenDevice,
+  tauriAndroidVpnClose,
+  tauriAndroidVpnOpen,
   tauriConnect,
   tauriConnectFromFd,
   tauriIsFullscreen,
@@ -78,10 +81,12 @@ import {
   TAURI_LOG_EVENT,
   TAURI_RX_BATCH_EVENT,
   TAURI_STOPPED_EVENT,
+  TAURI_VPN_STATUS_EVENT,
   type TauriLogPayload,
   type TauriRxBatchPayload,
   type TauriRawPayloadPayload,
   type TauriStoppedPayload,
+  type TauriVpnStatusPayload,
   type TauriVideoFramePayload,
 } from "@/runtime/tauri";
 
@@ -665,6 +670,7 @@ export function useOpenIpcRuntime() {
   const lastPerfLogRef = useRef(0);
   const lastSlowLogRef = useRef(0);
   const tauriUnlistenRef = useRef<Array<() => void>>([]);
+  const androidVpnFdRef = useRef<number | null>(null);
 
   const [runtime, setRuntime] = useState<RuntimeState>("loading");
   const [wasmReady, setWasmReady] = useState(false);
@@ -676,6 +682,7 @@ export function useOpenIpcRuntime() {
   const [recording, setRecording] = useState(false);
   const [lastRecordingUrl, setLastRecordingUrl] = useState<string | null>(null);
   const [usbInfo, setUsbInfo] = useState<UsbInfo | null>(null);
+  const [vpnStatus, setVpnStatus] = useState<VpnStatus | null>(null);
   const [keyName, setKeyName] = useState("No key");
   const [keyReady, setKeyReady] = useState(false);
   const [settings, setSettings] = useState(() => loadStoredSettings());
@@ -1061,9 +1068,15 @@ export function useOpenIpcRuntime() {
       audioPlayerRef.current?.close();
       cleanupTauriSubscriptions();
       if (desktopRuntime) {
-        void tauriStopRx().catch(() => {
-          // Best effort during React teardown.
-        });
+        void tauriStopRx()
+          .catch(() => {
+            // Best effort during React teardown.
+          })
+          .finally(() => {
+            void closeAndroidVpnIfOpen().catch(() => {
+              // Best effort during React teardown.
+            });
+          });
       }
     };
   }, [desktopRuntime]);
@@ -1834,6 +1847,16 @@ export function useOpenIpcRuntime() {
     }
   }
 
+  async function closeAndroidVpnIfOpen() {
+    const fd = androidVpnFdRef.current;
+    if (fd === null) {
+      return;
+    }
+    androidVpnFdRef.current = null;
+    setVpnStatus(null);
+    await tauriAndroidVpnClose(fd);
+  }
+
   function tauriFrameToOpenIpcFrame(
     frame: TauriVideoFramePayload,
   ): OpenIpcVideoFrame {
@@ -1973,26 +1996,60 @@ export function useOpenIpcRuntime() {
         runningRef.current = false;
         setRunning(false);
         setRuntime(event.reason === "error" ? "error" : "ready");
+        setVpnStatus(null);
         cleanupTauriSubscriptions();
+        void closeAndroidVpnIfOpen().catch((error) =>
+          appendLog("warn", messageFrom(error)),
+        );
         void tauriStopRx().catch((error) =>
           appendLog("warn", messageFrom(error)),
         );
       },
     );
-    tauriUnlistenRef.current = [unlistenBatch, unlistenLog, unlistenStopped];
+    const unlistenVpnStatus = await listenTauriEvent<TauriVpnStatusPayload>(
+      TAURI_VPN_STATUS_EVENT,
+      (status) => {
+        setVpnStatus(status);
+      },
+    );
+    tauriUnlistenRef.current = [
+      unlistenBatch,
+      unlistenLog,
+      unlistenStopped,
+      unlistenVpnStatus,
+    ];
 
     const currentSettings = settingsRef.current;
     runningRef.current = true;
     setRunning(true);
     setRuntime("running");
     appendLog("info", "Native RX loop starting");
+    let androidVpnFd: number | undefined;
     try {
+      if (currentSettings.vpnEnabled && androidTauriRuntime) {
+        const vpn = await tauriAndroidVpnOpen();
+        androidVpnFd = vpn.fd;
+        androidVpnFdRef.current = vpn.fd;
+        setVpnStatus({
+          interfaceName: vpn.interfaceName || "OpenIPC VPN",
+          localIp: vpn.address,
+          prefixLength: vpn.prefixLength,
+          rxPort: 0x20,
+          txPort: 0xa0,
+        });
+        appendLog(
+          "info",
+          `Android VPN prepared ${vpn.interfaceName || "tun"} ${vpn.address}/${vpn.prefixLength}`,
+        );
+      }
       await tauriStartRx({
         keypairBase64: bytesToBase64(keyBytes),
         channelId: parseInteger(currentSettings.channelId, "Channel ID"),
         minimumEpoch: parseEpoch(currentSettings.minimumEpoch).toString(),
         transferSize: currentSettings.transferSize,
         adaptiveEnabled: currentSettings.adaptiveEnabled,
+        vpnEnabled: currentSettings.vpnEnabled,
+        vpnTunFd: androidVpnFd,
         rfChannel: currentSettings.rfChannel,
         alinkTxPower: Math.max(
           1,
@@ -2010,9 +2067,13 @@ export function useOpenIpcRuntime() {
         })),
       });
     } catch (error) {
+      if (androidVpnFd !== undefined) {
+        await closeAndroidVpnIfOpen().catch(() => undefined);
+      }
       runningRef.current = false;
       setRunning(false);
       setRuntime("error");
+      setVpnStatus(null);
       cleanupTauriSubscriptions();
       throw error;
     }
@@ -2184,9 +2245,14 @@ export function useOpenIpcRuntime() {
     if (desktopRuntime) {
       setRunning(false);
       setRuntime("ready");
-      void tauriStopRx().catch((error) =>
-        appendLog("warn", messageFrom(error)),
-      );
+      setVpnStatus(null);
+      void tauriStopRx()
+        .catch((error) => appendLog("warn", messageFrom(error)))
+        .finally(() => {
+          void closeAndroidVpnIfOpen().catch((error) =>
+            appendLog("warn", messageFrom(error)),
+          );
+        });
     }
   }
 
@@ -2257,6 +2323,7 @@ export function useOpenIpcRuntime() {
     settings,
     statusLabel,
     usbInfo,
+    vpnStatus,
     videoStats,
     wasmReady,
     webCodecsCapabilities,

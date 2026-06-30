@@ -307,6 +307,18 @@
           "markdownDescription": "Denies the close_device command without any pre-configured scope."
         },
         {
+          "description": "Enables the close_vpn command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-close-vpn",
+          "markdownDescription": "Enables the close_vpn command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the close_vpn command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-close-vpn",
+          "markdownDescription": "Denies the close_vpn command without any pre-configured scope."
+        },
+        {
           "description": "Enables the list_devices command without any pre-configured scope.",
           "type": "string",
           "const": "allow-list-devices",
@@ -331,10 +343,22 @@
           "markdownDescription": "Denies the open_device command without any pre-configured scope."
         },
         {
-          "description": "Default OpenIPC USB plugin permissions\n#### This default permission set includes:\n\n- `allow-list-devices`\n- `allow-open-device`\n- `allow-close-device`",
+          "description": "Enables the open_vpn command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-open-vpn",
+          "markdownDescription": "Enables the open_vpn command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the open_vpn command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-open-vpn",
+          "markdownDescription": "Denies the open_vpn command without any pre-configured scope."
+        },
+        {
+          "description": "Default OpenIPC USB plugin permissions\n#### This default permission set includes:\n\n- `allow-list-devices`\n- `allow-open-device`\n- `allow-close-device`\n- `allow-open-vpn`\n- `allow-close-vpn`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Default OpenIPC USB plugin permissions\n#### This default permission set includes:\n\n- `allow-list-devices`\n- `allow-open-device`\n- `allow-close-device`"
+          "markdownDescription": "Default OpenIPC USB plugin permissions\n#### This default permission set includes:\n\n- `allow-list-devices`\n- `allow-open-device`\n- `allow-close-device`\n- `allow-open-vpn`\n- `allow-close-vpn`"
         }
       ]
     }

@@ -630,6 +630,7 @@ fn process_rx_transfer(
         &ReceiverBatchOptions {
             accept_corrupted: accept_bad_fcs,
             raw_payload_routes,
+            ..ReceiverBatchOptions::default()
         },
     );
 

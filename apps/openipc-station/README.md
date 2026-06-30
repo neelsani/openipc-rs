@@ -58,11 +58,27 @@ video-only overlay in the Tauri app, so the OSD stays visible in both modes.
   describe mixed video/audio.
 - Link HUD, metrics graphs, latency diagnostics, and logs.
 - Route manager for extra WFB payload outputs. Routes can inspect bytes, log a
-  throttled summary, forward to UDP in native/Tauri mode, or play filtered audio
-  RTP with WebCodecs `AudioDecoder`. The current implemented audio codec is
-  Opus, with an Auto mode for the documented OpenIPC payload type 98 stream.
+  throttled summary, forward to UDP in native/Tauri mode, or play filtered
+  audio RTP with WebCodecs `AudioDecoder`. The current implemented audio codec
+  is Opus, with an Auto mode for the documented OpenIPC payload type 98 stream.
+- VPN tab for the OpenIPC tunnel/data link. It is disabled by default and is
+  separate from custom payload routes.
 - Raw route counters and audio metrics. Protocol parsing beyond video/audio is
   intentionally left to app code or downstream integrations.
+
+## VPN Tunnel
+
+The VPN tab bridges the OpenIPC tunnel/data channel when explicitly enabled.
+It listens on tunnel RX radio port `0x20` and sends uplink packets on tunnel TX
+port `0xa0`. In native mode it creates an interface at `10.5.0.3/24`, strips
+OpenIPC's two-byte tunnel length prefix on downlink, and adds that prefix on
+uplink before WFB transmit. Once receive starts, the tab reports the actual
+interface name plus the local VPN IP.
+
+This is not available in browser/WebUSB mode. Desktop Unix and Windows use the
+Rust `tun` crate; Windows needs Wintun support available to the application.
+Android uses the local Tauri USB plugin to request `VpnService` consent and
+hand a VPN/TUN file descriptor to Rust.
 
 ## Android/Tauri
 
@@ -106,3 +122,7 @@ permission, open a `UsbDeviceConnection`, and pass its file descriptor to the
 Rust `openipc_connect_from_fd` command. Rust duplicates that descriptor before
 handing it to `nusb::Device::from_fd`; the frontend then asks the plugin to
 close the original Android handle.
+
+The same plugin also owns Android VPN permission. If the VPN tab is enabled,
+Station prepares an Android `VpnService` before receive starts and passes the
+resulting file descriptor to Rust for the tunnel bridge.

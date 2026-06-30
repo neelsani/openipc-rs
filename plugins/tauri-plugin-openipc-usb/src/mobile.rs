@@ -87,4 +87,35 @@ impl<R: Runtime> OpenIpcUsb<R> {
             Ok(())
         }
     }
+
+    /// Request Android VPN consent when needed and open a TUN fd.
+    pub fn open_vpn(&self) -> crate::Result<AndroidVpnOpened> {
+        #[cfg(target_os = "android")]
+        {
+            self.handle
+                .run_mobile_plugin("openVpn", ())
+                .map_err(Into::into)
+        }
+
+        #[cfg(not(target_os = "android"))]
+        Err(crate::Error::Message(
+            "Android VPN open is only available in the Android Tauri runtime".to_owned(),
+        ))
+    }
+
+    /// Close an Android VPN descriptor held by the mobile plugin.
+    pub fn close_vpn(&self, request: AndroidVpnCloseRequest) -> crate::Result<()> {
+        #[cfg(target_os = "android")]
+        {
+            self.handle
+                .run_mobile_plugin("closeVpn", request)
+                .map_err(Into::into)
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = request;
+            Ok(())
+        }
+    }
 }

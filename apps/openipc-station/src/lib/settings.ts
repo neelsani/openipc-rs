@@ -47,10 +47,10 @@ export const CHANNEL_ID_PRESETS: ChannelIdPreset[] = [
     hint: "OpenIPC telemetry downlink, usually MAVLink or MSP/OSD bytes",
   },
   {
-    name: "Tunnel / data",
+    name: "Data / tunnel tap",
     channelId: channelIdForRadioPort(0x20),
     port: 0x20,
-    hint: "OpenIPC tunnel/data downlink",
+    hint: "Raw OpenIPC tunnel/data downlink; VPN bridge is in the VPN tab",
   },
   {
     name: "Audio",
@@ -251,6 +251,7 @@ export const DEFAULT_SETTINGS: Settings = {
   channelOffset: 0,
   alinkTxPower: 20,
   audioVolume: 80,
+  vpnEnabled: false,
   darkMode: true,
   payloadRoutes: DEFAULT_PAYLOAD_ROUTES,
 };
@@ -331,6 +332,7 @@ export function sanitizeSettings(value: Partial<Settings>): Settings {
       100,
       DEFAULT_SETTINGS.audioVolume,
     ),
+    vpnEnabled: value.vpnEnabled === true,
     darkMode: value.darkMode !== false,
     payloadRoutes: sanitizePayloadRoutes(value.payloadRoutes),
   };

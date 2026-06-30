@@ -15,7 +15,7 @@ crates/openipc-web        wasm-bindgen package for browser/WebUSB apps
 apps/openipc-cli          Native command-line utilities
 apps/openipc-station      React/Vite browser app and Tauri desktop app
 plugins/tauri-plugin-openipc-usb
-                          Android USB permission bridge used by Station
+                          Android USB and VPN permission bridge used by Station
 docs                      Docusaurus documentation site
 scripts                   cleanup helpers
 ```
@@ -78,10 +78,11 @@ export NDK_HOME=$ANDROID_NDK_HOME
 export PATH="$JAVA_HOME/bin:$ANDROID_HOME/emulator:$ANDROID_HOME/platform-tools:$ANDROID_HOME/cmdline-tools/bin:$PATH"
 ```
 
-Android USB discovery uses the local `tauri-plugin-openipc-usb` plugin. The
-plugin asks for permission with Android `UsbManager`, opens the adapter, passes
-the file descriptor to Rust, and the Rust backend continues through
-`nusb::Device::from_fd`.
+Android USB discovery and VPN setup use the local `tauri-plugin-openipc-usb`
+plugin. It asks for USB permission with Android `UsbManager`, opens the adapter,
+passes the file descriptor to Rust, and the Rust backend continues through
+`nusb::Device::from_fd`. When the VPN tab is enabled, the same plugin requests
+`VpnService` consent and passes the VPN/TUN file descriptor to Rust.
 
 Use the native CLI:
 
@@ -106,8 +107,9 @@ sh scripts/clean-generated.sh
 ## Status
 
 The Rust protocol pipeline, Realtek driver path, WebUSB/WASM bindings,
-WebCodecs station UI, adaptive-link feedback, and CI/release automation are
-implemented. The driver tracks newer devourer behavior for TX modes,
+WebCodecs station UI, adaptive-link feedback, native VPN tunnel bridging, and
+CI/release automation are implemented. The driver tracks newer devourer
+behavior for TX modes,
 multi-transfer RX, RTL8814 firmware bring-up, EFUSE/per-rate TX power, PHYDM,
 power tracking, IQK, C2H/TX-status packets, and hardware diagnostics. Driver
 diagnostics are explicit APIs that apps schedule themselves; the library does

@@ -14,6 +14,7 @@ import type {
   AuthorizedUsbDevice,
   PayloadRouteConfig,
   PayloadRouteStats,
+  VpnStatus,
 } from "@/lib/types";
 
 export type ReceiverState =
@@ -72,6 +73,7 @@ export interface Settings {
   verbosity: "low" | "normal" | "high";
   darkMode: boolean;
   audioVolume: number;
+  vpnEnabled: boolean;
   payloadRoutes: PayloadRouteConfig[];
 }
 
@@ -100,6 +102,7 @@ export interface StationState {
   settings: Settings;
   routeStats: PayloadRouteStats[];
   audio: AudioStats;
+  vpnStatus: VpnStatus | null;
   v: {
     inputFps: number;
     renderFps: number;
@@ -428,6 +431,7 @@ export function useStation() {
       verbosity,
       darkMode: runtime.settings.darkMode,
       audioVolume: runtime.settings.audioVolume,
+      vpnEnabled: runtime.settings.vpnEnabled,
       payloadRoutes: runtime.settings.payloadRoutes,
     }),
     [runtime.settings, verbosity],
@@ -459,6 +463,7 @@ export function useStation() {
       channelOffset: patch.channelOffset ?? current.channelOffset,
       alinkTxPower: patch.txPower ?? current.alinkTxPower,
       audioVolume: patch.audioVolume ?? current.audioVolume,
+      vpnEnabled: patch.vpnEnabled ?? current.vpnEnabled,
       darkMode: patch.darkMode ?? current.darkMode,
       payloadRoutes: patch.payloadRoutes ?? current.payloadRoutes,
     }));
@@ -514,6 +519,7 @@ export function useStation() {
     settings,
     routeStats: runtime.routeStats,
     audio: runtime.audio,
+    vpnStatus: runtime.vpnStatus,
     v: {
       inputFps: runtime.videoStats.inputFps,
       renderFps: runtime.videoStats.renderFps,

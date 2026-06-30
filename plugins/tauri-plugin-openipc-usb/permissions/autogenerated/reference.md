@@ -7,6 +7,8 @@ Default OpenIPC USB plugin permissions
 - `allow-list-devices`
 - `allow-open-device`
 - `allow-close-device`
+- `allow-open-vpn`
+- `allow-close-vpn`
 
 ## Permission Table
 
@@ -39,6 +41,32 @@ Enables the close_device command without any pre-configured scope.
 <td>
 
 Denies the close_device command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`openipc-usb:allow-close-vpn`
+
+</td>
+<td>
+
+Enables the close_vpn command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`openipc-usb:deny-close-vpn`
+
+</td>
+<td>
+
+Denies the close_vpn command without any pre-configured scope.
 
 </td>
 </tr>
@@ -91,6 +119,32 @@ Enables the open_device command without any pre-configured scope.
 <td>
 
 Denies the open_device command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`openipc-usb:allow-open-vpn`
+
+</td>
+<td>
+
+Enables the open_vpn command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`openipc-usb:deny-open-vpn`
+
+</td>
+<td>
+
+Denies the open_vpn command without any pre-configured scope.
 
 </td>
 </tr>

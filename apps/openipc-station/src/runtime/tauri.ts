@@ -7,6 +7,7 @@ import type {
   LogLevel,
   PayloadRouteAction,
   UsbInfo,
+  VpnStatus,
 } from "@/lib/types";
 
 const TAURI_INTERNALS_KEY = "__TAURI_INTERNALS__";
@@ -14,6 +15,7 @@ const TAURI_INTERNALS_KEY = "__TAURI_INTERNALS__";
 export const TAURI_RX_BATCH_EVENT = "openipc://rx-batch";
 export const TAURI_LOG_EVENT = "openipc://log";
 export const TAURI_STOPPED_EVENT = "openipc://stopped";
+export const TAURI_VPN_STATUS_EVENT = "openipc://vpn-status";
 
 type TauriApi = {
   invoke: <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
@@ -95,12 +97,21 @@ export type TauriAndroidUsbOpenedDevice = TauriAndroidUsbDevice & {
   fd: number;
 };
 
+export type TauriAndroidVpnOpened = {
+  fd: number;
+  interfaceName: string;
+  address: string;
+  prefixLength: number;
+};
+
 export type TauriStartRxRequest = {
   keypairBase64: string;
   channelId: number;
   minimumEpoch: string;
   transferSize: number;
   adaptiveEnabled: boolean;
+  vpnEnabled: boolean;
+  vpnTunFd?: number;
   rfChannel: number;
   alinkTxPower: number;
   payloadRoutes: TauriPayloadRouteRequest[];
@@ -160,6 +171,8 @@ export type TauriStoppedPayload = {
   message: string;
 };
 
+export type TauriVpnStatusPayload = VpnStatus;
+
 export async function tauriListDevices(): Promise<AuthorizedUsbDevice[]> {
   const { invoke } = await tauriApi();
   return invoke("openipc_list_devices");
@@ -195,6 +208,16 @@ export async function tauriAndroidUsbOpenDevice(
 export async function tauriAndroidUsbCloseDevice(fd: number): Promise<void> {
   const { invoke } = await tauriApi();
   await invoke("plugin:openipc-usb|close_device", { request: { fd } });
+}
+
+export async function tauriAndroidVpnOpen(): Promise<TauriAndroidVpnOpened> {
+  const { invoke } = await tauriApi();
+  return invoke<TauriAndroidVpnOpened>("plugin:openipc-usb|open_vpn");
+}
+
+export async function tauriAndroidVpnClose(fd: number): Promise<void> {
+  const { invoke } = await tauriApi();
+  await invoke("plugin:openipc-usb|close_vpn", { request: { fd } });
 }
 
 export async function tauriStartRx(

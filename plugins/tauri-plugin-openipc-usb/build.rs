@@ -1,4 +1,10 @@
-const COMMANDS: &[&str] = &["list_devices", "open_device", "close_device"];
+const COMMANDS: &[&str] = &[
+    "list_devices",
+    "open_device",
+    "close_device",
+    "open_vpn",
+    "close_vpn",
+];
 
 fn main() {
     generate_android_supported_devices()

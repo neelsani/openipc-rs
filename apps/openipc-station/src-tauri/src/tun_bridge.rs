@@ -48,7 +48,6 @@ impl TunBridge {
         {
             config.tun_name("openipc%d");
             config.platform_config(|platform| {
-                platform.packet_information(false);
                 platform.ensure_root_privileges(true);
             });
         }

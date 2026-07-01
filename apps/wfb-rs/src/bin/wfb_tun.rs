@@ -89,7 +89,9 @@ mod unix_impl {
             .layer(tun::Layer::L3)
             .up();
         #[cfg(target_os = "linux")]
-        tun_config.platform_config(|platform| platform.ensure_root_privileges(true));
+        tun_config.platform_config(|platform| {
+            platform.ensure_root_privileges(true);
+        });
 
         let device = tun::create(&tun_config)?;
         device.set_nonblock()?;

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.25 - 2026-07-01
+
+### Features
+- Feat(driver): add RTL8812EU and RTL8822EU support (cc9faf8)
+
+
 ## 0.1.24 - 2026-07-01
 
 ### Changes

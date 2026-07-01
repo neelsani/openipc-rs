@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.23 - 2026-07-01
+
+### Fixes
+- Fix: typecheck linux wfb_tun config (5a82b78)
+
+
 ## 0.1.22 - 2026-07-01
 
 ### Features

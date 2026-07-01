@@ -80,9 +80,10 @@ actual policy on the transmitter side belongs to the air unit.
 ## Ground-Side TX Power Override
 
 Manual uplink TX-power override is implemented through Realtek TXAGC
-programming for RTL8812/RTL8821 register tables and RTL8814 command writes. It
-is exposed in native and browser paths, but still needs live on-air validation
-across chip families.
+programming for RTL8812/RTL8821 tables, RTL8814 command writes, and Jaguar3
+per-path references. Jaguar1 accepts indexes `0..=63`; Jaguar3 uses its full
+7-bit `0..=127` range. The API is exposed in native and browser paths, but still
+needs live on-air validation across adapter models.
 
 In the station UI this is the "Uplink TX power" slider shown when adaptive link
 is enabled. In the CLI it is `--alink-tx-power POWER`, where `POWER` is a TXAGC

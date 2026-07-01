@@ -30,6 +30,10 @@ use crate::usb_recovery::{
 #[cfg(not(target_arch = "wasm32"))]
 use crate::usb_transport::{read_register_with_recovery, write_register_with_recovery};
 use crate::PowerTrackingState;
+#[cfg(target_arch = "wasm32")]
+use std::sync::atomic::AtomicU8;
+#[cfg(target_arch = "wasm32")]
+use std::sync::OnceLock;
 
 impl RealtekDevice {
     /// Open the first supported Realtek USB adapter using async-shaped API.
@@ -77,17 +81,19 @@ impl RealtekDevice {
             bulk_in_ep,
             bulk_out_ep,
             bulk_out_ep_count,
+            detected_family: OnceLock::new(),
+            jaguar3_efuse: OnceLock::new(),
+            h2c_box: AtomicU8::new(0),
         })
     }
 
     /// Probe the chip family and RF layout from the hardware IDs and SYS_CFG register.
     pub async fn probe_chip_async(&self) -> Result<ChipInfo, DriverError> {
         let sys_cfg = self.read_u32_async(REG_SYS_CFG).await?;
-        Ok(ChipInfo::from_probe(
-            self.vendor_id,
-            self.product_id,
-            sys_cfg,
-        ))
+        let chip_id = self.read_u8_async(0x00fc).await.unwrap_or(0);
+        let chip = ChipInfo::from_probe(self.vendor_id, self.product_id, sys_cfg, chip_id);
+        let _ = self.detected_family.set(chip.family);
+        Ok(chip)
     }
 
     /// Initialize the adapter for monitor-mode OpenIPC reception.
@@ -114,17 +120,17 @@ impl RealtekDevice {
             ChipFamily::Rtl8812 | ChipFamily::Rtl8821 => {
                 Some(self.read_efuse_info_async(chip).await?)
             }
-            ChipFamily::Rtl8814 | ChipFamily::Rtl8822c => None,
+            ChipFamily::Rtl8814 | ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => None,
         };
 
         let fw_state = self.read_u32_async(REG_MCUFWDL).await.unwrap_or(0);
         let fw_already_running = match chip.family {
             ChipFamily::Rtl8814 => (fw_state & 0xff) == 0x78 || (fw_state & BIT15) != 0,
-            ChipFamily::Rtl8822c => (fw_state & 0xffff) == 0xc078,
+            ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => (fw_state & 0xffff) == 0xc078,
             _ => (fw_state & WINTINI_RDY) != 0,
         };
 
-        if chip.family == ChipFamily::Rtl8822c {
+        if chip.family.is_jaguar3() {
             return self
                 .initialize_monitor_jaguar3_async(chip, radio, options, fw_already_running)
                 .await;
@@ -153,7 +159,9 @@ impl RealtekDevice {
                     .await?;
                     firmware_downloaded = true;
                 }
-                ChipFamily::Rtl8822c => unreachable!("Jaguar3 is handled before generic init"),
+                ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
+                    unreachable!("Jaguar3 is handled before generic init")
+                }
             }
         }
 
@@ -216,7 +224,9 @@ impl RealtekDevice {
         chip: ChipInfo,
     ) -> Result<(), DriverError> {
         match chip.family {
-            ChipFamily::Rtl8822c => self.shutdown_monitor_jaguar3_async().await,
+            ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
+                self.shutdown_monitor_jaguar3_async().await
+            }
             ChipFamily::Rtl8812 | ChipFamily::Rtl8814 | ChipFamily::Rtl8821 => Ok(()),
         }
     }

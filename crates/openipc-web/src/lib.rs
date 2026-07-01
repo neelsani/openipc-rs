@@ -19,8 +19,8 @@ pub use webusb::supported_usb_filters;
 pub use webusb::{
     list_authorized_usb_devices, WebBbDbgportRead, WebFalseAlarmCounters, WebInitReport,
     WebIqkReport, WebJaguar3PowerTrackingReport, WebPhydmWatchdogReport, WebPowerTrackingReport,
-    WebQueueDepth8814, WebThermalStatus, WebUsbPhydmWatchdog, WebUsbPowerTracking8812,
-    WebUsbPowerTracking8822c, WebUsbRealtekDevice,
+    WebQueueDepth8814, WebThermalStatus, WebUsbJaguar3PowerTracking, WebUsbPhydmWatchdog,
+    WebUsbPowerTracking8812, WebUsbPowerTracking8822c, WebUsbRealtekDevice,
 };
 
 use wasm_bindgen::prelude::*;

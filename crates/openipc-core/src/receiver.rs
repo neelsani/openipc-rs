@@ -1,6 +1,9 @@
 use crate::channel::ChannelId;
 use crate::ieee80211::FrameLayout;
-use crate::realtek::{parse_rx_aggregate, AggregateError, RealtekRxPacket, RxPacketType};
+use crate::realtek::{
+    parse_rx_aggregate, parse_rx_aggregate_with_kind, AggregateError, RealtekRxPacket,
+    RxDescriptorKind, RxPacketType,
+};
 use crate::routes::{
     PayloadRouteError, PayloadRouteEvent, PayloadRouteId, PayloadRouteManager, PayloadRuntimeKey,
 };
@@ -317,6 +320,20 @@ impl ReceiverRuntime {
         options: &ReceiverBatchOptions,
     ) -> Result<ReceiverBatch, AggregateError> {
         let packets = parse_rx_aggregate(transfer)?;
+        Ok(self.push_rx_packets(packets, options))
+    }
+
+    /// Parse and process one Realtek USB RX transfer with an explicit descriptor layout.
+    ///
+    /// Use the layout reported by the hardware driver for Jaguar3 adapters.
+    /// [`Self::push_rx_transfer`] remains the Jaguar1-compatible convenience method.
+    pub fn push_rx_transfer_with_kind(
+        &mut self,
+        transfer: &[u8],
+        descriptor_kind: RxDescriptorKind,
+        options: &ReceiverBatchOptions,
+    ) -> Result<ReceiverBatch, AggregateError> {
+        let packets = parse_rx_aggregate_with_kind(transfer, descriptor_kind)?;
         Ok(self.push_rx_packets(packets, options))
     }
 
@@ -712,5 +729,33 @@ mod tests {
         assert!(batch.frames[0].is_keyframe);
         assert_eq!(batch.raw_payloads[0].data, packet);
         assert_eq!(batch.fec_counters, FecCounters::default());
+    }
+
+    #[test]
+    fn rx_transfer_accepts_explicit_jaguar3_descriptor_layout() {
+        let mut runtime = ReceiverRuntime::with_plain_video_route(
+            FrameLayout::WithFcs,
+            PayloadRouteId::new(1),
+            ChannelId::default_video(),
+            0,
+            1,
+            1,
+        )
+        .unwrap();
+        let mut transfer = vec![0u8; 32];
+        transfer[..4].copy_from_slice(&8u32.to_le_bytes());
+        transfer[24..32].copy_from_slice(&[0x08, 0, 0, 0, 0, 0, 0, 0]);
+
+        let batch = runtime
+            .push_rx_transfer_with_kind(
+                &transfer,
+                RxDescriptorKind::Jaguar3,
+                &ReceiverBatchOptions::default(),
+            )
+            .unwrap();
+
+        assert_eq!(batch.counters.packets, 1);
+        assert_eq!(batch.counters.accepted_packets, 1);
+        assert_eq!(batch.counters.ignored_frames, 1);
     }
 }

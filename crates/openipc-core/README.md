@@ -10,6 +10,8 @@ OpenIPC video without taking a dependency on a specific USB frontend.
 ## What It Does
 
 - Parse Realtek rtl88xx USB RX aggregates and 24-byte RX descriptors.
+- Select Jaguar1 or Jaguar3 RX descriptor layouts explicitly when processing
+  transfers from a hardware driver.
 - Filter OpenIPC/WFB 802.11 frames by channel id and radio port.
 - Handle WFB session packets, optional session TLVs, data decryption, and FEC
   recovery.
@@ -52,6 +54,11 @@ fn receiver_from_keypair(keypair_bytes: &[u8]) -> Result<ReceiverRuntime, Box<dy
     )?)
 }
 ```
+
+`push_rx_transfer` assumes the Jaguar1 descriptor layout for compatibility.
+When bytes come from `openipc-rtl88xx`, call `push_rx_transfer_with_kind` with
+`device.rx_descriptor_kind()` so RTL8812CU/EU and RTL8822CU/EU transfers use the
+Jaguar3 layout.
 
 The returned frame data is still encoded video. Feed it to WebCodecs, a native
 decoder, a file writer, or an RTP/Annex-B bridge depending on your application.

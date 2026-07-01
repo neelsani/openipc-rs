@@ -173,6 +173,7 @@ recv/decode options:
   --skip-txpwr                 skip TX-power table writes during channel set
   --force-iqk                  run IQK on RTL8814 as well as RTL8812
   --disable-iqk                skip IQK even where normally armed
+  --skip-txgapk                skip RTL8822E TX gain calibration
   --fwdl-8814 <kernel|rtw88>   RTL8814 firmware download path
   --fwdl-8814-chunk <n>        RTL8814 kernel firmware chunk size, 64..4096
   --tx-legacy-8812-desc        use legacy 8812 TX descriptor shape on RTL8814
@@ -180,11 +181,12 @@ recv/decode options:
   --alink-key <tx.key>         uplink keypair; defaults to --key
   --alink-epoch <n>            uplink WFB session epoch, default 0
   --alink-fec <k:n>            uplink FEC parameters, default 1:5
-  --alink-tx-power <0..63>     force adaptive-link uplink TXAGC index
+  --alink-tx-power <0..127>    force adaptive-link uplink TXAGC index (max 63 on Jaguar1)
 
 devourer-compatible env:
   DEVOURER_VID DEVOURER_PID DEVOURER_SKIP_RESET DEVOURER_TX_EP
-  DEVOURER_SKIP_TXPWR DEVOURER_FORCE_IQK DEVOURER_DISABLE_IQK
+  DEVOURER_SKIP_TXPWR DEVOURER_FORCE_IQK DEVOURER_DISABLE_IQK DEVOURER_SKIP_IQK
+  DEVOURER_SKIP_TXGAPK
   DEVOURER_8814_FWDL DEVOURER_8814_FWDL_CHUNK
   DEVOURER_TX_LEGACY_8812_DESC"#
     );
@@ -284,6 +286,7 @@ impl RecvConfig {
                 "--skip-txpwr" => monitor_options.skip_tx_power = true,
                 "--force-iqk" => monitor_options.force_iqk = true,
                 "--disable-iqk" => monitor_options.disable_iqk = true,
+                "--skip-txgapk" => monitor_options.skip_txgapk = true,
                 "--fwdl-8814" => {
                     let mode = next_arg(&mut args, "--fwdl-8814")?;
                     monitor_options.firmware_8814_mode = Firmware8814Mode::from_env_value(&mode)
@@ -664,7 +667,7 @@ struct ProcessRxOptions {
 
 fn rx_descriptor_kind(chip_family: ChipFamily) -> RxDescriptorKind {
     match chip_family {
-        ChipFamily::Rtl8822c => RxDescriptorKind::Jaguar3,
+        ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => RxDescriptorKind::Jaguar3,
         ChipFamily::Rtl8812 | ChipFamily::Rtl8814 | ChipFamily::Rtl8821 => {
             RxDescriptorKind::Jaguar1
         }

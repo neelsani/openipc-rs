@@ -326,6 +326,18 @@ declare module "@openipc/wasm" {
       firmware8814Mode: string,
       firmware8814Chunk: number,
     ): Promise<WebInitReport>;
+    initializeMonitorAdvancedWithTxgapk(
+      channel: number,
+      channelWidthMhz: number,
+      channelOffset: number,
+      acceptBadFcs: boolean,
+      skipTxPower: boolean,
+      forceIqk: boolean,
+      disableIqk: boolean,
+      skipTxgapk: boolean,
+      firmware8814Mode: string,
+      firmware8814Chunk: number,
+    ): Promise<WebInitReport>;
     shutdownMonitor(): Promise<void>;
     readRxTransfer(length: number): Promise<Uint8Array>;
     readRxTransfers(length: number, inFlight: number): Promise<Uint8Array[]>;
@@ -365,6 +377,11 @@ declare module "@openipc/wasm" {
       channel: number,
       channelWidthMhz: number,
     ): Promise<WebPowerTrackingReport>;
+  }
+
+  export class WebUsbJaguar3PowerTracking {
+    constructor();
+    tick(device: WebUsbRealtekDevice): Promise<WebJaguar3PowerTrackingReport>;
   }
 
   export class WebUsbPowerTracking8822c {

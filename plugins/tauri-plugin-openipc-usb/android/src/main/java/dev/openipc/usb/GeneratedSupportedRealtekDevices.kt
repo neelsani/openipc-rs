@@ -12,9 +12,10 @@ internal data class SupportedRealtekDevice(
 
 internal val supportedRealtekDevices =
   listOf(
-    SupportedRealtekDevice(0x0bda, 0x8812, "RTL8812AU / RTL8811AU reference PID"),
-    SupportedRealtekDevice(0x0bda, 0x881a, "RTL8812AU-VS"),
-    SupportedRealtekDevice(0x0bda, 0x881b, "RTL8812AU-VL"),
+    SupportedRealtekDevice(0x0bda, 0x8812, "RTL8812AU / RTL8811AU / RTL8812EU reference PID"),
+    SupportedRealtekDevice(0x0bda, 0x881a, "RTL8812AU-VS / RTL8812EU variant"),
+    SupportedRealtekDevice(0x0bda, 0x881b, "RTL8812AU-VL / RTL8812EU variant"),
+    SupportedRealtekDevice(0x0bda, 0x881c, "RTL8812EU variant"),
     SupportedRealtekDevice(0x0bda, 0x0811, "RTL8811AU"),
     SupportedRealtekDevice(0x0bda, 0xa811, "RTL8811AU"),
     SupportedRealtekDevice(0x0bda, 0xb811, "RTL8811AU / RTL8821AU variant"),
@@ -54,4 +55,7 @@ internal val supportedRealtekDevices =
     SupportedRealtekDevice(0x0bda, 0xc812, "RTL8812CU / RTL8822CU WiFi-only default PID"),
     SupportedRealtekDevice(0x0bda, 0xc82c, "RTL8822CU multi-function default PID"),
     SupportedRealtekDevice(0x0bda, 0xc82e, "RTL8822CU multi-function default PID"),
+    SupportedRealtekDevice(0x0bda, 0xa81a, "RTL8812EU / LB-LINK BL-M8812EU2"),
+    SupportedRealtekDevice(0x0bda, 0xe822, "RTL8822EU"),
+    SupportedRealtekDevice(0x0bda, 0xa82a, "RTL8822EU"),
   )

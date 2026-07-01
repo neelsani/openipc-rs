@@ -19,6 +19,11 @@ bring-up that matters for OpenIPC receive:
 - TX descriptors,
 - RX descriptor parsing.
 
+The current source also covers Jaguar3 `rtl8822c` and `rtl8822e`. The latter
+adds chip-ID dispatch for shared USB PIDs, its own firmware/tables, V1 EFUSE,
+RFE/PA setup, DACK/IQK/TXGAPK, and 7-bit TXAGC behavior. The corresponding Rust
+path lives in `openipc-rtl88xx` and uses `nusb` instead of libusb.
+
 The USB model is vendor-control register access plus bulk endpoints:
 
 - request `0x05` for register reads and writes,

@@ -173,6 +173,7 @@ pub fn parse_common_radio_option(
         "--skip-txpwr" => config.monitor_options.skip_tx_power = true,
         "--force-iqk" => config.monitor_options.force_iqk = true,
         "--disable-iqk" => config.monitor_options.disable_iqk = true,
+        "--skip-txgapk" => config.monitor_options.skip_txgapk = true,
         "--fwdl-8814" => {
             let mode = next_arg(args, "--fwdl-8814")?;
             config.monitor_options.firmware_8814_mode = Firmware8814Mode::from_env_value(&mode)
@@ -333,5 +334,5 @@ pub fn parse_channel_width(value: &str) -> CliResult<ChannelWidth> {
 }
 
 pub fn usage_common_radio() -> &'static str {
-    "--vid <id> --pid <id> --tx-ep <ep> --skip-reset --no-init --rf-channel <n> --rf-width <5|10|20|40|80> --rf-offset <n>"
+    "--vid <id> --pid <id> --tx-ep <ep> --skip-reset --no-init --skip-txgapk --rf-channel <n> --rf-width <5|10|20|40|80> --rf-offset <n>"
 }

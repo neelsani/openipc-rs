@@ -6,6 +6,8 @@ use nusb::transfer::{Buffer, Bulk, In, Out, TransferError};
 #[cfg(not(target_arch = "wasm32"))]
 use nusb::MaybeFuture;
 use openipc_core::realtek::{parse_rx_aggregate_with_kind, RealtekRxPacket, RxDescriptorKind};
+use std::sync::atomic::AtomicU8;
+use std::sync::OnceLock;
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::regs::*;
@@ -42,6 +44,9 @@ pub struct RealtekDevice {
     /// Selected bulk-OUT endpoint address.
     pub bulk_out_ep: u8,
     pub(crate) bulk_out_ep_count: usize,
+    pub(crate) detected_family: OnceLock<ChipFamily>,
+    pub(crate) jaguar3_efuse: OnceLock<[u8; 512]>,
+    pub(crate) h2c_box: AtomicU8,
 }
 
 impl RealtekDevice {
@@ -161,6 +166,9 @@ impl RealtekDevice {
             bulk_in_ep,
             bulk_out_ep,
             bulk_out_ep_count,
+            detected_family: OnceLock::new(),
+            jaguar3_efuse: OnceLock::new(),
+            h2c_box: AtomicU8::new(0),
         })
     }
 
@@ -173,11 +181,10 @@ impl RealtekDevice {
     /// Probe chip family, RF path count, and cut version from hardware.
     pub fn probe_chip(&self) -> Result<ChipInfo, DriverError> {
         let sys_cfg = self.read_u32(REG_SYS_CFG)?;
-        Ok(ChipInfo::from_probe(
-            self.vendor_id,
-            self.product_id,
-            sys_cfg,
-        ))
+        let chip_id = self.read_u8(0x00fc).unwrap_or(0);
+        let chip = ChipInfo::from_probe(self.vendor_id, self.product_id, sys_cfg, chip_id);
+        let _ = self.detected_family.set(chip.family);
+        Ok(chip)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -267,9 +274,15 @@ impl RealtekDevice {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    /// Re-assert RTL8822C/RTL8812CU coex state and firmware keepalives.
+    /// Re-assert Jaguar3 coex state and firmware keepalives.
     pub fn run_jaguar3_coex_keepalive(&self) -> Result<(), DriverError> {
         block_on_ready(self.run_jaguar3_coex_keepalive_async())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Prepare the initialized adapter for a transmit-only workload.
+    pub fn prepare_transmit_only(&self) -> Result<(), DriverError> {
+        block_on_ready(self.prepare_transmit_only_async())
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -357,12 +370,21 @@ impl RealtekDevice {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    /// Run one RTL8822C/RTL8812CU thermal power tracking update tick.
+    /// Run one Jaguar3 thermal power tracking update tick.
+    pub fn tick_jaguar3_power_tracking(
+        &self,
+        state: &mut Jaguar3PowerTrackingState,
+    ) -> Result<Jaguar3PowerTrackingReport, DriverError> {
+        block_on_ready(self.tick_jaguar3_power_tracking_async(state))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Compatibility alias for [`Self::tick_jaguar3_power_tracking`].
     pub fn tick_power_tracking_8822c(
         &self,
         state: &mut Jaguar3PowerTrackingState,
     ) -> Result<Jaguar3PowerTrackingReport, DriverError> {
-        block_on_ready(self.tick_power_tracking_8822c_async(state))
+        self.tick_jaguar3_power_tracking(state)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -412,8 +434,13 @@ impl RealtekDevice {
 
     /// Return the RX descriptor layout implied by this adapter's VID/PID.
     pub fn rx_descriptor_kind(&self) -> RxDescriptorKind {
-        match supported_family_hint(self.vendor_id, self.product_id) {
-            Some(ChipFamily::Rtl8822c) => RxDescriptorKind::Jaguar3,
+        match self
+            .detected_family
+            .get()
+            .copied()
+            .or_else(|| supported_family_hint(self.vendor_id, self.product_id))
+        {
+            Some(family) if family.is_jaguar3() => RxDescriptorKind::Jaguar3,
             _ => RxDescriptorKind::Jaguar1,
         }
     }

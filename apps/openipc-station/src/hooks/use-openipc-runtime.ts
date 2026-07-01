@@ -12,7 +12,7 @@ import initWasm, {
   OpenIpcMockPayloadRuntime,
   OpenIpcMockRtpPipeline,
   OpenIpcReceiver,
-  WebUsbPowerTracking8822c,
+  WebUsbJaguar3PowerTracking,
   WebUsbRealtekDevice,
   listAuthorizedUsbDevices,
   supportedUsbFilters,
@@ -691,7 +691,7 @@ export function useOpenIpcRuntime() {
   const receiverRef = useRef<OpenIpcReceiver | null>(null);
   const adaptiveRef = useRef<OpenIpcAdaptiveLink | null>(null);
   const usbRef = useRef<WebUsbRealtekDevice | null>(null);
-  const jaguar3PowerTrackingRef = useRef<WebUsbPowerTracking8822c | null>(null);
+  const jaguar3PowerTrackingRef = useRef<WebUsbJaguar3PowerTracking | null>(null);
   const runningRef = useRef(false);
   const lastJaguar3CoexKeepaliveRef = useRef(0);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -2040,7 +2040,7 @@ export function useOpenIpcRuntime() {
     usbRef.current = realtek;
     jaguar3PowerTrackingRef.current =
       realtek.rxDescriptorKind() === "jaguar3"
-        ? new WebUsbPowerTracking8822c()
+        ? new WebUsbJaguar3PowerTracking()
         : null;
     lastJaguar3CoexKeepaliveRef.current = 0;
     applyRxDescriptorKind(realtek.rxDescriptorKind());

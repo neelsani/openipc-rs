@@ -21,7 +21,9 @@ impl RealtekDevice {
         let flow = match chip.family {
             ChipFamily::Rtl8821 => RTL8821_POWER_ON_FLOW,
             ChipFamily::Rtl8812 | ChipFamily::Rtl8814 => RTL8812_POWER_ON_FLOW,
-            ChipFamily::Rtl8822c => return Err(DriverError::UnsupportedFirmwarePath(chip.family)),
+            ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
+                return Err(DriverError::UnsupportedFirmwarePath(chip.family));
+            }
         };
         self.run_power_sequence_async(flow).await?;
 
@@ -78,7 +80,9 @@ impl RealtekDevice {
             ChipFamily::Rtl8821 => TX_PAGE_BOUNDARY_8821 as u32,
             ChipFamily::Rtl8812 => TX_PAGE_BOUNDARY_8812 as u32,
             ChipFamily::Rtl8814 => return Ok(()),
-            ChipFamily::Rtl8822c => return Err(DriverError::UnsupportedFirmwarePath(chip.family)),
+            ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
+                return Err(DriverError::UnsupportedFirmwarePath(chip.family));
+            }
         };
 
         for page in 0..txpktbuf_bndy.saturating_sub(1) {
@@ -126,7 +130,9 @@ impl RealtekDevice {
             ChipFamily::Rtl8812 => rtl_data::RTL8812_FW_NIC,
             ChipFamily::Rtl8821 => rtl_data::RTL8821_FW_NIC,
             ChipFamily::Rtl8814 => return Err(DriverError::UnsupportedFirmwarePath(chip.family)),
-            ChipFamily::Rtl8822c => return Err(DriverError::UnsupportedFirmwarePath(chip.family)),
+            ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
+                return Err(DriverError::UnsupportedFirmwarePath(chip.family));
+            }
         };
         let firmware = strip_firmware_header(chip.family, firmware);
 

@@ -12,6 +12,7 @@ const EFUSE_MAP_LEN_JAGUAR: usize = 512;
 const EFUSE_MAX_SECTION_JAGUAR: usize = 64;
 const EFUSE_MAX_WORD_UNIT_JAGUAR: usize = 4;
 const EFUSE_REAL_CONTENT_LEN_JAGUAR: u16 = 512;
+const EFUSE_REAL_CONTENT_LEN_8822E: u16 = 1024;
 
 const EEPROM_MAC_ADDR_8812AU: usize = 0x0d7;
 const EEPROM_MAC_ADDR_8814AU: usize = 0x0d8;
@@ -24,6 +25,8 @@ const EEPROM_TX_BBSWING_2G_8812: usize = 0x0c6;
 const EEPROM_TX_BBSWING_5G_8812: usize = 0x0c7;
 const EEPROM_RFE_OPTION_8812: usize = 0x0ca;
 const EEPROM_THERMAL_METER_8812: usize = 0x0ba;
+const EEPROM_THERMAL_METER_A_8822E: usize = 0x0d0;
+const EEPROM_THERMAL_METER_B_8822E: usize = 0x0d1;
 const EEPROM_XTAL_8812: usize = 0x0b9;
 const EEPROM_DEFAULT_CRYSTAL_CAP_8812: u8 = 0x20;
 const TX_POWER_PG_OFFSET: usize = 0x10;
@@ -99,6 +102,7 @@ pub(crate) struct EfuseInfo {
     pub(crate) tx_bb_swing_5g: u8,
     pub(crate) crystal_cap: u8,
     pub(crate) thermal_meter: u8,
+    pub(crate) thermal_meter_paths: [u8; 2],
     pub(crate) tx_power: TxPowerInfo,
 }
 
@@ -136,15 +140,21 @@ impl RealtekDevice {
             tx_bb_swing_2g: efuse_or_zero(map[EEPROM_TX_BBSWING_2G_8812]),
             tx_bb_swing_5g: efuse_or_zero(map[EEPROM_TX_BBSWING_5G_8812]),
             crystal_cap: crystal_cap_from_efuse_map(&map),
-            thermal_meter: thermal_meter_from_efuse_map(&map),
+            thermal_meter: thermal_meter_from_efuse_map(chip, &map),
+            thermal_meter_paths: thermal_meter_paths_from_efuse_map(chip, &map),
             tx_power: tx_power_info_from_efuse_map(chip, &map),
         })
     }
 
     async fn read_efuse_logical_map_async(
         &self,
-        _chip: ChipInfo,
+        chip: ChipInfo,
     ) -> Result<[u8; EFUSE_MAP_LEN_JAGUAR], DriverError> {
+        if chip.family == ChipFamily::Rtl8822e {
+            let map = self.read_efuse_logical_map_8822e_async().await?;
+            let _ = self.jaguar3_efuse.set(map);
+            return Ok(map);
+        }
         self.read_efuse_autoload_probe_bytes_async().await?;
         self.efuse_power_switch_async(false, true).await?;
         let result = self.read_efuse_logical_map_powered_async().await;
@@ -153,6 +163,123 @@ impl RealtekDevice {
             (Ok(map), Ok(())) => Ok(map),
             (Err(err), _) => Err(err),
             (Ok(_), Err(err)) => Err(err),
+        }
+    }
+
+    pub(crate) async fn efuse_power_cut_8822e_async(
+        &self,
+        enabled: bool,
+    ) -> Result<(), DriverError> {
+        const REG_PMC_DBG_CTRL2: u16 = 0x00cc;
+        const REG_EFUSE_CTRL_1: u16 = 0x00a4;
+        const BIT_EF_BURST: u32 = 1 << 19;
+        const EB2CORE: u16 = 1 << 8;
+        const PWC_EV2EF_S: u16 = 1 << 14;
+        const PWC_EV2EF_B: u16 = 1 << 15;
+        const PMC_WRITE_MASK: u8 = 1 << 2;
+
+        if enabled {
+            let pmc = self.read_u8_async(REG_PMC_DBG_CTRL2).await.unwrap_or(0);
+            self.write_u8_async(REG_PMC_DBG_CTRL2, pmc | PMC_WRITE_MASK)
+                .await?;
+            let iso = self.read_u16_async(REG_SYS_ISO_CTRL).await.unwrap_or(0);
+            self.write_u16_async(REG_SYS_ISO_CTRL, iso | PWC_EV2EF_S)
+                .await?;
+            crate::time::sleep_ms(1).await;
+            let iso = self.read_u16_async(REG_SYS_ISO_CTRL).await.unwrap_or(0);
+            self.write_u16_async(REG_SYS_ISO_CTRL, iso | PWC_EV2EF_B)
+                .await?;
+            let iso = self.read_u16_async(REG_SYS_ISO_CTRL).await.unwrap_or(0);
+            self.write_u16_async(REG_SYS_ISO_CTRL, iso & !EB2CORE)
+                .await?;
+            let burst = self.read_u32_async(REG_EFUSE_CTRL_1).await.unwrap_or(0);
+            self.write_u32_async(REG_EFUSE_CTRL_1, burst | BIT_EF_BURST)
+                .await?;
+        } else {
+            let burst = self.read_u32_async(REG_EFUSE_CTRL_1).await.unwrap_or(0);
+            self.write_u32_async(REG_EFUSE_CTRL_1, burst & !BIT_EF_BURST)
+                .await?;
+            let iso = self.read_u16_async(REG_SYS_ISO_CTRL).await.unwrap_or(0);
+            self.write_u16_async(REG_SYS_ISO_CTRL, iso | EB2CORE)
+                .await?;
+            let iso = self.read_u16_async(REG_SYS_ISO_CTRL).await.unwrap_or(0);
+            self.write_u16_async(REG_SYS_ISO_CTRL, iso & !PWC_EV2EF_B)
+                .await?;
+            crate::time::sleep_ms(1).await;
+            let iso = self.read_u16_async(REG_SYS_ISO_CTRL).await.unwrap_or(0);
+            self.write_u16_async(REG_SYS_ISO_CTRL, iso & !PWC_EV2EF_S)
+                .await?;
+            let pmc = self.read_u8_async(REG_PMC_DBG_CTRL2).await.unwrap_or(0);
+            self.write_u8_async(REG_PMC_DBG_CTRL2, pmc & !PMC_WRITE_MASK)
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn read_efuse_byte_8822e_async(
+        &self,
+        address: u16,
+    ) -> Result<u8, DriverError> {
+        const BIT_EF_READY: u32 = 1 << 29;
+        const EF_ADDR_MASK: u32 = 0x7ff << 16;
+        const EF_DATA_MASK: u32 = 0xffff;
+
+        let current = self.read_u32_async(REG_EFUSE_CTRL).await.unwrap_or(0);
+        let trigger = (current & !(EF_ADDR_MASK | EF_DATA_MASK | BIT_EF_READY))
+            | (u32::from(address & 0x7ff) << 16);
+        self.write_u32_async(REG_EFUSE_CTRL, trigger).await?;
+        for _ in 0..1000 {
+            crate::time::sleep_micros(50).await;
+            let value = self.read_u32_async(REG_EFUSE_CTRL).await.unwrap_or(0);
+            if value & BIT_EF_READY != 0 {
+                return Ok(value as u8);
+            }
+        }
+        Ok(0xff)
+    }
+
+    async fn read_efuse_logical_map_8822e_async(
+        &self,
+    ) -> Result<[u8; EFUSE_MAP_LEN_JAGUAR], DriverError> {
+        let mut map = [0xff; EFUSE_MAP_LEN_JAGUAR];
+        self.efuse_power_cut_8822e_async(true).await?;
+        let result = async {
+            let mut physical = 0u16;
+            let mut ff_run = 0u8;
+            while physical < EFUSE_REAL_CONTENT_LEN_8822E {
+                let header0 = self.read_efuse_byte_8822e_async(physical).await?;
+                physical += 1;
+                if header0 == 0xff {
+                    ff_run = ff_run.saturating_add(1);
+                    if ff_run >= 64 {
+                        break;
+                    }
+                    continue;
+                }
+                ff_run = 0;
+                if header0 & 0xf0 != 0x30 || physical >= EFUSE_REAL_CONTENT_LEN_8822E {
+                    break;
+                }
+                let header1 = self.read_efuse_byte_8822e_async(physical).await?;
+                physical += 1;
+                let word_enable = header1 & 0x0f;
+                let data_len = (word_enable.count_zeros() - 4) as usize * 2;
+                let mut data = [0xff; 8];
+                let mut actual = 0usize;
+                while actual < data_len && physical < EFUSE_REAL_CONTENT_LEN_8822E {
+                    data[actual] = self.read_efuse_byte_8822e_async(physical).await?;
+                    physical += 1;
+                    actual += 1;
+                }
+                let _ = apply_efuse_block_8822e(&mut map, header0, header1, &data[..actual]);
+            }
+            Ok::<_, DriverError>(map)
+        }
+        .await;
+        let power_off = self.efuse_power_cut_8822e_async(false).await;
+        match (result, power_off) {
+            (Ok(map), Ok(())) => Ok(map),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
         }
     }
 
@@ -341,12 +468,44 @@ impl RealtekDevice {
     }
 }
 
+fn apply_efuse_block_8822e(
+    map: &mut [u8; EFUSE_MAP_LEN_JAGUAR],
+    header0: u8,
+    header1: u8,
+    data: &[u8],
+) -> Option<usize> {
+    if header0 & 0xf0 != 0x30 {
+        return None;
+    }
+    let block = usize::from(((header0 & 0x0f) << 4) | (header1 >> 4));
+    let word_enable = header1 & 0x0f;
+    let expected = (word_enable.count_zeros() - 4) as usize * 2;
+    if data.len() < expected {
+        return None;
+    }
+
+    let mut data_index = 0usize;
+    let base = block << 3;
+    for word in 0..4usize {
+        if word_enable & (1 << word) != 0 {
+            continue;
+        }
+        for byte in 0..2usize {
+            if let Some(slot) = map.get_mut(base + word * 2 + byte) {
+                *slot = data[data_index];
+            }
+            data_index += 1;
+        }
+    }
+    Some(expected)
+}
+
 fn mac_from_efuse_map(chip: ChipInfo, map: &[u8; EFUSE_MAP_LEN_JAGUAR]) -> Option<[u8; 6]> {
     let offset = match chip.family {
         ChipFamily::Rtl8812 => EEPROM_MAC_ADDR_8812AU,
         ChipFamily::Rtl8814 => EEPROM_MAC_ADDR_8814AU,
         ChipFamily::Rtl8821 => EEPROM_MAC_ADDR_8821AU,
-        ChipFamily::Rtl8822c => return None,
+        ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => return None,
     };
     let bytes = map.get(offset..offset + 6)?;
 
@@ -366,7 +525,7 @@ fn rfe_type_from_efuse_map(
 ) -> u8 {
     let rfe_option = map[EEPROM_RFE_OPTION_8812];
     match chip.family {
-        ChipFamily::Rtl8822c => {
+        ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
             if rfe_option == 0xff {
                 0
             } else {
@@ -508,8 +667,20 @@ fn crystal_cap_from_efuse_map(map: &[u8; EFUSE_MAP_LEN_JAGUAR]) -> u8 {
     }
 }
 
-fn thermal_meter_from_efuse_map(map: &[u8; EFUSE_MAP_LEN_JAGUAR]) -> u8 {
-    map[EEPROM_THERMAL_METER_8812]
+fn thermal_meter_from_efuse_map(chip: ChipInfo, map: &[u8; EFUSE_MAP_LEN_JAGUAR]) -> u8 {
+    thermal_meter_paths_from_efuse_map(chip, map)[0]
+}
+
+fn thermal_meter_paths_from_efuse_map(chip: ChipInfo, map: &[u8; EFUSE_MAP_LEN_JAGUAR]) -> [u8; 2] {
+    if chip.family == ChipFamily::Rtl8822e {
+        [
+            map[EEPROM_THERMAL_METER_A_8822E],
+            map[EEPROM_THERMAL_METER_B_8822E],
+        ]
+    } else {
+        let thermal = map[EEPROM_THERMAL_METER_8812];
+        [thermal, thermal]
+    }
 }
 
 fn tx_power_info_from_efuse_map(chip: ChipInfo, map: &[u8; EFUSE_MAP_LEN_JAGUAR]) -> TxPowerInfo {
@@ -1037,7 +1208,7 @@ mod tests {
                 ChipFamily::Rtl8812 => RfType::TwoTTwoR,
                 ChipFamily::Rtl8814 => RfType::FourTFourR,
                 ChipFamily::Rtl8821 => RfType::OneTOneR,
-                ChipFamily::Rtl8822c => RfType::TwoTTwoR,
+                ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => RfType::TwoTTwoR,
             },
             cut_version: 0,
             sys_cfg: 0,
@@ -1114,9 +1285,33 @@ mod tests {
     #[test]
     fn reads_thermal_meter_baseline_like_devourer() {
         let mut map = [0xff; EFUSE_MAP_LEN_JAGUAR];
-        assert_eq!(thermal_meter_from_efuse_map(&map), 0xff);
+        assert_eq!(
+            thermal_meter_from_efuse_map(chip(ChipFamily::Rtl8812), &map),
+            0xff
+        );
         map[EEPROM_THERMAL_METER_8812] = 0x1a;
-        assert_eq!(thermal_meter_from_efuse_map(&map), 0x1a);
+        assert_eq!(
+            thermal_meter_from_efuse_map(chip(ChipFamily::Rtl8812), &map),
+            0x1a
+        );
+    }
+
+    #[test]
+    fn decodes_rtl8822e_two_byte_block_headers() {
+        let mut map = [0xff; EFUSE_MAP_LEN_JAGUAR];
+
+        // Block 0x19 starts at logical 0xc8; word-enable 0xd carries word 1,
+        // which contains the RFE option at logical offset 0xca.
+        assert_eq!(
+            apply_efuse_block_8822e(&mut map, 0x31, 0x9d, &[0x15, 0xaa]),
+            Some(2)
+        );
+        assert_eq!(map[0xca], 0x15);
+        assert_eq!(map[0xcb], 0xaa);
+        assert_eq!(map[0xc8], 0xff);
+
+        assert_eq!(apply_efuse_block_8822e(&mut map, 0x31, 0x9d, &[0x15]), None);
+        assert_eq!(apply_efuse_block_8822e(&mut map, 0x21, 0x9d, &[]), None);
     }
 
     #[test]

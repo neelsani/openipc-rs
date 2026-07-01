@@ -2,7 +2,7 @@ use crate::async_iqk::IqkReport;
 use crate::device::RealtekDevice;
 use crate::rtl_data;
 use crate::time::{sleep_micros, sleep_ms};
-use crate::types::{ChannelWidth, ChipInfo, DriverError};
+use crate::types::{ChannelWidth, ChipFamily, ChipInfo, DriverError};
 
 const MASKDWORD: u32 = 0xffff_ffff;
 const RFREG_MASK: u32 = 0x000f_ffff;
@@ -34,25 +34,43 @@ const BB_BACKUP_REGS: [u16; BB_REG_NUM_8822C] = [
 ];
 const RF_BACKUP_REGS: [u16; RF_REG_NUM_8822C] = [0x19, 0xdf, 0x9e];
 
-/// Mutable RTL8822C/RTL8812CU thermal TX power tracking state.
+/// Mutable Jaguar3 thermal TX power tracking state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Jaguar3PowerTrackingState {
+    /// Chip family this state was initialized for.
+    pub chip_family: Option<ChipFamily>,
     /// Per-path cold-boot thermal references. `-1` means not sampled yet.
     pub thermal_ref: [i16; 2],
     /// Thermal reference used for LC-tank recalibration decisions.
     pub thermal_lck_ref: i16,
+    /// Current Jaguar3 channel used to select EU thermal compensation tables.
+    pub channel: u8,
+    /// Per-path rolling thermal average used by RTL8822E.
+    pub thermal_average: [[u8; 4]; 2],
+    /// Next rolling-average slot for each RF path.
+    pub thermal_average_index: [u8; 2],
+    /// Number of valid rolling-average samples for each RF path.
+    pub thermal_average_count: [u8; 2],
+    /// True after the RTL8822E thermal meter has been triggered.
+    pub thermal_meter_triggered: bool,
 }
 
 impl Default for Jaguar3PowerTrackingState {
     fn default() -> Self {
         Self {
+            chip_family: None,
             thermal_ref: [-1, -1],
             thermal_lck_ref: -1,
+            channel: 0,
+            thermal_average: [[0; 4]; 2],
+            thermal_average_index: [0; 2],
+            thermal_average_count: [0; 2],
+            thermal_meter_triggered: false,
         }
     }
 }
 
-/// Report returned by one RTL8822C/RTL8812CU thermal power tracking tick.
+/// Report returned by one Jaguar3 thermal power tracking tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Jaguar3PowerTrackingReport {
     /// Raw thermal readings from RF paths A and B.
@@ -87,13 +105,33 @@ impl RealtekDevice {
         })
     }
 
-    /// Run one RTL8822C/RTL8812CU thermal TX power tracking tick.
+    /// Run one Jaguar3 thermal TX power tracking tick.
+    pub async fn tick_jaguar3_power_tracking_async(
+        &self,
+        state: &mut Jaguar3PowerTrackingState,
+    ) -> Result<Jaguar3PowerTrackingReport, DriverError> {
+        let chip = self.probe_chip_async().await?;
+        if chip.family == ChipFamily::Rtl8822e {
+            return self
+                .tick_power_tracking_8822e_inner_async(chip, state)
+                .await;
+        }
+        if state.chip_family != Some(chip.family) {
+            *state = Jaguar3PowerTrackingState {
+                chip_family: Some(chip.family),
+                ..Jaguar3PowerTrackingState::default()
+            };
+        }
+        let mut cal = Jaguar3Cal::new(self);
+        cal.pwr_track(state).await
+    }
+
+    /// Compatibility alias for [`Self::tick_jaguar3_power_tracking_async`].
     pub async fn tick_power_tracking_8822c_async(
         &self,
         state: &mut Jaguar3PowerTrackingState,
     ) -> Result<Jaguar3PowerTrackingReport, DriverError> {
-        let mut cal = Jaguar3Cal::new(self);
-        cal.pwr_track(state).await
+        self.tick_jaguar3_power_tracking_async(state).await
     }
 }
 

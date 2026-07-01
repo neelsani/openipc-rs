@@ -9,10 +9,11 @@ The goal is practical parity: `openipc-rs` should issue the same class of USB,
 firmware, MAC, RF, RX, and TX operations while keeping a Rust-native API and
 using `nusb` instead of libusb directly.
 
-The reference commit used for this pass was:
+The reference commits used for this pass were:
 
 ```text
-OpenIPC/devourer 011f7d3 Jaguar3 (RTL8822CU / RTL8812CU) userspace port (#102)
+OpenIPC/devourer f542b06 Add RTL8812EU / RTL8822EU (rtl8822e) support (#124)
+OpenIPC/devourer 55f0649 Split Jaguar1 + compile-time per-chip selection (#125)
 ```
 
 ## Audit Plan
@@ -63,11 +64,14 @@ boundaries are:
 
 ## Executed Checks
 
-### Jaguar3 RTL8812CU / RTL8822CU
+### Jaguar3 RTL8812CU/EU and RTL8822CU/EU
 
 The current Rust driver includes the new devourer Jaguar3 work:
 
-- PIDs `0bda:c812`, `0bda:c82c`, and `0bda:c82e`.
+- RTL8822C PIDs `0bda:c812`, `0bda:c82c`, and `0bda:c82e`.
+- RTL8822E PIDs `0bda:881c`, `0bda:a81a`, `0bda:e822`, and `0bda:a82a`, plus
+  ambiguous `0bda:8812`, `0bda:881a`, and `0bda:881b` devices selected by the
+  authoritative `SYS_CFG2` chip ID (`0x17`; RTL8822C is `0x13`).
 - 24-byte Jaguar3 RX descriptor layout with packet length, CRC/ICV flags,
   driver-info size, shift size, RX rate, and C2H report bit.
 - 48-byte Jaguar3 TX descriptor layout, including the 16-bit descriptor
@@ -84,6 +88,18 @@ The current Rust driver includes the new devourer Jaguar3 work:
 - Clean shutdown now mirrors devourer `Stop()`: halt TRX through `CR`, close
   `RCR`, then run the 8822C card-disable power sequence.
 
+The RTL8822E-specific path additionally includes:
+
+- the 199,928-byte NIC firmware and exact AGC, PHY, PHY-PG, radio A/B, and RFK
+  tables from `f542b06`; a full-array comparison against devourer passes for all
+  eight arrays,
+- V1 physical EFUSE reads with software power-cut and burst mode, the two-byte
+  `0x3X` packed-map format, thermal baselines, and per-channel/path TX power,
+- RFE fallback 21 for unprogrammed bare modules, PA-bias trim, RFE 21-24 antenna
+  switching, GPIO/pad pinmux, and band-specific TX scaling/shaping,
+- chip-specific DACK, IQK, TXGAPK, DPK bypass, and 5 GHz thermal compensation,
+- the 7-bit Jaguar3 TXAGC range (`0..=127`) instead of Jaguar1's `0..=63`.
+
 Regression tests now lock several high-risk bytes:
 
 - Jaguar3 RX descriptor field positions and payload offset after drvinfo/shift.
@@ -91,6 +107,9 @@ Regression tests now lock several high-risk bytes:
 - Jaguar3 TX descriptor field offsets.
 - 8822C TX descriptor checksum recomputation.
 - 5 GHz CCK-rate requests clamped to OFDM before descriptor encoding.
+- RTL8822E chip-ID overrides for shared PIDs, EFUSE block decoding, 5 GHz
+  channel groups, TX-power differential sign extension, TXGAPK gain arithmetic,
+  and reference-data boundaries.
 
 ### Jaguar1 RTL8812AU / RTL8821AU / RTL8814AU
 
@@ -125,8 +144,9 @@ For Jaguar3, devourer's coex thread does two jobs:
    heartbeats.
 
 OpenIPC Station already keeps bulk-IN transfers posted in its RX loop. The app
-also calls `run_jaguar3_coex_keepalive` and `tick_power_tracking_8822c` on a
-two-second cadence. The driver exposes the hooks; the app owns scheduling.
+also calls `run_jaguar3_coex_keepalive` and `tick_jaguar3_power_tracking` on a
+two-second cadence. The latter dispatches the correct RTL8822C or RTL8822E
+thermal algorithm. The driver exposes the hooks; the app owns scheduling.
 
 ## Test Strategy
 
@@ -146,7 +166,8 @@ drift early:
   after stalls or cancelled transfers while failing fast on disconnect,
 - recovery-classifier tests for transient stalls/timeouts versus fatal USB
   errors,
-- generated-table sanity tests for known table lengths and boundary values,
+- generated-table sanity tests for known lengths and boundary values, plus an
+  audit-time full-array/hash comparison of every RTL8822E firmware/table value,
 - protocol tests for WFB session/decrypt/FEC behavior,
 - optional PixelPilot/zfex reference tests for FEC parity when the fixture path
   is available,
@@ -161,10 +182,11 @@ they do not replace checking real USB timing, EFUSE variants, and RF behavior.
 ## Remaining Validation Boundary
 
 The implementation is standalone and does not link devourer. The current audit
-found one concrete parity gap and fixed it: Jaguar3 shutdown/deinit. The
-remaining boundary is hardware proof:
+also fixed Jaguar3 shutdown, EU AFE reset ordering, shared-PID chip dispatch,
+and Jaguar3's full 7-bit TXAGC range. The remaining boundary is hardware proof:
 
-- cold-plug RTL8812AU, RTL8821AU, RTL8814AU, RTL8812CU, and RTL8822CU runs,
+- cold-plug RTL8812AU, RTL8821AU, RTL8814AU, RTL8812CU/EU, and RTL8822CU/EU
+  runs,
 - register traces for init, channel switch, and shutdown,
 - sustained WebUSB receive,
 - sustained native/WebUSB adaptive TX,

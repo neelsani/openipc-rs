@@ -2,13 +2,13 @@ use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use nusb::transfer::{Bulk, Out};
+use nusb::transfer::{Bulk, In, Out};
 use openipc_core::{
     ieee80211::build_wfb_header_with_frame_type, radiotap::build_radiotap_header,
     wfb::WFB_PACKET_FEC_ONLY, ChannelId, TxMode, TxRadioParams, WfbTransmitter, WfbTxKeypair,
     FRAME_TYPE_DATA,
 };
-use openipc_rtl88xx::{RealtekDevice, RealtekTxOptions};
+use openipc_rtl88xx::{ChipFamily, Jaguar3PowerTrackingState, RealtekDevice, RealtekTxOptions};
 
 #[path = "../common.rs"]
 mod common;
@@ -314,9 +314,13 @@ impl TxState {
 }
 
 struct UsbOutput {
-    _device: RealtekDevice,
+    device: RealtekDevice,
+    chip_family: ChipFamily,
+    ep_in: Option<nusb::Endpoint<Bulk, In>>,
     ep_out: nusb::Endpoint<Bulk, Out>,
     tx_options: RealtekTxOptions,
+    last_jaguar3_tick: Instant,
+    jaguar3_power_tracking: Jaguar3PowerTrackingState,
 }
 
 struct DebugOutput {
@@ -335,6 +339,44 @@ impl TxOutput {
         match self {
             Self::Usb(outputs) => outputs.len(),
             Self::Debug(output) => output.output_count,
+        }
+    }
+
+    fn service(&mut self) {
+        let Self::Usb(outputs) = self else {
+            return;
+        };
+        for output in outputs {
+            if let Some(ep_in) = output.ep_in.as_mut() {
+                while let Some(completion) = ep_in.wait_next_complete(Duration::ZERO) {
+                    ep_in.submit(completion.buffer);
+                }
+            }
+            if output.chip_family.is_jaguar3()
+                && output.last_jaguar3_tick.elapsed() >= Duration::from_secs(2)
+            {
+                output.last_jaguar3_tick = Instant::now();
+                if let Err(error) = output.device.run_jaguar3_coex_keepalive() {
+                    eprintln!("Jaguar3 coex keepalive failed: {error}");
+                }
+                if let Err(error) = output
+                    .device
+                    .tick_jaguar3_power_tracking(&mut output.jaguar3_power_tracking)
+                {
+                    eprintln!("Jaguar3 thermal tracking failed: {error}");
+                }
+            }
+        }
+    }
+
+    fn shutdown(&mut self) {
+        let Self::Usb(outputs) = self else {
+            return;
+        };
+        for output in outputs {
+            if let Err(error) = output.device.shutdown_monitor() {
+                eprintln!("Realtek monitor shutdown failed: {error}");
+            }
         }
     }
 }
@@ -377,12 +419,27 @@ fn open_tx_output(config: &TxConfig) -> CliResult<TxOutput> {
                 .set_tx_power_override(config.radio_device.radio.channel, power)?;
             eprintln!("TX power override applied: txagc={power}");
         }
+        let mut ep_in = if opened.chip_family.is_jaguar3() {
+            opened.device.prepare_transmit_only()?;
+            Some(opened.device.bulk_in_endpoint()?)
+        } else {
+            None
+        };
+        if let Some(endpoint) = ep_in.as_mut() {
+            while endpoint.pending() < 2 {
+                endpoint.submit(endpoint.allocate(16 * 1024));
+            }
+        }
         let ep_out = opened.device.bulk_out_endpoint()?;
         let tx_options = tx_options(&config.radio_device, opened.chip_family);
         outputs.push(UsbOutput {
-            _device: opened.device,
+            device: opened.device,
+            chip_family: opened.chip_family,
+            ep_in,
             ep_out,
             tx_options,
+            last_jaguar3_tick: Instant::now(),
+            jaguar3_power_tracking: Jaguar3PowerTrackingState::default(),
         });
     }
 
@@ -429,6 +486,7 @@ fn run_tx(config: TxConfig) -> CliResult<()> {
 
     let mut buf = vec![0u8; 2048];
     loop {
+        output.service();
         if let Some(max) = config.max_packets {
             if stats.input_packets >= max {
                 break;
@@ -485,6 +543,7 @@ fn run_tx(config: TxConfig) -> CliResult<()> {
     }
 
     log_stats(&stats);
+    output.shutdown();
     Ok(())
 }
 
@@ -781,7 +840,7 @@ Common options:
   -J <count>                  retry failed radio injections this many times
   -E <usec>                   delay between injection retries, default 5000
   -m                          mirror each packet to every opened output
-  --tx-power <0..63>          override Realtek TXAGC index
+  --tx-power <0..127>         override TXAGC index (max 63 on Jaguar1)
 
 Radio mode:
   -B <20|40|80> -G short|long -S <stbc> -L <0|1> -M <mcs> -N <nss> -V

@@ -41,9 +41,12 @@ the next release.
   programming.
 - Done: RTL8812 thermal power tracking, RTL8812 IQK, RTL8814 IQK, and the
   monitor-mode PHYDM DIG watchdog.
+- Done: Jaguar3 RTL8812CU/EU and RTL8822CU/EU detection, firmware/tables,
+  descriptors, narrowband channel setup, EFUSE/RFE handling, DACK/IQK,
+  RTL8822E TXGAPK/thermal tracking, coex maintenance, and clean shutdown.
 - Done: devourer-compatible runtime switches for skipping TX power, forcing or
-  disabling IQK, selecting the RTL8814 firmware path/chunk size, and testing
-  the legacy RTL8814 TX descriptor shape.
+  disabling IQK/TXGAPK, selecting the RTL8814 firmware path/chunk size, and
+  testing the legacy RTL8814 TX descriptor shape.
 - Done: diagnostics exposed as explicit tick/read APIs rather than hidden
   library pollers.
 - Still needed: hardware smoke tests and trace comparisons per chip family.

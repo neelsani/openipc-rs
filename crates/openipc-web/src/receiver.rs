@@ -230,7 +230,11 @@ impl OpenIpcReceiver {
     pub fn push_rx_transfer(&mut self, transfer: &[u8]) -> Result<Array, JsValue> {
         let batch = self
             .runtime
-            .push_rx_transfer(transfer, &ReceiverBatchOptions::default())
+            .push_rx_transfer_with_kind(
+                transfer,
+                self.rx_descriptor_kind,
+                &ReceiverBatchOptions::default(),
+            )
             .map_err(|err| JsValue::from_str(&format!("Realtek RX aggregate rejected: {err}")))?;
         Ok(frame_bytes_array(batch.frames))
     }
@@ -256,8 +260,9 @@ impl OpenIpcReceiver {
     ) -> Result<Array, JsValue> {
         let batch = self
             .runtime
-            .push_rx_transfer(
+            .push_rx_transfer_with_kind(
                 transfer,
+                self.rx_descriptor_kind,
                 &ReceiverBatchOptions {
                     accept_corrupted: keep_corrupted,
                     ..ReceiverBatchOptions::default()
@@ -482,7 +487,8 @@ fn openipc_receiver_with_keypair_and_telemetry_channel_inner(
 pub(crate) fn parse_rx_descriptor_kind(kind: &str) -> Result<RxDescriptorKind, JsValue> {
     match kind {
         "jaguar1" | "rtl8812" | "rtl8821" | "rtl8814" => Ok(RxDescriptorKind::Jaguar1),
-        "jaguar3" | "rtl8812cu" | "rtl8822c" | "rtl8822cu" => Ok(RxDescriptorKind::Jaguar3),
+        "jaguar3" | "rtl8812cu" | "rtl8812eu" | "rtl8822c" | "rtl8822cu" | "rtl8822e"
+        | "rtl8822eu" => Ok(RxDescriptorKind::Jaguar3),
         _ => Err(JsValue::from_str(
             "unsupported RX descriptor kind; expected jaguar1 or jaguar3",
         )),

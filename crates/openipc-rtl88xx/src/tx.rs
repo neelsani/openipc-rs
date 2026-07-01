@@ -32,7 +32,7 @@ pub enum RealtekTxDescriptor {
     Jaguar1,
     /// RTL8814AU 40-byte descriptor variant.
     Rtl8814,
-    /// RTL8812CU/RTL8822CU 48-byte Jaguar3 descriptor with descriptor checksum.
+    /// RTL8812CU/EU and RTL8822CU/EU 48-byte Jaguar3 descriptor with checksum.
     Jaguar3,
 }
 
@@ -41,7 +41,7 @@ impl RealtekTxDescriptor {
     pub const fn for_chip_family(family: ChipFamily) -> Self {
         match family {
             ChipFamily::Rtl8814 => Self::Rtl8814,
-            ChipFamily::Rtl8822c => Self::Jaguar3,
+            ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => Self::Jaguar3,
             ChipFamily::Rtl8812 | ChipFamily::Rtl8821 => Self::Jaguar1,
         }
     }
@@ -183,22 +183,19 @@ fn build_usb_tx_frame_jaguar3(
     let mut out = vec![0; TX_DESC_SIZE_8822C + payload.len()];
     set_bits_le32(&mut out, 0, 0, 16, payload.len() as u32);
     set_bits_le32(&mut out, 0, 16, 8, TX_DESC_SIZE_8822C as u32);
+    if payload.get(4).is_some_and(|octet| octet & 1 != 0) {
+        set_bits_le32(&mut out, 0, 24, 1, 1);
+    }
     set_bits_le32(&mut out, 0, 26, 1, 1);
+    set_bits_le32(&mut out, 0, 31, 1, 1);
     set_bits_le32(&mut out, 4, 0, 7, 0x01);
     set_bits_le32(&mut out, 4, 8, 5, 0x12);
-    set_bits_le32(
-        &mut out,
-        4,
-        16,
-        5,
-        if tx_mode.kind == TxModeKind::Vht {
-            9
-        } else {
-            8
-        },
-    );
+    set_bits_le32(&mut out, 4, 16, 5, 9);
+    set_bits_le32(&mut out, 8, 24, 6, 0x3f);
     set_bits_le32(&mut out, 12, 8, 1, 1);
-    set_bits_le32(&mut out, 12, 10, 1, 1);
+    set_bits_le32(&mut out, 16, 17, 1, 1);
+    set_bits_le32(&mut out, 16, 18, 6, 12);
+    set_bits_le32(&mut out, 24, 0, 12, 1);
     set_bits_le32(&mut out, 16, 0, 7, mrate_to_hw_rate(fixed_rate) as u32);
     if tx_mode.short_gi {
         set_bits_le32(&mut out, 20, 4, 1, 1);
@@ -365,6 +362,10 @@ mod tests {
         );
         assert_eq!(
             RealtekTxDescriptor::for_chip_family(ChipFamily::Rtl8822c),
+            RealtekTxDescriptor::Jaguar3
+        );
+        assert_eq!(
+            RealtekTxDescriptor::for_chip_family(ChipFamily::Rtl8822e),
             RealtekTxDescriptor::Jaguar3
         );
     }
@@ -556,13 +557,19 @@ mod tests {
             test_bits(read_le32(&usb, 0), 16, 8),
             TX_DESC_SIZE_8822C as u32
         );
+        assert_eq!(test_bits(read_le32(&usb, 0), 24, 1), 1);
         assert_eq!(test_bits(read_le32(&usb, 0), 26, 1), 1);
+        assert_eq!(test_bits(read_le32(&usb, 0), 31, 1), 1);
         assert_eq!(test_bits(read_le32(&usb, 4), 0, 7), 1);
         assert_eq!(test_bits(read_le32(&usb, 4), 8, 5), 0x12);
-        assert_eq!(test_bits(read_le32(&usb, 4), 16, 5), 8);
+        assert_eq!(test_bits(read_le32(&usb, 4), 16, 5), 9);
+        assert_eq!(test_bits(read_le32(&usb, 8), 24, 6), 0x3f);
         assert_eq!(test_bits(read_le32(&usb, 12), 8, 1), 1);
-        assert_eq!(test_bits(read_le32(&usb, 12), 10, 1), 1);
+        assert_eq!(test_bits(read_le32(&usb, 12), 10, 1), 0);
         assert_eq!(test_bits(read_le32(&usb, 16), 0, 7), 0x0c);
+        assert_eq!(test_bits(read_le32(&usb, 16), 17, 1), 1);
+        assert_eq!(test_bits(read_le32(&usb, 16), 18, 6), 12);
+        assert_eq!(test_bits(read_le32(&usb, 24), 0, 12), 1);
         assert_eq!(test_bits(read_le32(&usb, 32), 15, 1), 1);
         assert_ne!(test_bits(read_le32(&usb, 28), 0, 16), 0);
         assert_eq!(

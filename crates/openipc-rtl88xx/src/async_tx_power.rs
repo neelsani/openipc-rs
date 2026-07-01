@@ -139,23 +139,23 @@ const TXAGC_RATES_8812: [[u8; 4]; 12] = [
 impl RealtekDevice {
     /// Override TX power indexes for the current channel.
     ///
-    /// `power` is the Realtek TXAGC index, clamped by hardware to the valid
-    /// 0..=63 range.
+    /// `power` is the Realtek TXAGC index. Jaguar1 accepts `0..=63`; Jaguar3
+    /// accepts the full 7-bit `0..=127` reference used by devourer.
     pub async fn set_tx_power_override_async(
         &self,
         current_channel: u8,
         power: u8,
     ) -> Result<(), DriverError> {
-        if power > 63 {
-            return Err(DriverError::InvalidTxPower(power));
-        }
         let chip = self.probe_chip_async().await?;
+        validate_tx_power(chip.family, power)?;
         match chip.family {
             ChipFamily::Rtl8814 => {
                 self.set_tx_power_override_8814_async(chip, current_channel, power)
                     .await
             }
-            ChipFamily::Rtl8822c => self.set_tx_power_override_8822c_async(power).await,
+            ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
+                self.set_tx_power_override_8822c_async(power).await
+            }
             ChipFamily::Rtl8812 | ChipFamily::Rtl8821 => {
                 self.set_tx_power_override_8812_family_async(chip, current_channel, power)
                     .await
@@ -169,15 +169,15 @@ impl RealtekDevice {
         current_channel: u8,
         power: u8,
     ) -> Result<(), DriverError> {
-        if power > 63 {
-            return Err(DriverError::InvalidTxPower(power));
-        }
+        validate_tx_power(chip.family, power)?;
         match chip.family {
             ChipFamily::Rtl8814 => {
                 self.set_tx_power_override_8814_async(chip, current_channel, power)
                     .await
             }
-            ChipFamily::Rtl8822c => self.set_tx_power_override_8822c_async(power).await,
+            ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
+                self.set_tx_power_override_8822c_async(power).await
+            }
             ChipFamily::Rtl8812 | ChipFamily::Rtl8821 => {
                 self.set_tx_power_override_8812_family_async(chip, current_channel, power)
                     .await
@@ -204,7 +204,9 @@ impl RealtekDevice {
                 self.set_tx_power_from_efuse_8814_async(chip, current_channel, width, efuse)
                     .await
             }
-            ChipFamily::Rtl8822c => self.set_tx_power_override_8822c_async(fallback_power).await,
+            ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
+                self.set_tx_power_override_8822c_async(fallback_power).await
+            }
             ChipFamily::Rtl8812 | ChipFamily::Rtl8821 => {
                 self.set_tx_power_from_efuse_8812_family_async(
                     chip,
@@ -432,6 +434,15 @@ impl RealtekDevice {
     }
 }
 
+fn validate_tx_power(family: ChipFamily, power: u8) -> Result<(), DriverError> {
+    let maximum = if family.is_jaguar3() { 0x7f } else { 0x3f };
+    if power > maximum {
+        Err(DriverError::InvalidTxPower(power))
+    } else {
+        Ok(())
+    }
+}
+
 const fn txagc_word(power: u8) -> u32 {
     let byte = (power & !1) as u32;
     byte | (byte << 8) | (byte << 16) | (byte << 24)
@@ -496,5 +507,20 @@ mod tests {
             | u32::from(mrate_to_hw_rate(MGN_MCS0))
             | (u32::from(30u8) << 24);
         assert_eq!(value, 0x1e80_120c);
+    }
+
+    #[test]
+    fn tx_power_range_tracks_descriptor_generation() {
+        assert!(validate_tx_power(ChipFamily::Rtl8812, 0x3f).is_ok());
+        assert!(matches!(
+            validate_tx_power(ChipFamily::Rtl8812, 0x40),
+            Err(DriverError::InvalidTxPower(0x40))
+        ));
+        assert!(validate_tx_power(ChipFamily::Rtl8822c, 0x7f).is_ok());
+        assert!(validate_tx_power(ChipFamily::Rtl8822e, 0x7f).is_ok());
+        assert!(matches!(
+            validate_tx_power(ChipFamily::Rtl8822e, 0x80),
+            Err(DriverError::InvalidTxPower(0x80))
+        ));
     }
 }

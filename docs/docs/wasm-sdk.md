@@ -55,7 +55,7 @@ import init, {
   OpenIpcReceiver,
   WebUsbPhydmWatchdog,
   WebUsbPowerTracking8812,
-  WebUsbPowerTracking8822c,
+  WebUsbJaguar3PowerTracking,
   WebUsbRealtekDevice,
   supportedUsbFilters,
 } from "@openipc-rs/web";
@@ -76,17 +76,23 @@ receiver.setRxDescriptorKind(radio.rxDescriptorKind());
 receiver.addKeyedRoute(2, telemetryChannelId, keypairBytes, 0n);
 const jaguar3Power =
   radio.rxDescriptorKind() === "jaguar3"
-    ? new WebUsbPowerTracking8822c()
+    ? new WebUsbJaguar3PowerTracking()
     : undefined;
 
 const initReport = await radio.initializeMonitor(36, 20, 0);
 console.log(initReport.chip, initReport.status);
+let nextJaguar3Maintenance = 0;
 
 try {
   while (true) {
-    if (radio.rxDescriptorKind() === "jaguar3") {
+    const now = performance.now();
+    if (
+      radio.rxDescriptorKind() === "jaguar3" &&
+      now >= nextJaguar3Maintenance
+    ) {
       await radio.runJaguar3CoexKeepalive();
       await jaguar3Power?.tick(radio);
+      nextJaguar3Maintenance = now + 2_000;
     }
     const transfer = await radio.readRxTransfer(32768);
     const batch = receiver.pushRxTransferProfiledWithRouteIds(
@@ -205,7 +211,7 @@ await pwr.init(radio);
 const powerReport = await pwr.tick(radio, 36, 20);
 console.log(powerReport.applied, powerReport.thermalAverage);
 
-const jaguar3Power = new WebUsbPowerTracking8822c();
+const jaguar3Power = new WebUsbJaguar3PowerTracking();
 const jaguar3Report = await jaguar3Power.tick(radio);
 console.log(jaguar3Report.thermalA, jaguar3Report.compensationA);
 ```

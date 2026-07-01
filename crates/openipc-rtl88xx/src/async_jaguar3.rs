@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::sync::atomic::Ordering;
 
 use crate::device::RealtekDevice;
 use crate::regs::*;
@@ -6,7 +7,8 @@ use crate::rtl_data;
 use crate::time::{sleep_micros, sleep_ms};
 use crate::tx::TX_DESC_SIZE_8822C;
 use crate::types::{
-    ChannelWidth, ChipInfo, DriverError, InitReport, InitStatus, MonitorOptions, RadioConfig,
+    ChannelWidth, ChipFamily, ChipInfo, DriverError, InitReport, InitStatus, MonitorOptions,
+    RadioConfig,
 };
 
 const MASKDWORD: u32 = 0xffff_ffff;
@@ -111,42 +113,82 @@ impl RealtekDevice {
         chip: ChipInfo,
         radio: RadioConfig,
         options: MonitorOptions,
-        firmware_already_running: bool,
+        _firmware_already_running: bool,
     ) -> Result<InitReport, DriverError> {
-        let mut firmware_downloaded = false;
-        let status = if firmware_already_running {
-            InitStatus::AlreadyRunning
-        } else {
-            InitStatus::Initialized
-        };
+        // Jaguar3 bring-up deliberately runs card-disable before card-enable.
+        // That reset invalidates any firmware state observed before entering
+        // this function, so the image must always be downloaded again.
+        let status = InitStatus::Initialized;
 
-        let efuse_info = self.read_efuse_info_async(chip).await?;
         self.pre_init_system_cfg_8822c_async().await?;
         self.power_on_8822c_async().await?;
+        let efuse_info = self.read_efuse_info_async(chip).await?;
+        let rfe_type =
+            if chip.family == ChipFamily::Rtl8822e && matches!(efuse_info.rfe_type, 0 | 0xff) {
+                21
+            } else {
+                efuse_info.rfe_type
+            };
         self.init_system_cfg_8822c_async(radio.channel_width, chip.cut_version)
             .await?;
-        if !firmware_already_running {
-            self.download_firmware_8822c_async(rtl_data::RTL8822C_FW_NIC)
-                .await?;
-            firmware_downloaded = true;
-        }
+        let firmware = match chip.family {
+            ChipFamily::Rtl8822e => rtl_data::RTL8822E_FW_NIC,
+            ChipFamily::Rtl8822c => rtl_data::RTL8822C_FW_NIC,
+            _ => return Err(DriverError::UnsupportedFirmwarePath(chip.family)),
+        };
+        self.download_firmware_8822c_async(firmware).await?;
         self.init_mac_cfg_8822c_async(radio.channel_width).await?;
         self.init_usb_cfg_8822c_async().await?;
         self.enable_bb_rf_8822c_async(true).await?;
-        self.load_phy_tables_8822c_async(chip, efuse_info.rfe_type)
-            .await?;
+        self.load_phy_tables_jaguar3_async(chip, rfe_type).await?;
+        if chip.family == ChipFamily::Rtl8822e {
+            self.config_pa_bias_8822e_async().await?;
+        }
         self.config_phydm_parameter_init_8822c_async().await?;
-        self.init_rfk_8822c_async().await?;
-        self.dac_calibrate_8822c_async().await?;
+        self.init_rfk_jaguar3_async(chip).await?;
+        match chip.family {
+            ChipFamily::Rtl8822e => self.dac_calibrate_8822e_async().await?,
+            ChipFamily::Rtl8822c => self.dac_calibrate_8822c_async().await?,
+            _ => return Err(DriverError::UnsupportedFirmwarePath(chip.family)),
+        }
         self.bf_init_8822c_async().await?;
-        self.set_channel_bwmode_8822c_async(radio.channel, radio.channel_width)
-            .await?;
-        self.run_iqk_8822c_async(chip, radio.channel_width, radio.channel)
-            .await?;
         self.monitor_rx_cfg_8822c_async(options.accept_bad_fcs)
             .await?;
         self.enable_tx_path_8822c_async().await?;
+        self.set_channel_bwmode_8822c_async(radio.channel, radio.channel_width)
+            .await?;
+        if options.should_run_iqk(chip.family) {
+            match chip.family {
+                ChipFamily::Rtl8822e => {
+                    self.run_iqk_8822e_async(
+                        chip,
+                        radio.channel_width,
+                        radio.channel,
+                        options.skip_txgapk,
+                    )
+                    .await?;
+                }
+                ChipFamily::Rtl8822c => {
+                    self.run_iqk_8822c_async(chip, radio.channel_width, radio.channel)
+                        .await?;
+                }
+                _ => return Err(DriverError::UnsupportedIqkPath(chip.family)),
+            }
+        }
+        self.enable_rx_path_jaguar3_async().await?;
+        if chip.family == ChipFamily::Rtl8822e {
+            self.dpk_force_bypass_8822e_async().await?;
+            self.config_rfe_8822e_async(rfe_type, radio.channel).await?;
+            self.config_channel_8822e_async(radio.channel).await?;
+        }
+        if !options.skip_tx_power {
+            self.set_default_tx_power_jaguar3_async(chip, radio.channel)
+                .await?;
+        }
         self.coex_wlan_only_init_8822c_async().await?;
+        if chip.family == ChipFamily::Rtl8822e {
+            self.configure_rfe_pinmux_8822e_async().await?;
+        }
         let _ = self.fw_set_pwr_mode_active_8822c_async().await;
         let _ = self.fw_coex_query_bt_info_8822c_async().await;
         let _ = self.fw_coex_tdma_off_8822c_async().await;
@@ -154,7 +196,7 @@ impl RealtekDevice {
         Ok(InitReport {
             chip,
             status,
-            firmware_downloaded,
+            firmware_downloaded: true,
         })
     }
 
@@ -607,7 +649,7 @@ impl RealtekDevice {
         self.write_u8_async(REG_WMAC_OPTION_FUNCTION_1, 0x98).await
     }
 
-    async fn load_phy_tables_8822c_async(
+    async fn load_phy_tables_jaguar3_async(
         &self,
         chip: ChipInfo,
         rfe_type: u8,
@@ -616,20 +658,35 @@ impl RealtekDevice {
             cut_version: chip.cut_version,
             rfe_type,
         };
-        load_jaguar3_table_async(rtl_data::RTL8822C_PHY_REG, ctx, |addr, value| async move {
+        let (phy, agc, radio_a, radio_b) = match chip.family {
+            ChipFamily::Rtl8822c => (
+                rtl_data::RTL8822C_PHY_REG,
+                rtl_data::RTL8822C_AGC_TAB,
+                rtl_data::RTL8822C_RADIO_A,
+                rtl_data::RTL8822C_RADIO_B,
+            ),
+            ChipFamily::Rtl8822e => (
+                rtl_data::RTL8822E_PHY_REG,
+                rtl_data::RTL8822E_AGC_TAB,
+                rtl_data::RTL8822E_RADIO_A,
+                rtl_data::RTL8822E_RADIO_B,
+            ),
+            _ => return Err(DriverError::UnsupportedFirmwarePath(chip.family)),
+        };
+        load_jaguar3_table_async(phy, ctx, |addr, value| async move {
             self.write_bb_8822c_async(addr, value).await
         })
         .await?;
-        load_jaguar3_table_async(rtl_data::RTL8822C_AGC_TAB, ctx, |addr, value| async move {
+        load_jaguar3_table_async(agc, ctx, |addr, value| async move {
             self.write_bb_8822c_async(addr, value).await
         })
         .await?;
         self.set_bb_reg_async(0x1c90, BIT8, 0).await?;
-        load_jaguar3_table_async(rtl_data::RTL8822C_RADIO_A, ctx, |addr, value| async move {
+        load_jaguar3_table_async(radio_a, ctx, |addr, value| async move {
             self.write_rf_direct_8822c_async(0x3c00, addr, value).await
         })
         .await?;
-        load_jaguar3_table_async(rtl_data::RTL8822C_RADIO_B, ctx, |addr, value| async move {
+        load_jaguar3_table_async(radio_b, ctx, |addr, value| async move {
             self.write_rf_direct_8822c_async(0x4c00, addr, value).await
         })
         .await?;
@@ -678,12 +735,17 @@ impl RealtekDevice {
         self.bb_reset_8822c_async().await
     }
 
-    async fn init_rfk_8822c_async(&self) -> Result<(), DriverError> {
+    async fn init_rfk_jaguar3_async(&self, chip: ChipInfo) -> Result<(), DriverError> {
         self.set_bb_reg_async(0x1cd0, BIT28, 1).await?;
         self.set_bb_reg_async(0x1cd0, BIT29, 1).await?;
         self.set_bb_reg_async(0x1cd0, BIT30, 1).await?;
         self.set_bb_reg_async(0x1cd0, BIT31, 0).await?;
-        for pair in rtl_data::RTL8822C_CAL_INIT.chunks_exact(2) {
+        let table = match chip.family {
+            ChipFamily::Rtl8822c => rtl_data::RTL8822C_CAL_INIT,
+            ChipFamily::Rtl8822e => rtl_data::RTL8822E_CAL_INIT,
+            _ => return Err(DriverError::UnsupportedFirmwarePath(chip.family)),
+        };
+        for pair in table.chunks_exact(2) {
             self.write_bb_8822c_async(pair[0], pair[1]).await?;
         }
         Ok(())
@@ -813,6 +875,220 @@ impl RealtekDevice {
         self.set_bb_reg_async(0x1cd0, 0x7000_0000, 0x7).await
     }
 
+    async fn enable_rx_path_jaguar3_async(&self) -> Result<(), DriverError> {
+        self.set_bb_reg_async(0x4100, 0x000f_ffff, 0x33312).await?;
+        self.set_bb_reg_async(0x1a04, 0x0f00_0000, 0x1).await?;
+        self.set_bb_reg_async(0x1a2c, BIT5, 0).await?;
+        self.set_bb_reg_async(0x1a2c, 0x0006_0000, 0x1).await?;
+        self.set_bb_reg_async(0x1a2c, 0x0060_0000, 0x1).await?;
+        for register in [0x0cc0, 0x0cc8] {
+            self.set_bb_reg_async(register, 0x7ff, 0x400).await?;
+            self.set_bb_reg_async(register, BIT22, 0).await?;
+        }
+        self.set_bb_reg_async(0x1d30, 0x0000_0300, 0x1).await?;
+        self.set_bb_reg_async(0x1d30, 0x0060_0000, 0x1).await?;
+        self.set_bb_reg_async(0x0c44, BIT17, 1).await?;
+        self.set_bb_reg_async(0x0c54, BIT20, 1).await?;
+        self.set_bb_reg_async(0x0c38, BIT24, 1).await?;
+        self.set_bb_reg_async(0x0824, 0x000f_0000, 0x3).await?;
+        self.set_bb_reg_async(0x0824, 0x0f00_0000, 0x3).await?;
+        self.bb_reset_8822c_async().await?;
+        let igi = self.read_u32_async(0x1d70).await?;
+        self.write_u32_async(0x1d70, igi.wrapping_sub(0x202))
+            .await?;
+        self.write_u32_async(0x1d70, igi).await
+    }
+
+    async fn config_pa_bias_8822e_async(&self) -> Result<(), DriverError> {
+        self.efuse_power_cut_8822e_async(true).await?;
+        let result = async {
+            Ok::<_, DriverError>([
+                self.read_efuse_byte_8822e_async(0x5c6).await?,
+                self.read_efuse_byte_8822e_async(0x5c5).await?,
+                self.read_efuse_byte_8822e_async(0x5c8).await?,
+                self.read_efuse_byte_8822e_async(0x5c7).await?,
+            ])
+        }
+        .await;
+        let power_off = self.efuse_power_cut_8822e_async(false).await;
+        let bias = match (result, power_off) {
+            (Ok(bias), Ok(())) => bias,
+            (Err(error), _) | (Ok(_), Err(error)) => return Err(error),
+        };
+        if bias[0] == 0xff {
+            return Ok(());
+        }
+        for (base, mask, value) in [
+            (0x3c00, 0x0000_f000, bias[0]),
+            (0x4c00, 0x0000_f000, bias[1]),
+            (0x3c00, 0x000f_0000, bias[2]),
+            (0x4c00, 0x000f_0000, bias[3]),
+        ] {
+            self.set_bb_reg_async(base + (0x60 << 2), mask, u32::from(value & 0x0f))
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn dpk_force_bypass_8822e_async(&self) -> Result<(), DriverError> {
+        self.set_bb_reg_async(0x1b00, BIT2 | BIT1, 0x2).await?;
+        self.set_bb_reg_async(0x1b08, BIT15 | BIT14, 0x3).await?;
+        self.set_bb_reg_async(0x1b04, 0xff, 0x5b).await?;
+        self.set_bb_reg_async(0x1b60, BIT15 | BIT14, 0x3).await?;
+        self.set_bb_reg_async(0x1b5c, 0xff, 0x5b).await?;
+        self.set_bb_reg_async(0x1b00, BIT2 | BIT1, 0).await
+    }
+
+    async fn config_rfe_8822e_async(&self, rfe_type: u8, channel: u8) -> Result<(), DriverError> {
+        if !matches!(rfe_type, 21..=24) {
+            return Ok(());
+        }
+        let path = if (channel <= 14 && matches!(rfe_type, 21 | 22))
+            || (channel > 14 && matches!(rfe_type, 23 | 24))
+        {
+            0
+        } else {
+            3
+        };
+        let values = match path {
+            0 => [0x0000_7000, 0x0000_7007, 0x7070_0000, 0x0000_0070],
+            1 => [0x0000_2000, 0x0000_3000, 0x7070_0000, 0x0000_0070],
+            2 => [0x0000_7000, 0x0000_7007, 0x0020_0000, 0x0000_0030],
+            _ => [0x0000_2000, 0x0000_3000, 0x0020_0000, 0x0000_0030],
+        };
+        for (register, value) in [0x1840, 0x1844, 0x4140, 0x4144].into_iter().zip(values) {
+            self.set_bb_reg_async(register, MASKDWORD, value).await?;
+        }
+        Ok(())
+    }
+
+    async fn config_channel_8822e_async(&self, channel: u8) -> Result<(), DriverError> {
+        let is_2g = channel <= 14;
+        if !is_2g {
+            self.set_bb_reg_async(0x0818, 0x07c0_0000, 0x0c).await?;
+            self.set_bb_reg_async(0x081c, 0x001f_c000, 0x04).await?;
+        }
+        self.set_bb_reg_async(0x0820, 0xff, 0x33).await?;
+        self.set_bb_reg_async(0x1e2c, 0xffff, 0x0404).await?;
+        self.set_bb_reg_async(0x1a04, 0xf000_0000, 0x0c).await?;
+        self.set_bb_reg_async(0x0a74, BIT31, 1).await?;
+        self.set_bb_reg_async(0x0808, 0x70, 0x3).await?;
+        if is_2g {
+            self.set_bb_reg_async(0x0a74, 0x3ff, 0x15).await?;
+            self.set_bb_reg_async(0x0a74, 0x000f_fc00, 0x13).await?;
+            self.set_bb_reg_async(0x080c, 0x0f, 0x05).await?;
+            self.set_bb_reg_async(0x081c, 0xff, 0xff).await?;
+            self.set_bb_reg_async(0x081c, 0x0f00_0000, 0).await?;
+            self.set_bb_reg_async(0x08a0, 0xf000_0000, 0x0b).await?;
+        } else {
+            self.set_bb_reg_async(0x0a74, 0x3ff, 0x3f).await?;
+            self.set_bb_reg_async(0x0a74, 0x000f_fc00, 0x3f).await?;
+            self.set_bb_reg_async(0x080c, 0x0f, 0x08).await?;
+            self.set_bb_reg_async(0x081c, 0xff, 0x55).await?;
+            self.set_bb_reg_async(0x081c, 0x0f00_0000, 0x07).await?;
+            self.set_bb_reg_async(0x08a0, 0xf000_0000, 0).await?;
+        }
+        Ok(())
+    }
+
+    async fn configure_rfe_pinmux_8822e_async(&self) -> Result<(), DriverError> {
+        let gpio = self.read_u32_async(REG_GPIO_MUXCFG).await.unwrap_or(0);
+        self.write_u32_async(REG_GPIO_MUXCFG, gpio | 0x1403_0008)
+            .await?;
+        let pad = self.read_u32_async(REG_PAD_CTRL1).await.unwrap_or(0);
+        self.write_u32_async(REG_PAD_CTRL1, pad & !0x0204_0000)
+            .await
+    }
+
+    async fn set_default_tx_power_jaguar3_async(
+        &self,
+        chip: ChipInfo,
+        channel: u8,
+    ) -> Result<(), DriverError> {
+        if chip.family == ChipFamily::Rtl8822c {
+            return self.set_tx_power_ref_jaguar3_async(0x28, 0x28, true).await;
+        }
+        let (base_a, base_b) = self.tx_power_refs_8822e(channel);
+        self.apply_power_by_rate_8822e_async(channel, base_a, base_b)
+            .await
+    }
+
+    fn tx_power_refs_8822e(&self, channel: u8) -> (u8, u8) {
+        const FALLBACK: u8 = 0x4b;
+        if channel <= 14 {
+            return (FALLBACK, FALLBACK);
+        }
+        let Some(map) = self.jaguar3_efuse.get() else {
+            return (FALLBACK, FALLBACK);
+        };
+        let group = channel_group_5g_8822e(channel);
+        let with_diff = |offset: usize| tx_power_ref_8822e(map[offset + group], map[offset + 14]);
+        (with_diff(0x22), with_diff(0x4c))
+    }
+
+    async fn set_tx_power_ref_jaguar3_async(
+        &self,
+        ref_a: u8,
+        ref_b: u8,
+        zero_diffs: bool,
+    ) -> Result<(), DriverError> {
+        for (register, mask, value) in [
+            (0x18e8, 0x0001_fc00, ref_a),
+            (0x41e8, 0x0001_fc00, ref_b),
+            (0x18a0, 0x007f_0000, ref_a),
+            (0x41a0, 0x007f_0000, ref_b),
+        ] {
+            self.set_bb_reg_async(0x1c90, BIT15, 0).await?;
+            self.set_bb_reg_async(register, mask, u32::from(value.min(0x7f)))
+                .await?;
+        }
+        if zero_diffs {
+            for register in (0x3a00..=0x3a7c).step_by(4) {
+                self.set_bb_reg_async(0x1c90, BIT15, 0).await?;
+                self.set_bb_reg_async(register, MASKDWORD, 0).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn apply_power_by_rate_8822e_async(
+        &self,
+        channel: u8,
+        ref_a: u8,
+        ref_b: u8,
+    ) -> Result<(), DriverError> {
+        self.set_tx_power_ref_jaguar3_async(ref_a, ref_b, false)
+            .await?;
+        let band = u32::from(channel > 14);
+        let anchor = rtl_data::RTL8822E_PHY_REG_PG
+            .chunks_exact(6)
+            .find(|row| row[0] == band && row[1] == 0 && row[3] & 0xffff == 0x0c30)
+            .map(|row| ((row[5] >> 24) & 0xff) as u8)
+            .unwrap_or(0);
+        if anchor == 0 {
+            return Ok(());
+        }
+        for row in rtl_data::RTL8822E_PHY_REG_PG.chunks_exact(6) {
+            if row[0] != band || row[1] != 0 {
+                continue;
+            }
+            let Some(hw_rate) = phy_pg_first_hw_rate_8822e(row[3] & 0xffff) else {
+                continue;
+            };
+            let mut diff_word = 0u32;
+            for byte in 0..4 {
+                let absolute = ((row[5] >> (byte * 8)) & 0xff) as i16;
+                let diff = (absolute - i16::from(anchor)) as i8;
+                diff_word |= u32::from((diff as u8) & 0x7f) << (byte * 8);
+            }
+            let register = 0x3a00 + u16::from(hw_rate & 0xfc);
+            self.set_bb_reg_async(0x1c90, BIT15, 0).await?;
+            self.set_bb_reg_async(register, MASKDWORD, diff_word)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Re-assert the Jaguar3 WiFi-only coex/PTA state and firmware keepalives.
     ///
     /// Devourer runs this kind of work periodically while transmitting so the
@@ -824,6 +1100,20 @@ impl RealtekDevice {
         self.fw_update_wl_phy_info_8822c_async().await?;
         self.fw_set_pwr_mode_active_8822c_async().await?;
         self.fw_coex_query_bt_info_8822c_async().await
+    }
+
+    /// Prepare a monitor-injection-only workload after normal initialization.
+    ///
+    /// Jaguar3 closes the ordinary RX filter maps so an unread over-the-air RX
+    /// FIFO cannot throttle TX. Firmware C2H reports still arrive on bulk-IN and
+    /// should be drained by the caller. Other chip families need no extra step.
+    pub async fn prepare_transmit_only_async(&self) -> Result<(), DriverError> {
+        if !self.probe_chip_async().await?.family.is_jaguar3() {
+            return Ok(());
+        }
+        self.write_u16_async(REG_RXFLTMAP0, 0).await?;
+        self.write_u16_async(REG_RXFLTMAP1, 0).await?;
+        self.write_u16_async(REG_RXFLTMAP2, 0).await
     }
 
     async fn coex_wlan_only_init_8822c_async(&self) -> Result<(), DriverError> {
@@ -909,10 +1199,11 @@ impl RealtekDevice {
     }
 
     async fn send_h2c_raw_8822c_async(&self, msg: u32, msg_ext: u32) -> Result<(), DriverError> {
-        let box_reg = 0x01d0;
-        let box_ex_reg = 0x01f0;
+        let box_index = self.h2c_box.fetch_add(1, Ordering::Relaxed) & 0x03;
+        let box_reg = 0x01d0 + u16::from(box_index) * 4;
+        let box_ex_reg = 0x01f0 + u16::from(box_index) * 4;
         for _ in 0..30 {
-            if self.read_u8_async(REG_HMETFR).await.unwrap_or(0) & 0x01 == 0 {
+            if self.read_u8_async(REG_HMETFR).await.unwrap_or(0) & (1 << box_index) == 0 {
                 break;
             }
             sleep_micros(100).await;
@@ -1452,6 +1743,52 @@ fn sco_value_8822c(channel: u8) -> u32 {
     }
 }
 
+fn channel_group_5g_8822e(channel: u8) -> usize {
+    const GROUP_HIGH_CHANNEL: [u8; 14] = [
+        42, 48, 58, 64, 106, 114, 122, 130, 138, 144, 155, 161, 171, 177,
+    ];
+    GROUP_HIGH_CHANNEL
+        .iter()
+        .position(|high| channel <= *high)
+        .unwrap_or(GROUP_HIGH_CHANNEL.len() - 1)
+}
+
+fn tx_power_ref_8822e(base: u8, differential: u8) -> u8 {
+    const FALLBACK: u8 = 0x4b;
+    if base == 0xff {
+        return FALLBACK;
+    }
+    let nibble = differential & 0x0f;
+    let diff = if nibble & 0x08 != 0 {
+        i16::from(nibble) - 16
+    } else {
+        i16::from(nibble)
+    };
+    let adjusted = (i16::from(base) + diff) as u8;
+    if adjusted <= 0x7f {
+        adjusted
+    } else {
+        FALLBACK
+    }
+}
+
+fn phy_pg_first_hw_rate_8822e(address: u32) -> Option<u8> {
+    match address {
+        0x0c24 => Some(0x04),
+        0x0c28 => Some(0x08),
+        0x0c2c => Some(0x0c),
+        0x0c30 => Some(0x10),
+        0x0c34 => Some(0x14),
+        0x0c38 => Some(0x18),
+        0x0c3c => Some(0x2c),
+        0x0c40 => Some(0x30),
+        0x0c44 => Some(0x34),
+        0x0c48 => Some(0x38),
+        0x0c4c => Some(0x3c),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy)]
 struct PwrStep8822c {
     offset: u16,
@@ -1555,5 +1892,64 @@ mod tests {
     #[test]
     fn validates_generated_firmware_header_size() {
         validate_8822c_firmware_size(rtl_data::RTL8822C_FW_NIC).unwrap();
+        validate_8822c_firmware_size(rtl_data::RTL8822E_FW_NIC).unwrap();
+    }
+
+    #[test]
+    fn rtl8822e_reference_data_matches_devourer_shapes() {
+        assert_eq!(rtl_data::RTL8822E_FW_NIC.len(), 199_928);
+        assert_eq!(
+            &rtl_data::RTL8822E_FW_NIC[..8],
+            &[0x22, 0x88, 0, 0, 1, 0, 0x1e, 0]
+        );
+        assert_eq!(rtl_data::RTL8822E_AGC_TAB.len(), 14_628);
+        assert_eq!(rtl_data::RTL8822E_PHY_REG.len(), 3_082);
+        assert_eq!(rtl_data::RTL8822E_PHY_REG_PG.len(), 276);
+        assert_eq!(rtl_data::RTL8822E_PHY_REG_PG_TYPE5.len(), 276);
+        assert_eq!(rtl_data::RTL8822E_RADIO_A.len(), 10_622);
+        assert_eq!(rtl_data::RTL8822E_RADIO_B.len(), 12_050);
+        assert_eq!(rtl_data::RTL8822E_CAL_INIT.len(), 5_222);
+        assert_eq!(
+            &rtl_data::RTL8822E_PHY_REG_PG[..6],
+            &[0, 0, 0, 0x0c20, u32::MAX, 0x484c5054]
+        );
+        assert_eq!(
+            &rtl_data::RTL8822E_CAL_INIT[..4],
+            &[0x1b00, 0x0000_0008, 0x1b00, 0x00a7_0008]
+        );
+    }
+
+    #[test]
+    fn rtl8822e_channel_groups_match_vendor_layout() {
+        for (channel, expected) in [
+            (36, 0),
+            (42, 0),
+            (44, 1),
+            (64, 3),
+            (100, 4),
+            (144, 9),
+            (149, 10),
+            (177, 13),
+        ] {
+            assert_eq!(channel_group_5g_8822e(channel), expected);
+        }
+    }
+
+    #[test]
+    fn rtl8822e_power_table_addresses_map_to_hardware_rates() {
+        assert_eq!(phy_pg_first_hw_rate_8822e(0x0c24), Some(0x04));
+        assert_eq!(phy_pg_first_hw_rate_8822e(0x0c30), Some(0x10));
+        assert_eq!(phy_pg_first_hw_rate_8822e(0x0c3c), Some(0x2c));
+        assert_eq!(phy_pg_first_hw_rate_8822e(0x0c4c), Some(0x3c));
+        assert_eq!(phy_pg_first_hw_rate_8822e(0x0c20), None);
+        assert_eq!(phy_pg_first_hw_rate_8822e(0x0e24), None);
+    }
+
+    #[test]
+    fn rtl8822e_tx_power_reference_applies_signed_nibble() {
+        assert_eq!(tx_power_ref_8822e(0x49, 0x02), 0x4b);
+        assert_eq!(tx_power_ref_8822e(0x52, 0x0f), 0x51);
+        assert_eq!(tx_power_ref_8822e(0xff, 0x02), 0x4b);
+        assert_eq!(tx_power_ref_8822e(0x00, 0x08), 0x4b);
     }
 }

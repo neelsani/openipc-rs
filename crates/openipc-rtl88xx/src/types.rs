@@ -14,10 +14,21 @@ pub const SUPPORTED_DEVICES: &[SupportedDevice] = &[
         0x0bda,
         0x8812,
         ChipFamily::Rtl8812,
-        "RTL8812AU / RTL8811AU reference PID",
+        "RTL8812AU / RTL8811AU / RTL8812EU reference PID",
     ),
-    SupportedDevice::new(0x0bda, 0x881a, ChipFamily::Rtl8812, "RTL8812AU-VS"),
-    SupportedDevice::new(0x0bda, 0x881b, ChipFamily::Rtl8812, "RTL8812AU-VL"),
+    SupportedDevice::new(
+        0x0bda,
+        0x881a,
+        ChipFamily::Rtl8812,
+        "RTL8812AU-VS / RTL8812EU variant",
+    ),
+    SupportedDevice::new(
+        0x0bda,
+        0x881b,
+        ChipFamily::Rtl8812,
+        "RTL8812AU-VL / RTL8812EU variant",
+    ),
+    SupportedDevice::new(0x0bda, 0x881c, ChipFamily::Rtl8822e, "RTL8812EU variant"),
     SupportedDevice::new(0x0bda, 0x0811, ChipFamily::Rtl8812, "RTL8811AU"),
     SupportedDevice::new(0x0bda, 0xa811, ChipFamily::Rtl8812, "RTL8811AU"),
     SupportedDevice::new(
@@ -102,6 +113,14 @@ pub const SUPPORTED_DEVICES: &[SupportedDevice] = &[
         ChipFamily::Rtl8822c,
         "RTL8822CU multi-function default PID",
     ),
+    SupportedDevice::new(
+        0x0bda,
+        0xa81a,
+        ChipFamily::Rtl8822e,
+        "RTL8812EU / LB-LINK BL-M8812EU2",
+    ),
+    SupportedDevice::new(0x0bda, 0xe822, ChipFamily::Rtl8822e, "RTL8822EU"),
+    SupportedDevice::new(0x0bda, 0xa82a, ChipFamily::Rtl8822e, "RTL8822EU"),
 ];
 
 /// Static metadata for one supported USB VID/PID pair.
@@ -145,6 +164,8 @@ pub enum ChipFamily {
     Rtl8821,
     /// RTL8812CU / RTL8822CU Jaguar3 class.
     Rtl8822c,
+    /// RTL8812EU / RTL8822EU Jaguar3 class.
+    Rtl8822e,
 }
 
 impl ChipFamily {
@@ -155,12 +176,13 @@ impl ChipFamily {
             Self::Rtl8814 => "RTL8814",
             Self::Rtl8821 => "RTL8821",
             Self::Rtl8822c => "RTL8812CU/RTL8822CU",
+            Self::Rtl8822e => "RTL8812EU/RTL8822EU",
         }
     }
 
-    /// Return true for Jaguar3 devices with the 8822C descriptor/HAL layout.
+    /// Return true for Jaguar3 devices with the shared 8822C/8822E descriptor layout.
     pub const fn is_jaguar3(self) -> bool {
-        matches!(self, Self::Rtl8822c)
+        matches!(self, Self::Rtl8822c | Self::Rtl8822e)
     }
 }
 
@@ -189,9 +211,23 @@ pub struct ChipInfo {
 }
 
 impl ChipInfo {
-    pub(crate) fn from_probe(vendor_id: u16, product_id: u16, sys_cfg: u32) -> Self {
-        let family = if product_id == 0x8813 {
+    pub(crate) fn from_probe(
+        vendor_id: u16,
+        product_id: u16,
+        sys_cfg: u32,
+        sys_cfg2_chip_id: u8,
+    ) -> Self {
+        // SYS_CFG2 is authoritative for Jaguar3. RTL8812EU can use the same
+        // USB PID as RTL8812AU, so PID-only dispatch silently selects the wrong
+        // firmware, PHY tables, and RX descriptor layout.
+        let family = if sys_cfg2_chip_id == 0x17 {
+            ChipFamily::Rtl8822e
+        } else if sys_cfg2_chip_id == 0x13 {
+            ChipFamily::Rtl8822c
+        } else if product_id == 0x8813 {
             ChipFamily::Rtl8814
+        } else if is_rtl8822e_pid(vendor_id, product_id) {
+            ChipFamily::Rtl8822e
         } else if is_rtl8822c_pid(vendor_id, product_id) {
             ChipFamily::Rtl8822c
         } else if is_rtl8821a_pid(vendor_id, product_id) {
@@ -202,7 +238,7 @@ impl ChipInfo {
         let rf_type = match family {
             ChipFamily::Rtl8814 => RfType::FourTFourR,
             ChipFamily::Rtl8821 => RfType::OneTOneR,
-            ChipFamily::Rtl8822c => RfType::TwoTTwoR,
+            ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => RfType::TwoTTwoR,
             ChipFamily::Rtl8812 => {
                 if sys_cfg & RF_TYPE_ID != 0 {
                     RfType::OneTOneR
@@ -212,7 +248,10 @@ impl ChipInfo {
             }
         };
         let raw_cut = ((sys_cfg & CHIP_VER_RTL_MASK) >> CHIP_VER_RTL_SHIFT) as u8;
-        let cut_version = if matches!(family, ChipFamily::Rtl8814 | ChipFamily::Rtl8822c) {
+        let cut_version = if matches!(
+            family,
+            ChipFamily::Rtl8814 | ChipFamily::Rtl8822c | ChipFamily::Rtl8822e
+        ) {
             raw_cut
         } else {
             raw_cut.saturating_add(1)
@@ -365,6 +404,8 @@ pub struct MonitorOptions {
     pub force_iqk: bool,
     /// Disable IQK even where it is normally run.
     pub disable_iqk: bool,
+    /// Skip RTL8822E TX gain calibration after IQK.
+    pub skip_txgapk: bool,
     /// RTL8814 firmware download path.
     pub firmware_8814_mode: Firmware8814Mode,
     /// Optional RTL8814 firmware chunk size override.
@@ -378,6 +419,7 @@ impl Default for MonitorOptions {
             skip_tx_power: false,
             force_iqk: false,
             disable_iqk: false,
+            skip_txgapk: false,
             firmware_8814_mode: Firmware8814Mode::Kernel,
             firmware_8814_chunk: None,
         }
@@ -396,7 +438,9 @@ impl MonitorOptions {
             Self {
                 skip_tx_power: std::env::var_os("DEVOURER_SKIP_TXPWR").is_some(),
                 force_iqk: std::env::var_os("DEVOURER_FORCE_IQK").is_some(),
-                disable_iqk: std::env::var_os("DEVOURER_DISABLE_IQK").is_some(),
+                disable_iqk: std::env::var_os("DEVOURER_DISABLE_IQK").is_some()
+                    || std::env::var_os("DEVOURER_SKIP_IQK").is_some(),
+                skip_txgapk: std::env::var_os("DEVOURER_SKIP_TXGAPK").is_some(),
                 firmware_8814_mode: std::env::var("DEVOURER_8814_FWDL")
                     .ok()
                     .and_then(|value| Firmware8814Mode::from_env_value(&value))
@@ -423,7 +467,7 @@ impl MonitorOptions {
             ChipFamily::Rtl8812 => true,
             ChipFamily::Rtl8814 => self.force_iqk,
             ChipFamily::Rtl8821 => false,
-            ChipFamily::Rtl8822c => self.force_iqk,
+            ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => true,
         }
     }
 }
@@ -520,7 +564,7 @@ impl fmt::Display for DriverError {
             Self::InvalidTxPower(power) => {
                 write!(
                     f,
-                    "TX power override {power} is outside the 0..63 TXAGC range"
+                    "TX power override {power} is outside the selected chipset's TXAGC range"
                 )
             }
             Self::InvalidTransfer(err) => write!(f, "{err}"),
@@ -686,5 +730,12 @@ pub(crate) fn is_rtl8822c_pid(vid: u16, pid: u16) -> bool {
     matches!(
         ((vid as u32) << 16) | pid as u32,
         0x0BDAC812 | 0x0BDAC82C | 0x0BDAC82E
+    )
+}
+
+pub(crate) fn is_rtl8822e_pid(vid: u16, pid: u16) -> bool {
+    matches!(
+        ((vid as u32) << 16) | pid as u32,
+        0x0BDA881C | 0x0BDAA81A | 0x0BDAE822 | 0x0BDAA82A
     )
 }

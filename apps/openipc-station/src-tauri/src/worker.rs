@@ -200,7 +200,7 @@ fn realtek_tx_options(chip_family: ChipFamily, rf_channel: u8) -> RealtekTxOptio
 
 fn rx_descriptor_kind(chip_family: ChipFamily) -> RxDescriptorKind {
     match chip_family {
-        ChipFamily::Rtl8822c => RxDescriptorKind::Jaguar3,
+        ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => RxDescriptorKind::Jaguar3,
         ChipFamily::Rtl8812 | ChipFamily::Rtl8814 | ChipFamily::Rtl8821 => {
             RxDescriptorKind::Jaguar1
         }
@@ -435,16 +435,14 @@ fn tick_jaguar3_coex(
     power_tracking: &mut Jaguar3PowerTrackingState,
     now_ms: u64,
 ) {
-    if chip_family != ChipFamily::Rtl8822c
-        || now_ms.saturating_sub(*last_tick_ms) < JAGUAR3_COEX_TICK_MS
-    {
+    if !chip_family.is_jaguar3() || now_ms.saturating_sub(*last_tick_ms) < JAGUAR3_COEX_TICK_MS {
         return;
     }
     *last_tick_ms = now_ms;
     if let Err(err) = device.run_jaguar3_coex_keepalive() {
         emit_log(app, "warn", format!("Jaguar3 coex keepalive failed: {err}"));
     }
-    match device.tick_power_tracking_8822c(power_tracking) {
+    match device.tick_jaguar3_power_tracking(power_tracking) {
         Ok(report) if report.lck_ran => emit_log(
             app,
             "info",

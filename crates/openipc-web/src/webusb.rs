@@ -402,7 +402,7 @@ impl WebPowerTrackingReport {
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
-/// RTL8822C/RTL8812CU thermal power-tracking report.
+/// Jaguar3 thermal power-tracking report.
 #[derive(Clone, Copy)]
 pub struct WebJaguar3PowerTrackingReport {
     report: Jaguar3PowerTrackingReport,
@@ -603,6 +603,36 @@ impl WebUsbRealtekDevice {
         firmware_8814_mode: String,
         firmware_8814_chunk: i32,
     ) -> Result<WebInitReport, JsValue> {
+        self.initialize_monitor_advanced_with_txgapk(
+            channel,
+            channel_width_mhz,
+            channel_offset,
+            accept_bad_fcs,
+            skip_tx_power,
+            force_iqk,
+            disable_iqk,
+            false,
+            firmware_8814_mode,
+            firmware_8814_chunk,
+        )
+        .await
+    }
+
+    #[wasm_bindgen(js_name = initializeMonitorAdvancedWithTxgapk)]
+    /// Initialize monitor mode with all calibration and bring-up options.
+    pub async fn initialize_monitor_advanced_with_txgapk(
+        &self,
+        channel: u8,
+        channel_width_mhz: u16,
+        channel_offset: u8,
+        accept_bad_fcs: bool,
+        skip_tx_power: bool,
+        force_iqk: bool,
+        disable_iqk: bool,
+        skip_txgapk: bool,
+        firmware_8814_mode: String,
+        firmware_8814_chunk: i32,
+    ) -> Result<WebInitReport, JsValue> {
         let radio = RadioConfig {
             channel,
             channel_offset,
@@ -620,6 +650,7 @@ impl WebUsbRealtekDevice {
             skip_tx_power,
             force_iqk,
             disable_iqk,
+            skip_txgapk,
             firmware_8814_mode: mode,
             firmware_8814_chunk: optional_usize(firmware_8814_chunk, "firmware8814Chunk")?,
         };
@@ -727,7 +758,7 @@ impl WebUsbRealtekDevice {
     }
 
     #[wasm_bindgen(js_name = runJaguar3CoexKeepalive)]
-    /// Re-assert RTL8822C/RTL8812CU coex state and firmware keepalives.
+    /// Re-assert Jaguar3 coex state and firmware keepalives.
     pub async fn run_jaguar3_coex_keepalive(&self) -> Result<(), JsValue> {
         self.driver
             .run_jaguar3_coex_keepalive_async()
@@ -907,14 +938,14 @@ impl WebUsbPowerTracking8812 {
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
-/// Stateful RTL8822C/RTL8812CU power-tracking helper for WebUSB apps.
-pub struct WebUsbPowerTracking8822c {
+/// Stateful Jaguar3 power-tracking helper for WebUSB apps.
+pub struct WebUsbJaguar3PowerTracking {
     state: Jaguar3PowerTrackingState,
 }
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
-impl WebUsbPowerTracking8822c {
+impl WebUsbJaguar3PowerTracking {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
         Self {
@@ -929,10 +960,36 @@ impl WebUsbPowerTracking8822c {
     ) -> Result<WebJaguar3PowerTrackingReport, JsValue> {
         let report = device
             .driver
-            .tick_power_tracking_8822c_async(&mut self.state)
+            .tick_jaguar3_power_tracking_async(&mut self.state)
             .await
             .map_err(driver_error)?;
         Ok(report.into())
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Compatibility wrapper for the former RTL8822C-specific class name.
+pub struct WebUsbPowerTracking8822c {
+    inner: WebUsbJaguar3PowerTracking,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+impl WebUsbPowerTracking8822c {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self {
+            inner: WebUsbJaguar3PowerTracking::new(),
+        }
+    }
+
+    #[wasm_bindgen(js_name = tick)]
+    pub async fn tick(
+        &mut self,
+        device: &WebUsbRealtekDevice,
+    ) -> Result<WebJaguar3PowerTrackingReport, JsValue> {
+        self.inner.tick(device).await
     }
 }
 

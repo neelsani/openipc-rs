@@ -6,14 +6,14 @@ pub const DEFAULT_RX_TRANSFER_SIZE: usize = 32 * 1024;
 /// Realtek USB RX descriptor layout family.
 ///
 /// Jaguar1 is used by RTL8812AU/RTL8821AU and the existing RTL8814AU path in
-/// this project. Jaguar3 is used by RTL8812CU/RTL8822CU and keeps the 24-byte
+/// this project. Jaguar3 is used by RTL8812CU/EU and RTL8822CU/EU and keeps the 24-byte
 /// descriptor size while moving several descriptor fields.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RxDescriptorKind {
     /// RTL8812AU/RTL8821AU/RTL8814AU-style descriptor layout.
     #[default]
     Jaguar1,
-    /// RTL8812CU/RTL8822CU-style descriptor layout.
+    /// RTL8812CU/EU and RTL8822CU/EU descriptor layout.
     Jaguar3,
 }
 

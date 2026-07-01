@@ -51,6 +51,10 @@ For the video channel, OpenIPC convention says the recovered payload bytes are
 RTP packets. Apps can mirror those RTP bytes, feed them into the built-in RTP
 depacketizer, or use their own video handling:
 
+The short example below assumes Jaguar1 RX descriptors. For a live adapter,
+prefer `push_rx_transfer_with_kind(..., device.rx_descriptor_kind(), ...)` so
+Jaguar3 CU/EU transfers use the correct descriptor offsets.
+
 ```rust
 let batch = receiver.push_rx_transfer(
     transfer,

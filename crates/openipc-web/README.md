@@ -18,6 +18,7 @@ JavaScript:
   `mavlinkPayloads`
 - Adaptive-link feedback helpers
 - WebUSB Realtek device access
+- Jaguar3 RTL8812CU/EU and RTL8822CU/EU chip detection and shared Rust HAL
 - Realtek diagnostics and calibration hooks: false-alarm counters, PHYDM DIG
   watchdog ticks, RTL8812 power tracking, Jaguar3 thermal tracking,
   RTL8812/RTL8814/Jaguar3 IQK, C2H packets, RTL8814 TX-status reports, and
@@ -47,7 +48,7 @@ openipc-web = "0.1"
 ```ts
 import init, {
   OpenIpcReceiver,
-  WebUsbPowerTracking8822c,
+  WebUsbJaguar3PowerTracking,
   WebUsbRealtekDevice,
   supportedUsbFilters,
 } from "@openipc-rs/web";
@@ -67,7 +68,7 @@ receiver.setRxDescriptorKind(radio.rxDescriptorKind());
 receiver.addKeyedRoute(2, telemetryChannelId, keypairBytes, minimumEpoch);
 const jaguar3Power =
   radio.rxDescriptorKind() === "jaguar3"
-    ? new WebUsbPowerTracking8822c()
+    ? new WebUsbJaguar3PowerTracking()
     : undefined;
 
 const initReport = await radio.initializeMonitorWithOptions(
@@ -77,12 +78,18 @@ const initReport = await radio.initializeMonitorWithOptions(
   false,
 );
 console.log(initReport.chip, initReport.status);
+let nextJaguar3Maintenance = 0;
 
 try {
   while (running) {
-    if (radio.rxDescriptorKind() === "jaguar3") {
+    const now = performance.now();
+    if (
+      radio.rxDescriptorKind() === "jaguar3" &&
+      now >= nextJaguar3Maintenance
+    ) {
       await radio.runJaguar3CoexKeepalive();
       await jaguar3Power?.tick(radio);
+      nextJaguar3Maintenance = now + 2_000;
     }
     const transfers = await radio.readRxTransfers(32768, 4);
     for (const transfer of transfers) {
@@ -127,10 +134,12 @@ selection. For a custom VID/PID not in the built-in table, request the device
 with your own WebUSB filter and call `fromWebUsbDeviceAdvanced(device, -1, vid,
 pid)`.
 
-Use `initializeMonitorAdvanced(...)` for bring-up experiments:
+Use `initializeMonitorAdvancedWithTxgapk(...)` for bring-up experiments. The
+older `initializeMonitorAdvanced(...)` remains available and always runs
+RTL8822E TXGAPK.
 
 ```ts
-await radio.initializeMonitorAdvanced(
+await radio.initializeMonitorAdvancedWithTxgapk(
   channel,
   channelWidthMhz,
   channelOffset,
@@ -138,6 +147,7 @@ await radio.initializeMonitorAdvanced(
   false, // skipTxPower
   false, // forceIqk
   false, // disableIqk
+  false, // skipTxgapk
   "kernel", // RTL8814 firmware path: "kernel" or "rtw88"
   -1, // RTL8814 chunk override; -1 means default
 );

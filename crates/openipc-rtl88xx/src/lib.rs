@@ -13,6 +13,7 @@ mod async_firmware_8814;
 mod async_iqk;
 mod async_iqk_8812;
 mod async_jaguar3;
+mod async_jaguar3_8822e;
 mod async_jaguar3_iqk;
 mod async_mac;
 mod async_phydm;
@@ -81,6 +82,33 @@ mod tests {
         assert_eq!(
             supported_family_hint(0x0bda, 0xc812),
             Some(ChipFamily::Rtl8822c)
+        );
+    }
+
+    #[test]
+    fn detects_rtl8822e_pids_and_shared_pid_chip_id() {
+        for product_id in [0x881c, 0xa81a, 0xe822, 0xa82a] {
+            assert!(types::is_rtl8822e_pid(0x0bda, product_id));
+            assert_eq!(
+                supported_family_hint(0x0bda, product_id),
+                Some(ChipFamily::Rtl8822e)
+            );
+        }
+        let eu = ChipInfo::from_probe(0x0bda, 0x8812, 0, 0x17);
+        assert_eq!(eu.family, ChipFamily::Rtl8822e);
+        assert_eq!(eu.rf_type, RfType::TwoTTwoR);
+
+        let cu = ChipInfo::from_probe(0x0bda, 0x8812, 0, 0x13);
+        assert_eq!(cu.family, ChipFamily::Rtl8822c);
+
+        // SYS_CFG2 remains authoritative even when a PID hint points elsewhere.
+        assert_eq!(
+            ChipInfo::from_probe(0x0bda, 0xa81a, 0, 0x13).family,
+            ChipFamily::Rtl8822c
+        );
+        assert_eq!(
+            ChipInfo::from_probe(0x0bda, 0xc812, 0, 0x17).family,
+            ChipFamily::Rtl8822e
         );
     }
 }

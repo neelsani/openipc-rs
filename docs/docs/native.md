@@ -38,7 +38,9 @@ OpenIPC FPV bring-up:
   recovery, decryption, and UDP payload output.
 - `wfb_tx` replaces the transmit-side UDP-to-radio path with Rust WFB packet
   creation, FEC, radiotap/802.11 header construction, Realtek TX descriptor
-  creation, and USB bulk-OUT injection.
+  creation, and USB bulk-OUT injection. On Jaguar3 it also drains firmware C2H
+  reports and runs the two-second coex/thermal maintenance cadence needed for
+  sustained transmit-only operation.
 - `wfb_keygen`, `wfb_tx_cmd`, `wfb_tun`, and `wfb_rtsp` cover the supporting
   key, control, tunnel, and RTP/RTSP helper roles.
 
@@ -155,6 +157,7 @@ as ground-station secret key plus air-side public key for the TX direction. Use
 `--alink-key` for a separate uplink key file.
 
 `--alink-tx-power` is a manual Realtek TXAGC override for the feedback uplink.
+Jaguar1 accepts `0..=63`; Jaguar3 accepts `0..=127`.
 Adaptive link itself sends quality information to the air unit; it does not mean
 the ground station automatically chooses RF power on its own.
 

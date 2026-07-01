@@ -149,6 +149,7 @@ WFB-ng does not have because upstream uses kernel monitor interfaces:
 --skip-txpwr
 --force-iqk
 --disable-iqk
+--skip-txgapk
 --fwdl-8814 kernel|rtw88
 --fwdl-8814-chunk <n>
 --tx-legacy-8812-desc
@@ -160,6 +161,11 @@ WFB-ng does not have because upstream uses kernel monitor interfaces:
 `wfb_rx` additionally has `--max-transfers` and `--rx-urbs`.
 `wfb_tx` additionally has `--session-interval`, `--max-packets`, and
 `--tx-power`.
+
+On Jaguar3, `wfb_tx` closes the ordinary receive filters, keeps bulk-IN queued
+to drain firmware C2H reports, and runs coex plus thermal maintenance every two
+seconds. This mirrors the sustained transmit behavior required by devourer
+without introducing a hidden driver thread.
 
 `wfb_tx` implements the upstream timing/retry/debug flags that matter for the
 direct TX path:

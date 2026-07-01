@@ -241,7 +241,7 @@ fn process_transfer(
 
 fn rx_descriptor_kind(chip_family: ChipFamily) -> RxDescriptorKind {
     match chip_family {
-        ChipFamily::Rtl8822c => RxDescriptorKind::Jaguar3,
+        ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => RxDescriptorKind::Jaguar3,
         ChipFamily::Rtl8812 | ChipFamily::Rtl8814 | ChipFamily::Rtl8821 => {
             RxDescriptorKind::Jaguar1
         }

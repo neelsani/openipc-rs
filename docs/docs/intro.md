@@ -59,7 +59,8 @@ binding requirements.
 ## Current Status
 
 The protocol pipeline, browser SDK, station UI, native CLI, adaptive-link
-feedback path, and Realtek driver scaffolding are implemented. The remaining
-work is mostly hardware validation: comparing traces against known-good
-receivers, testing more adapters, and proving cold-start behavior across chip
-families and operating systems.
+feedback path, and Realtek driver are implemented, including Jaguar3
+RTL8812CU/EU and RTL8822CU/EU. The remaining work is mostly hardware
+validation: comparing traces against known-good receivers, testing more
+adapters, and proving cold-start behavior across chip families and operating
+systems.

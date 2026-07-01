@@ -70,6 +70,10 @@ fn inspect_transfer(transfer: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+`push_rx_transfer` uses the Jaguar1 layout by default. Hardware-facing apps
+should use `push_rx_transfer_with_kind` and pass the descriptor kind reported by
+`openipc-rtl88xx`, as shown in the native driver example below.
+
 ## Reconstruct Video Frames
 
 ```rust
@@ -366,14 +370,16 @@ fn receive_once(keypair_bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> 
         channel_width: ChannelWidth::Mhz20,
     })?;
     eprintln!("initialized {:?}", report);
+    let descriptor_kind = device.rx_descriptor_kind();
 
     let mut bulk_in = device.bulk_in_endpoint()?;
     let buffer = bulk_in.allocate(DEFAULT_RX_TRANSFER_SIZE);
     let completion = bulk_in.transfer_blocking(buffer, Duration::from_millis(1000));
     completion.status?;
 
-    let batch = receiver.push_rx_transfer(
+    let batch = receiver.push_rx_transfer_with_kind(
         &completion.buffer[..completion.actual_len],
+        descriptor_kind,
         &ReceiverBatchOptions::default(),
     )?;
     for frame in batch.frames {
@@ -419,6 +425,7 @@ fn open_specific_adapter() -> Result<(), Box<dyn std::error::Error>> {
             skip_tx_power: false,
             force_iqk: false,
             disable_iqk: false,
+            skip_txgapk: false,
             firmware_8814_mode: Firmware8814Mode::Kernel,
             firmware_8814_chunk: None,
         },

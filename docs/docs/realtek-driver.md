@@ -14,14 +14,15 @@ radio setup, RX parsing, TX descriptors, and TX power.
 
 The source of truth is `SUPPORTED_DEVICES` in the driver crate. The current
 table includes the Realtek reference IDs, common RTL8812AU OEM IDs used by
-PixelPilot, the RTL8821AU vendor IDs mirrored from devourer, and the new
-Jaguar3 RTL8812CU/RTL8822CU IDs from devourer:
+PixelPilot, the RTL8821AU vendor IDs mirrored from devourer, and Jaguar3
+RTL8812CU/EU and RTL8822CU/EU IDs from devourer:
 
 | VID:PID     | Family Hint | Label                               |
 | ----------- | ----------- | ----------------------------------- |
-| `0bda:8812` | RTL8812     | RTL8812AU / RTL8811AU reference PID |
-| `0bda:881a` | RTL8812     | RTL8812AU-VS                        |
-| `0bda:881b` | RTL8812     | RTL8812AU-VL                        |
+| `0bda:8812` | RTL8812     | RTL8812AU / RTL8811AU / RTL8812EU  |
+| `0bda:881a` | RTL8812     | RTL8812AU-VS / RTL8812EU variant    |
+| `0bda:881b` | RTL8812     | RTL8812AU-VL / RTL8812EU variant    |
+| `0bda:881c` | RTL8822E    | RTL8812EU variant                   |
 | `0bda:0811` | RTL8812     | RTL8811AU                           |
 | `0bda:a811` | RTL8812     | RTL8811AU                           |
 | `0bda:b811` | RTL8812     | RTL8811AU / RTL8821AU variant       |
@@ -61,9 +62,15 @@ Jaguar3 RTL8812CU/RTL8822CU IDs from devourer:
 | `0bda:c812` | RTL8822C    | RTL8812CU / RTL8822CU default PID   |
 | `0bda:c82c` | RTL8822C    | RTL8822CU                           |
 | `0bda:c82e` | RTL8822C    | RTL8812CU / RTL8822CU WiFi-only PID |
+| `0bda:a81a` | RTL8822E    | RTL8812EU / LB-LINK BL-M8812EU2     |
+| `0bda:e822` | RTL8822E    | RTL8822EU                           |
+| `0bda:a82a` | RTL8822E    | RTL8822EU                           |
 
-The chip probe still reads hardware state after opening the device. The table is
-only the first filter used for discovery.
+The chip probe still reads `SYS_CFG2` after opening the device. Chip IDs `0x13`
+and `0x17` select RTL8822C and RTL8822E respectively. That register is
+authoritative because RTL8812EU can enumerate with the same `0bda:8812`,
+`0bda:881a`, or `0bda:881b` IDs used by Jaguar1 adapters; the table is only the
+first discovery filter.
 
 Platform-specific filters are derived from this table:
 
@@ -79,10 +86,13 @@ Platform-specific filters are derived from this table:
 - descriptor-driven endpoint discovery,
 - vendor-control register reads and writes through request `0x05`,
 - firmware download for supported Jaguar-family chips,
-- Jaguar3 RTL8812CU/RTL8822CU firmware download, MAC/USB setup, RFE-aware
-  BB/AGC/RF tables, 24-byte RX descriptor parsing, 48-byte checksummed TX
-  descriptor construction, 5/10 MHz narrowband channel setup, and WiFi-only
-  coex/H2C keepalive hooks plus clean monitor shutdown,
+- Jaguar3 RTL8812CU/EU and RTL8822CU/EU firmware download, MAC/USB setup,
+  RFE-aware BB/AGC/RF tables, 24-byte RX descriptor parsing, 48-byte checksummed
+  TX descriptors, 5/10 MHz narrowband setup, WiFi-only coex/H2C keepalives, and
+  clean monitor shutdown,
+- RTL8822E software-power-cut/burst EFUSE reads, PA-bias trim, DACK, IQK,
+  TXGAPK, DPK bypass, RFE 21-24 antenna control, RFE pinmux, channel-specific TX
+  shaping, per-path TXAGC, and thermal tracking,
 - EFUSE logical-map parsing for MAC address, RFE type, amplifier flags, TX BB
   swing bytes, thermal baseline, and TX-power PG blocks,
 - LLT/page setup and queue/FIFO setup,
@@ -156,8 +166,8 @@ Native and browser code use the same two option structs:
 
 - `DriverOptions`: USB reset behavior, VID/PID targeting, and bulk-OUT endpoint
   override.
-- `MonitorOptions`: bad-FCS retention, TX-power programming skip, IQK policy,
-  and RTL8814 firmware download mode/chunk size.
+- `MonitorOptions`: bad-FCS retention, TX-power programming skip, IQK/TXGAPK
+  policy, and RTL8814 firmware download mode/chunk size.
 
 Native builds additionally read devourer-compatible environment variables:
 
@@ -169,13 +179,15 @@ Native builds additionally read devourer-compatible environment variables:
 | `DEVOURER_SKIP_TXPWR`              | Skip TX-power table programming during channel set.    |
 | `DEVOURER_FORCE_IQK`               | Run IQK where it is otherwise opt-in, notably RTL8814. |
 | `DEVOURER_DISABLE_IQK`             | Suppress IQK.                                          |
+| `DEVOURER_SKIP_IQK`                | Suppress IQK using newer devourer naming.               |
+| `DEVOURER_SKIP_TXGAPK`             | Skip RTL8822E TX gain calibration.                      |
 | `DEVOURER_8814_FWDL=kernel\|rtw88` | Select the RTL8814 firmware path.                      |
 | `DEVOURER_8814_FWDL_CHUNK=<n>`     | Override RTL8814 kernel-path chunk size.               |
 | `DEVOURER_TX_LEGACY_8812_DESC`     | Use the older 8812 TX descriptor shape on RTL8814.     |
 
 The browser API exposes the same choices with
 `WebUsbRealtekDevice.fromWebUsbDeviceWithOptions`,
-`initializeMonitorAdvanced`, and `sendPacketWithOptions`.
+`initializeMonitorAdvancedWithTxgapk`, and `sendPacketWithOptions`.
 
 ## Diagnostics Strategy
 
@@ -218,14 +230,14 @@ Current status:
 - RTL8812 thermal power tracking, RTL8812 IQK, RTL8814 IQK, and the PHYDM
   false-alarm/DIG watchdog have Rust implementations. They are exposed natively
   and through WASM, but still need register-trace comparison on real adapters.
-- RTL8812CU/RTL8822CU Jaguar3 support has been ported from devourer's new path:
-  supported PIDs, descriptor layouts, firmware download, MAC/USB setup,
-  generated BB/AGC/RF/cal-init tables, 5/10 MHz narrowband retiming, monitor
-  filters, TX descriptor checksum, TX power override, DACK, IQK,
-  thermal-power/LCK tracking, coex/H2C keepalive, and devourer-style clean
-  shutdown are implemented. This is still not a substitute for hardware proof:
-  RTL8812CU/RTL8822CU should only be called on-air validated after cold-plug
-  register traces and sustained TX/RX runs match devourer on real adapters.
+- RTL8812CU/EU and RTL8822CU/EU Jaguar3 support is ported through devourer
+  `55f0649`. The RTL8822E firmware and all seven generated table arrays are
+  byte-for-byte equal to the reference commit. Chip-ID dispatch, V1 EFUSE,
+  PA-bias, RFE defaults/pinmux, DACK, IQK, TXGAPK, DPK bypass, per-rate TXAGC,
+  thermal tracking, descriptors, coex/H2C, and shutdown are implemented. This
+  is still not a substitute for hardware proof: each adapter should only be
+  called on-air validated after cold-plug traces and sustained TX/RX runs match
+  devourer on that hardware.
 - Newer devourer runtime TX-mode behavior is mirrored: radiotap RATE/MCS/VHT
   wins, a programmatic default can fill rate-less packets, 5 GHz CCK TX is
   clamped to OFDM, and the newer 8812/8821/8814 descriptor differences are

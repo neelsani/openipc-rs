@@ -19,10 +19,12 @@ lists.
 - Interface claim/reset handling.
 - Realtek vendor request `0x05` register reads and writes.
 - Firmware download and MAC/BB/RF setup for supported rtl88xx families.
-- Jaguar3 RTL8812CU/RTL8822CU support from devourer: PIDs `0bda:c812`,
-  `0bda:c82c`, `0bda:c82e`, 48-byte TX descriptors with checksum, Jaguar3 RX
-  descriptor parsing, firmware/table loading, 5/10 MHz channel widths, and
-  WiFi-only coex keepalive plus clean shutdown hooks.
+- Jaguar3 `rtl8822c` and `rtl8822e` support from devourer: RTL8812CU/EU and
+  RTL8822CU/EU chip-ID dispatch, firmware/table loading, 24-byte RX and
+  checksummed 48-byte TX descriptors, 5/10 MHz widths, WiFi-only coex
+  keepalive, and clean shutdown hooks.
+- RTL8822E V1 EFUSE access, RFE 21-24 setup, PA-bias trim, DACK, IQK, TXGAPK,
+  DPK bypass, per-path/per-channel 7-bit TXAGC, and thermal compensation.
 - EFUSE logical-map parsing for MAC address, RFE type, amplifier flags, TX BB
   swing values, thermal baseline, and TX-power PG blocks.
 - RFE-aware MAC/BB/RF table loading, including conditional RF table entries.
@@ -33,17 +35,16 @@ lists.
   overrides for adaptive-link feedback frames.
 - EFUSE-backed per-rate TXAGC programming, including the devourer 8812A
   by-rate and regulatory limit tables.
-- RTL8812 thermal power tracking, RTL8812/RTL8814 IQK, Jaguar3 DACK/IQK and
-  thermal-power/LCK tracking, and monitor-mode PHYDM false-alarm/DIG watchdog
-  helpers.
+- RTL8812 thermal power tracking, RTL8812/RTL8814 IQK, Jaguar3 DACK/IQK,
+  RTL8822E TXGAPK, Jaguar3 thermal-power tracking, and monitor-mode PHYDM
+  false-alarm/DIG watchdog helpers.
 - Thermal, false-alarm counter, RTL8814 queue-depth, BB-register, C2H/TX-status,
   and BB-dbgport diagnostics.
 
 ## Example
 
 ```rust
-use openipc_core::parse_rx_aggregate;
-use openipc_core::realtek::RxPacketType;
+use openipc_core::realtek::{parse_rx_aggregate_with_kind, RxPacketType};
 use openipc_rtl88xx::{
     ChannelWidth, DriverOptions, MonitorOptions, RadioConfig, RealtekDevice,
 };
@@ -57,6 +58,7 @@ fn receive_one_transfer() -> Result<(), Box<dyn std::error::Error>> {
         channel_offset: 0,
     })?;
     eprintln!("initialized: {:?}", report);
+    let descriptor_kind = device.rx_descriptor_kind();
 
     let mut bulk_in = device.bulk_in_endpoint()?;
     while bulk_in.pending() < 4 {
@@ -69,7 +71,7 @@ fn receive_one_transfer() -> Result<(), Box<dyn std::error::Error>> {
 
         {
             let bytes = &completion.buffer[..actual_len];
-            for packet in parse_rx_aggregate(bytes)? {
+            for packet in parse_rx_aggregate_with_kind(bytes, descriptor_kind)? {
                 if packet.attrib.pkt_rpt_type == RxPacketType::NormalRx {
                     println!(
                         "frame={} seq={} rssi0={} snr0={}",
@@ -118,6 +120,7 @@ let report = device.initialize_monitor_with_options(
         skip_tx_power: false,
         force_iqk: false,
         disable_iqk: false,
+        skip_txgapk: false,
         ..MonitorOptions::default()
     },
 )?;
@@ -132,6 +135,8 @@ DEVOURER_TX_EP                    force the bulk-OUT endpoint
 DEVOURER_SKIP_TXPWR               skip TX-power programming during channel set
 DEVOURER_FORCE_IQK                run IQK even where it is normally opt-in
 DEVOURER_DISABLE_IQK              suppress IQK
+DEVOURER_SKIP_IQK                 suppress IQK (newer devourer spelling)
+DEVOURER_SKIP_TXGAPK              skip RTL8822E TX gain calibration
 DEVOURER_8814_FWDL=kernel|rtw88   select RTL8814 firmware download path
 DEVOURER_8814_FWDL_CHUNK=<n>      override RTL8814 kernel-path chunk size
 DEVOURER_TX_LEGACY_8812_DESC      use the older 8812 descriptor shape on RTL8814 TX
@@ -145,11 +150,12 @@ directly. Browser applications go through `openipc-web`, where JavaScript first
 gets a user-approved `UsbDevice` and Rust/WASM uses the WebUSB-capable `nusb`
 backend.
 
-Jaguar3 note: the Rust driver tracks devourer's RTL8812CU/RTL8822CU cold-start
-path for firmware, tables, descriptors, narrowband tuning, TX power override,
-DACK/IQK, thermal-power/LCK tracking, coex keepalive, and monitor shutdown.
-That still needs cold-plug register-trace comparison and sustained on-air
-testing before this family should be called fully validated on real hardware.
+Jaguar3 note: the Rust driver tracks devourer's RTL8812CU/EU and RTL8822CU/EU
+cold-start paths. RTL8822E support includes the chip-specific firmware and
+tables, V1 EFUSE reader, PA bias, DACK/IQK/TXGAPK, RFE and channel finalization,
+per-path TXAGC, and thermal tracking. The Rust port still needs cold-plug
+register traces and sustained on-air testing before a particular adapter can be
+called validated.
 
 One naming caveat: the native `*_async` methods are async-shaped compatibility
 APIs around blocking `nusb` calls (`wait` and blocking bulk transfers). They are
@@ -189,7 +195,7 @@ The crate is standalone and does not build against devourer. It was written
 using devourer, aviateur, and openipc-zig as references. The cold-start path now
 includes EFUSE-backed RFE selection and devourer-style band switching for
 RTL8812/RTL8821/RTL8814, plus the newer devourer TX power, PHYDM, power
-tracking, IQK, C2H, TX-status, RTL8814 firmware-mode/chunk controls, endpoint
-selection, and TX descriptor compatibility surfaces. Hardware bring-up still
+tracking, IQK, C2H, TX-status, RTL8814 firmware controls, and the complete
+`rtl8822e` Jaguar3 path through devourer `55f0649`. Hardware bring-up still
 needs live adapter testing and register-trace comparison per chip family before
 the support matrix should be treated as final.

@@ -4,6 +4,7 @@
     <usb-device vendor-id="0BDA" product-id="8812" />
     <usb-device vendor-id="0BDA" product-id="881A" />
     <usb-device vendor-id="0BDA" product-id="881B" />
+    <usb-device vendor-id="0BDA" product-id="881C" />
     <usb-device vendor-id="0BDA" product-id="0811" />
     <usb-device vendor-id="0BDA" product-id="A811" />
     <usb-device vendor-id="0BDA" product-id="B811" />
@@ -43,4 +44,7 @@
     <usb-device vendor-id="0BDA" product-id="C812" />
     <usb-device vendor-id="0BDA" product-id="C82C" />
     <usb-device vendor-id="0BDA" product-id="C82E" />
+    <usb-device vendor-id="0BDA" product-id="A81A" />
+    <usb-device vendor-id="0BDA" product-id="E822" />
+    <usb-device vendor-id="0BDA" product-id="A82A" />
 </resources>

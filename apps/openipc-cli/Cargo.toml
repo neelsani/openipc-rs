@@ -1,6 +1,6 @@
 [package]
 name = "openipc-cli"
-version = "0.1.23"
+version = "0.1.24"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -9,8 +9,8 @@ publish = false
 readme = "README.md"
 
 [dependencies]
-openipc-core = { version = "0.1.23", path = "../../crates/openipc-core" }
-openipc-rtl88xx = { version = "0.1.23", path = "../../crates/openipc-rtl88xx" }
+openipc-core = { version = "0.1.24", path = "../../crates/openipc-core" }
+openipc-rtl88xx = { version = "0.1.24", path = "../../crates/openipc-rtl88xx" }
 nusb.workspace = true
 
 [[bin]]

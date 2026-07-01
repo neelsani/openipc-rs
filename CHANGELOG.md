@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.24 - 2026-07-01
+
+### Changes
+- Add codec-backed mock payload pipeline (b44a4a8)
+
+
 ## 0.1.23 - 2026-07-01
 
 ### Fixes

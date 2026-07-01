@@ -216,7 +216,53 @@ pub(crate) fn openipc_start_rx(
     let stop = Arc::new(AtomicBool::new(false));
     let worker_stop = stop.clone();
     let handle = thread::spawn(move || {
-        if let Err(err) = run_rx_worker(app.clone(), device, chip_family, request, worker_stop) {
+        if let Err(err) =
+            run_rx_worker(app.clone(), device, chip_family, request, worker_stop, None)
+        {
+            emit_stopped(&app, "error", err);
+        }
+    });
+    *worker = Some(RxWorker {
+        stop,
+        join: Some(handle),
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn openipc_start_rx_stream(
+    app: AppHandle,
+    request: StartRxRequest,
+    frame_channel: Channel<Response>,
+    state: State<'_, DesktopState>,
+) -> Result<(), String> {
+    let mut worker = state.worker.lock().map_err(|_| "worker lock poisoned")?;
+    if worker.is_some() {
+        return Err("receiver is already running".to_owned());
+    }
+    let device = state
+        .device
+        .lock()
+        .map_err(|_| "device lock poisoned")?
+        .clone()
+        .ok_or_else(|| "connect to a Realtek adapter before starting RX".to_owned())?;
+    let chip_family = state
+        .chip_family
+        .lock()
+        .map_err(|_| "chip lock poisoned")?
+        .ok_or_else(|| "chip family is unknown; reconnect the adapter".to_owned())?;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker_stop = stop.clone();
+    let handle = thread::spawn(move || {
+        if let Err(err) = run_rx_worker(
+            app.clone(),
+            device,
+            chip_family,
+            request,
+            worker_stop,
+            Some(frame_channel),
+        ) {
             emit_stopped(&app, "error", err);
         }
     });

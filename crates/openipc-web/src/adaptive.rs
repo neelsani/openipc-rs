@@ -23,6 +23,18 @@ pub struct OpenIpcAdaptiveLink {
     rx_descriptor_kind: RxDescriptorKind,
 }
 
+impl OpenIpcAdaptiveLink {
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn record_rx_paths(&mut self, now_ms: u64, rssi: [u8; 4], snr: [i8; 4]) {
+        self.sender.record_rx_paths(now_ms, rssi, snr);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn record_counters(&mut self, now_ms: u64, counters: FecCounters) {
+        self.record_counter_delta(now_ms, counters);
+    }
+}
+
 #[wasm_bindgen]
 impl OpenIpcAdaptiveLink {
     #[wasm_bindgen(constructor)]

@@ -567,9 +567,9 @@ impl RtpDepacketizer {
                 self.reset_fragment(Codec::H264);
                 return Ok(None);
             }
-            let data = self.h264.data.clone();
-            let frame = self.frame_with_prefix(
-                &data,
+            let data = std::mem::take(&mut self.h264.data);
+            let frame = self.frame_with_owned_nalu(
+                data,
                 FrameMeta {
                     timestamp: self.h264.timestamp,
                     is_keyframe: nal_type == 5,
@@ -623,9 +623,9 @@ impl RtpDepacketizer {
                 self.reset_fragment(Codec::H265);
                 return Ok(None);
             }
-            let data = self.h265.data.clone();
-            let frame = self.frame_with_prefix(
-                &data,
+            let data = std::mem::take(&mut self.h265.data);
+            let frame = self.frame_with_owned_nalu(
+                data,
                 FrameMeta {
                     timestamp: self.h265.timestamp,
                     is_keyframe: (16..=23).contains(&nal_type),
@@ -828,6 +828,47 @@ impl RtpDepacketizer {
             sequence_number: meta.sequence_number,
             nal_type: meta.nal_type,
             codec_config: self.codec_config(),
+        }
+    }
+
+    fn frame_with_owned_nalu(&mut self, mut nalu: Vec<u8>, meta: FrameMeta) -> DepacketizedFrame {
+        let data = if meta.is_keyframe {
+            let mut data = Vec::with_capacity(nalu.len() + 4 + self.cached_config_len(meta.codec));
+            self.prepend_cached_config(&mut data, meta.codec);
+            append_annex_b(&mut data, &nalu);
+            data
+        } else {
+            let len = nalu.len();
+            nalu.resize(len + 4, 0);
+            nalu.copy_within(0..len, 4);
+            nalu[..4].copy_from_slice(&[0, 0, 0, 1]);
+            nalu
+        };
+        DepacketizedFrame {
+            data,
+            timestamp: meta.timestamp,
+            is_keyframe: meta.is_keyframe,
+            codec: meta.codec,
+            payload_type: meta.payload_type,
+            sequence_number: meta.sequence_number,
+            nal_type: meta.nal_type,
+            codec_config: self.codec_config(),
+        }
+    }
+
+    fn cached_config_len(&self, codec: Codec) -> usize {
+        match codec {
+            Codec::H264 => {
+                self.h264_sps.as_ref().map_or(0, Vec::len)
+                    + self.h264_pps.as_ref().map_or(0, Vec::len)
+                    + 8
+            }
+            Codec::H265 => {
+                self.h265_vps.as_ref().map_or(0, Vec::len)
+                    + self.h265_sps.as_ref().map_or(0, Vec::len)
+                    + self.h265_pps.as_ref().map_or(0, Vec::len)
+                    + 12
+            }
         }
     }
 

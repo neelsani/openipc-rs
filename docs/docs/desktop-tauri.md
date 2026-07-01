@@ -28,12 +28,14 @@ Tauri command
   -> nusb USB device
   -> openipc-rtl88xx Realtek HAL
   -> openipc-core ReceiverRuntime
-  -> Tauri events with encoded Annex-B frames and metrics
+  -> raw Tauri video channel plus low-rate metrics events
   -> React WebCodecs playback
 ```
 
 The desktop mode does not use browser WebUSB. It uses native `nusb` for USB
-operations and sends encoded frame batches to the UI.
+operations and sends compressed Annex-B video frames through a binary channel.
+The JSON event stream contains counters, link state, and diagnostics rather
+than the high-volume frame bytes.
 
 Video decode still happens in the WebView through WebCodecs. Rust handles USB
 and protocol reconstruction; the UI handles decoded frame lifecycle, rendering,

@@ -36,8 +36,8 @@ flowchart TD
     C --> D["WebUsbRealtekDevice.fromWebUsbDevice"]
     D --> E["Rust/nusb WebUSB transport"]
     E --> F["Realtek monitor initialization"]
-    F --> G["readRxTransfer"]
-    G --> H["OpenIpcReceiver.pushRxTransferProfiled"]
+    F --> G["WebUsbReceiverSession.nextProfile"]
+    G --> H["Rust/WASM ReceiverRuntime"]
     H --> I["OpenIpcVideoFrame[]"]
     I --> J["WebCodecs VideoDecoder"]
     H --> K["selected raw route payloads"]
@@ -48,8 +48,8 @@ flowchart TD
 3. React passes that object to `WebUsbRealtekDevice.fromWebUsbDevice`.
 4. Rust/WASM uses `nusb` to claim interface 0 and discover endpoints.
 5. The shared Rust Realtek HAL initializes monitor mode and channel settings.
-6. Bulk-IN transfer bytes feed the same Rust payload and RTP stages used by
-   native.
+6. `WebUsbReceiverSession` keeps several bulk-IN reads pending, processes each
+   completion in Rust, and recycles the USB buffer immediately.
 7. Rust/WASM returns structured video frames, selected raw route payload bytes,
    link metrics, and debug metrics.
 8. React sends frames to WebCodecs and renders the decoded output.
@@ -58,7 +58,8 @@ flowchart TD
 
 The browser path keeps high-volume protocol work in Rust:
 
-1. JavaScript passes one USB transfer buffer to `OpenIpcReceiver`.
+1. Rust keeps the USB transfer buffer inside `WebUsbReceiverSession`; raw USB
+   transfers do not round-trip through JavaScript.
 2. Rust parses Realtek descriptors, filters packets, decrypts WFB, performs FEC
    recovery, then feeds video-channel payload bytes into the RTP depacketizer to
    emit encoded video frames.
@@ -73,9 +74,9 @@ The browser path keeps high-volume protocol work in Rust:
 
 The app does not pass every video RTP packet back and forth unless it asks for
 an unfiltered raw tap on the video route. The default mixed-audio path uses a
-filtered RTP tap, so only matching audio packets cross back to JavaScript. It
-still passes each USB transfer into WASM and each completed encoded frame back
-out. That is the right boundary for the current browser design because WebCodecs
+filtered RTP tap, so only matching audio packets cross back to JavaScript.
+It passes completed encoded frames back out, but not each raw USB transfer. That
+is the right boundary because WebCodecs
 owns the decoded `VideoFrame` and `AudioData` lifecycles, while telemetry
 parsing is left to application code.
 

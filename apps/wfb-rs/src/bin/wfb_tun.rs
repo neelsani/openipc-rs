@@ -140,7 +140,10 @@ mod unix_impl {
                 last_ping = Instant::now();
             }
 
-            std::thread::sleep(Duration::from_millis(1));
+            // The tunnel is intentionally non-blocking so the aggregation
+            // deadline remains the only added latency. A scheduler yield is
+            // preferable to a fixed 1 ms polling delay here.
+            std::thread::yield_now();
         }
     }
 

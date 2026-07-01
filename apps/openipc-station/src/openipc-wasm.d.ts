@@ -86,7 +86,10 @@ declare module "@openipc/wasm" {
     parseMs: number;
     pipelineMs: number;
     totalMs: number;
+    usbReadMs: number;
+    pendingUsbTransfers: number;
     rtpStatus: OpenIpcRtpStatus;
+    fecCounters: import("@/lib/types").FecCounters;
   };
 
   export class OpenIpcReceiver {
@@ -152,6 +155,24 @@ declare module "@openipc/wasm" {
       rtpTapPayloadTypes: Uint8Array,
     ): OpenIpcRxTransferProfile;
     fecCounters(): string;
+  }
+
+  export class WebUsbReceiverSession {
+    static create(
+      device: WebUsbRealtekDevice,
+      receiver: OpenIpcReceiver,
+      transferSize: number,
+      inFlight: number,
+      keepCorrupted: boolean,
+      rawRouteIds: Uint32Array,
+      rtpTapRouteIds: Uint32Array,
+      rtpTapPayloadTypes: Uint8Array,
+    ): WebUsbReceiverSession;
+    readonly pendingTransfers: number;
+    readonly transferSize: number;
+    nextProfile(): Promise<OpenIpcRxTransferProfile>;
+    recordAdaptive(adaptive: OpenIpcAdaptiveLink, nowMs: number): void;
+    free(): void;
   }
 
   export class OpenIpcAdaptiveLink {

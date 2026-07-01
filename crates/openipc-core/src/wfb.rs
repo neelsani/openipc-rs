@@ -4,7 +4,7 @@ use crypto_box::aead::Aead;
 use crypto_box::{Nonce as BoxNonce, PublicKey, SalsaBox, SecretKey};
 
 use crate::channel::ChannelId;
-use crate::crypto::decrypt_chacha20poly1305_legacy;
+use crate::crypto::decrypt_chacha20poly1305_legacy_into;
 use crate::fec::FecCode;
 
 /// WFB WiFi MTU used by OpenIPC forwarder packets.
@@ -290,6 +290,7 @@ pub struct WfbReceiver {
     keypair: WfbKeypair,
     session: Option<WfbSession>,
     assembler: Option<PlainAssembler>,
+    decrypt_scratch: Vec<u8>,
     incoming_packets: u64,
     session_packets: u64,
     data_packets: u64,
@@ -304,6 +305,7 @@ impl WfbReceiver {
             keypair,
             session: None,
             assembler: None,
+            decrypt_scratch: Vec::with_capacity(MAX_FEC_PAYLOAD),
             incoming_packets: 0,
             session_packets: 0,
             data_packets: 0,
@@ -362,16 +364,17 @@ impl WfbReceiver {
                 self.data_packets += 1;
                 let session = self.session.as_ref().ok_or(WfbError::MissingSession)?;
                 let nonce = &associated_data[1..WBLOCK_HDR_LEN];
-                let decrypted = decrypt_chacha20poly1305_legacy(
+                decrypt_chacha20poly1305_legacy_into(
                     &session.session_key,
                     nonce,
                     associated_data,
                     encrypted_payload,
+                    &mut self.decrypt_scratch,
                 )
                 .map_err(|_| WfbError::DataDecryptFailed)?;
                 let assembler = self.assembler.as_mut().ok_or(WfbError::MissingSession)?;
                 Ok(assembler
-                    .push_decrypted_fragment(data_nonce, &decrypted)?
+                    .push_decrypted_fragment(data_nonce, &self.decrypt_scratch)?
                     .into_iter()
                     .map(WfbEvent::Payload)
                     .collect())

@@ -234,6 +234,15 @@ export async function tauriStartRx(
   await invoke("openipc_start_rx", { request });
 }
 
+export async function tauriStartRxStream(
+  request: TauriStartRxRequest,
+  onFrame: (data: ArrayBuffer | Uint8Array) => void,
+): Promise<void> {
+  const { Channel, invoke } = await import("@tauri-apps/api/core");
+  const frameChannel = new Channel<ArrayBuffer | Uint8Array>(onFrame);
+  await invoke("openipc_start_rx_stream", { request, frameChannel });
+}
+
 export async function tauriStopRx(): Promise<void> {
   const { invoke } = await tauriApi();
   await invoke("openipc_stop_rx");

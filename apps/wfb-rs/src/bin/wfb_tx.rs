@@ -531,7 +531,10 @@ fn run_tx(config: TxConfig) -> CliResult<()> {
                 });
             }
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(1));
+                // Do not add a millisecond of avoidable source-side queueing.
+                // USB and socket work are already rate-limited by the device;
+                // yielding lets a waiting packet be picked up immediately.
+                std::thread::yield_now();
             }
             Err(err) => return Err(err.into()),
         }

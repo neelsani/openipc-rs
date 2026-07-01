@@ -213,6 +213,7 @@ pub(crate) fn run_rx_worker(
     chip_family: ChipFamily,
     request: StartRxRequest,
     stop: Arc<AtomicBool>,
+    video_channel: Option<tauri::ipc::Channel<tauri::ipc::Response>>,
 ) -> Result<(), String> {
     let keypair_bytes = BASE64
         .decode(request.keypair_base64.as_bytes())
@@ -279,6 +280,11 @@ pub(crate) fn run_rx_worker(
             payload_type: route.payload_type.unwrap_or(RTP_PAYLOAD_TYPE_OPUS),
         })
         .collect();
+    let receiver_options = ReceiverBatchOptions {
+        raw_payload_routes,
+        rtp_payload_taps,
+        ..ReceiverBatchOptions::default()
+    };
     let udp_sinks = udp_route_sinks(&enabled_routes)?;
     let mut ep_in = device.bulk_in_endpoint().map_err(|err| err.to_string())?;
     let mut ep_out = if request.adaptive_enabled || request.vpn_enabled {
@@ -401,10 +407,10 @@ pub(crate) fn run_rx_worker(
                     rx_descriptor_kind: rx_descriptor_kind(chip_family),
                     usb_read_ms,
                     loop_start,
-                    raw_payload_routes: raw_payload_routes.as_slice(),
-                    rtp_payload_taps: rtp_payload_taps.as_slice(),
+                    options: &receiver_options,
                     udp_sinks: udp_sinks.as_slice(),
                     tun: tun.as_mut(),
+                    video_channel: video_channel.as_ref(),
                 },
             ) {
                 Ok(batch) => {
@@ -504,14 +510,7 @@ pub(crate) fn build_rx_batch(
     }
 
     let pipeline_start = Instant::now();
-    let batch = context.receiver.push_rx_packets(
-        packets,
-        &ReceiverBatchOptions {
-            raw_payload_routes: context.raw_payload_routes.to_vec(),
-            rtp_payload_taps: context.rtp_payload_taps.to_vec(),
-            ..ReceiverBatchOptions::default()
-        },
-    );
+    let batch = context.receiver.push_rx_packets(packets, context.options);
     let pipeline_ms = elapsed_ms(pipeline_start);
     let counters = batch.fec_counters;
     let batch_counters = batch.counters;
@@ -531,7 +530,16 @@ pub(crate) fn build_rx_batch(
             let _ = sink.socket.send_to(&payload.data, sink.dest);
         }
     }
-    let frames = batch.frames.into_iter().map(video_frame_payload).collect();
+    let frames = if let Some(channel) = context.video_channel {
+        for frame in &batch.frames {
+            channel
+                .send(tauri::ipc::Response::new(video_frame_binary(frame)))
+                .map_err(|err| format!("send video frame to webview failed: {err}"))?;
+        }
+        Vec::new()
+    } else {
+        batch.frames.into_iter().map(video_frame_payload).collect()
+    };
     let tun_route_id = context.tun.as_ref().map(|runtime| runtime.route_id);
     let raw_payloads: Vec<_> = batch
         .raw_payloads

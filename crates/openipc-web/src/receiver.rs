@@ -1,12 +1,15 @@
 use js_sys::{Array, Object, Reflect, Uint8Array};
 use openipc_core::realtek::{parse_rx_aggregate_with_kind, RxDescriptorKind};
 use openipc_core::{
-    ChannelId, FrameLayout, PayloadRouteId, RadioPort, ReceiverBatchOptions, ReceiverRuntime,
-    RtpPayloadTap, WfbKeypair,
+    ChannelId, FrameLayout, PayloadRouteId, RadioPort, ReceiverBatch, ReceiverBatchOptions,
+    ReceiverRuntime, RtpPayloadTap, WfbKeypair,
 };
 use wasm_bindgen::prelude::*;
 
-use crate::js::{counters_json, elapsed_ms, now_ms, parse_hex_u64, raw_payload_object, set_number};
+use crate::js::{
+    counters_json, counters_object, elapsed_ms, now_ms, parse_hex_u64, raw_payload_object,
+    set_number,
+};
 use crate::video::{rtp_status_object, video_frame_object};
 
 const VIDEO_ROUTE_ID: PayloadRouteId = PayloadRouteId::new(1);
@@ -17,7 +20,7 @@ const DEFAULT_KEY_SLOT: u64 = 0;
 /// Browser/WASM receiver for OpenIPC RX transfers and RTP packets.
 pub struct OpenIpcReceiver {
     pub(crate) runtime: ReceiverRuntime,
-    rx_descriptor_kind: RxDescriptorKind,
+    pub(crate) rx_descriptor_kind: RxDescriptorKind,
 }
 
 impl OpenIpcReceiver {
@@ -405,53 +408,75 @@ impl OpenIpcReceiver {
             },
         );
         let pipeline_ms = elapsed_ms(pipeline_start);
-        let counters = batch.counters;
-        let frames = frame_objects_array(batch.frames)?;
-        let raw_payloads = raw_payload_array(batch.raw_payloads)?;
-        let rtp_status = rtp_status_object(batch.rtp_status, batch.rtp_reorder_status)?;
-
-        let object = Object::new();
-        Reflect::set(&object, &JsValue::from_str("frames"), &frames)?;
-        Reflect::set(&object, &JsValue::from_str("rawPayloads"), &raw_payloads)?;
-        Reflect::set(
-            &object,
-            &JsValue::from_str("mavlinkPayloads"),
-            &raw_payloads,
-        )?;
-        Reflect::set(&object, &JsValue::from_str("rtpStatus"), &rtp_status)?;
-        set_number(
-            &object,
-            "rawPayloadCount",
-            counters.raw_payload_count as f64,
-        )?;
-        set_number(
-            &object,
-            "rawPayloadBytes",
-            counters.raw_payload_bytes as f64,
-        )?;
-        set_number(&object, "transferBytes", transfer.len() as f64)?;
-        set_number(&object, "packets", counters.packets as f64)?;
-        set_number(&object, "acceptedPackets", counters.accepted_packets as f64)?;
-        set_number(&object, "droppedPackets", counters.dropped_packets as f64)?;
-        set_number(&object, "crcDropped", counters.crc_dropped as f64)?;
-        set_number(&object, "icvDropped", counters.icv_dropped as f64)?;
-        set_number(&object, "reportDropped", counters.report_dropped as f64)?;
-        set_number(&object, "ignoredFrames", counters.ignored_frames as f64)?;
-        set_number(&object, "sessions", counters.sessions as f64)?;
-        set_number(&object, "wfbPayloads", counters.wfb_payloads as f64)?;
-        set_number(&object, "rtpPackets", counters.rtp_packets as f64)?;
-        set_number(&object, "videoFrames", counters.video_frames as f64)?;
-        set_number(
-            &object,
-            "mavlinkPayloadCount",
-            counters.raw_payload_count as f64,
-        )?;
-        set_number(&object, "mavlinkBytes", counters.raw_payload_bytes as f64)?;
-        set_number(&object, "parseMs", parse_ms)?;
-        set_number(&object, "pipelineMs", pipeline_ms)?;
-        set_number(&object, "totalMs", elapsed_ms(total_start))?;
-        Ok(object)
+        receiver_profile_object(
+            batch,
+            transfer.len(),
+            parse_ms,
+            pipeline_ms,
+            elapsed_ms(total_start),
+        )
     }
+}
+
+pub(crate) fn receiver_profile_object(
+    batch: ReceiverBatch,
+    transfer_bytes: usize,
+    parse_ms: f64,
+    pipeline_ms: f64,
+    total_ms: f64,
+) -> Result<Object, JsValue> {
+    let counters = batch.counters;
+    let fec_counters = batch.fec_counters;
+    let frames = frame_objects_array(batch.frames)?;
+    let raw_payloads = raw_payload_array(batch.raw_payloads)?;
+    let rtp_status = rtp_status_object(batch.rtp_status, batch.rtp_reorder_status)?;
+
+    let object = Object::new();
+    Reflect::set(&object, &JsValue::from_str("frames"), &frames)?;
+    Reflect::set(&object, &JsValue::from_str("rawPayloads"), &raw_payloads)?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("mavlinkPayloads"),
+        &raw_payloads,
+    )?;
+    Reflect::set(&object, &JsValue::from_str("rtpStatus"), &rtp_status)?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("fecCounters"),
+        &counters_object(fec_counters)?.into(),
+    )?;
+    set_number(
+        &object,
+        "rawPayloadCount",
+        counters.raw_payload_count as f64,
+    )?;
+    set_number(
+        &object,
+        "rawPayloadBytes",
+        counters.raw_payload_bytes as f64,
+    )?;
+    set_number(&object, "transferBytes", transfer_bytes as f64)?;
+    set_number(&object, "packets", counters.packets as f64)?;
+    set_number(&object, "acceptedPackets", counters.accepted_packets as f64)?;
+    set_number(&object, "droppedPackets", counters.dropped_packets as f64)?;
+    set_number(&object, "crcDropped", counters.crc_dropped as f64)?;
+    set_number(&object, "icvDropped", counters.icv_dropped as f64)?;
+    set_number(&object, "reportDropped", counters.report_dropped as f64)?;
+    set_number(&object, "ignoredFrames", counters.ignored_frames as f64)?;
+    set_number(&object, "sessions", counters.sessions as f64)?;
+    set_number(&object, "wfbPayloads", counters.wfb_payloads as f64)?;
+    set_number(&object, "rtpPackets", counters.rtp_packets as f64)?;
+    set_number(&object, "videoFrames", counters.video_frames as f64)?;
+    set_number(
+        &object,
+        "mavlinkPayloadCount",
+        counters.raw_payload_count as f64,
+    )?;
+    set_number(&object, "mavlinkBytes", counters.raw_payload_bytes as f64)?;
+    set_number(&object, "parseMs", parse_ms)?;
+    set_number(&object, "pipelineMs", pipeline_ms)?;
+    set_number(&object, "totalMs", total_ms)?;
+    Ok(object)
 }
 
 fn openipc_receiver_with_keypair_and_telemetry_channel_inner(
@@ -503,7 +528,9 @@ fn frame_bytes_array(frames: Vec<openipc_core::DepacketizedFrame>) -> Array {
     out
 }
 
-fn frame_objects_array(frames: Vec<openipc_core::DepacketizedFrame>) -> Result<Array, JsValue> {
+pub(crate) fn frame_objects_array(
+    frames: Vec<openipc_core::DepacketizedFrame>,
+) -> Result<Array, JsValue> {
     let out = Array::new();
     for frame in frames {
         out.push(&video_frame_object(frame)?.into());
@@ -511,7 +538,9 @@ fn frame_objects_array(frames: Vec<openipc_core::DepacketizedFrame>) -> Result<A
     Ok(out)
 }
 
-fn raw_payload_array(payloads: Vec<openipc_core::RoutePayload>) -> Result<Array, JsValue> {
+pub(crate) fn raw_payload_array(
+    payloads: Vec<openipc_core::RoutePayload>,
+) -> Result<Array, JsValue> {
     let out = Array::new();
     for payload in payloads {
         out.push(&raw_payload_object(payload)?.into());

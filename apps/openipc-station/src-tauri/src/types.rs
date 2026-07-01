@@ -275,8 +275,8 @@ pub(crate) struct RxBatchContext<'a> {
     pub(crate) rx_descriptor_kind: openipc_core::realtek::RxDescriptorKind,
     pub(crate) usb_read_ms: f64,
     pub(crate) loop_start: Instant,
-    pub(crate) raw_payload_routes: &'a [PayloadRouteId],
-    pub(crate) rtp_payload_taps: &'a [RtpPayloadTap],
+    pub(crate) options: &'a ReceiverBatchOptions,
     pub(crate) udp_sinks: &'a [crate::worker::UdpRouteSink],
     pub(crate) tun: Option<&'a mut crate::worker::TunRuntime>,
+    pub(crate) video_channel: Option<&'a tauri::ipc::Channel<tauri::ipc::Response>>,
 }

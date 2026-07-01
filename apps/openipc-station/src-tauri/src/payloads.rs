@@ -39,6 +39,36 @@ pub(crate) fn video_frame_payload(frame: DepacketizedFrame) -> VideoFramePayload
     }
 }
 
+pub(crate) fn video_frame_binary(frame: &DepacketizedFrame) -> Vec<u8> {
+    let codec_string = codec_string(frame);
+    let config = codec_config_payload(frame.codec_config);
+    let mut config_flags = 0u8;
+    config_flags |= u8::from(config.h264_sps);
+    config_flags |= u8::from(config.h264_pps) << 1;
+    config_flags |= u8::from(config.h265_vps) << 2;
+    config_flags |= u8::from(config.h265_sps) << 3;
+    config_flags |= u8::from(config.h265_pps) << 4;
+    let codec_bytes = codec_string.as_bytes();
+    let codec_len = codec_bytes.len().min(u8::MAX as usize);
+    let mut output = Vec::with_capacity(17 + codec_len + frame.data.len());
+    output.extend_from_slice(b"OIPC");
+    output.push(1);
+    output.push(match frame.codec {
+        Codec::H264 => 0,
+        Codec::H265 => 1,
+    });
+    output.push(u8::from(frame.is_keyframe));
+    output.push(frame.payload_type);
+    output.extend_from_slice(&frame.sequence_number.to_be_bytes());
+    output.extend_from_slice(&frame.timestamp.to_be_bytes());
+    output.push(frame.nal_type);
+    output.push(config_flags);
+    output.push(codec_len as u8);
+    output.extend_from_slice(&codec_bytes[..codec_len]);
+    output.extend_from_slice(&frame.data);
+    output
+}
+
 pub(crate) fn rtp_status_payload(
     status: RtpDepacketizerStatus,
     reorder: RtpReorderStatus,

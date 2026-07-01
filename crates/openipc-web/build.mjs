@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { copyFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -43,6 +43,16 @@ function commandExists(command) {
     shell: process.platform === "win32",
   });
   return result.status === 0;
+}
+
+function optimizeWasm(wasmPath) {
+  if (!commandExists("wasm-opt")) {
+    return;
+  }
+  const optimizedPath = `${wasmPath}.optimized`;
+  run("wasm-opt", ["-O3", wasmPath, "-o", optimizedPath]);
+  writeFileSync(wasmPath, readFileSync(optimizedPath));
+  unlinkSync(optimizedPath);
 }
 
 function readWasmBindgenVersion() {
@@ -134,6 +144,7 @@ async function main() {
       "--out-dir",
       "pkg",
     ]);
+    optimizeWasm(join(pkgDir, "openipc_web_bg.wasm"));
     await copyPackageMetadata();
     return;
   }
@@ -173,6 +184,7 @@ async function main() {
     pkgDir,
     "--typescript",
   ]);
+  optimizeWasm(join(pkgDir, "openipc_web_bg.wasm"));
   await copyPackageMetadata();
 }
 

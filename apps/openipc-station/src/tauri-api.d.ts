@@ -1,4 +1,8 @@
 declare module "@tauri-apps/api/core" {
+  export class Channel<T = unknown> {
+    constructor(onmessage?: (response: T) => void);
+  }
+
   export function invoke<T = unknown>(
     command: string,
     args?: Record<string, unknown>,

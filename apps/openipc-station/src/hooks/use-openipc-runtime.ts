@@ -13,6 +13,7 @@ import initWasm, {
   OpenIpcMockRtpPipeline,
   OpenIpcReceiver,
   WebUsbJaguar3PowerTracking,
+  WebUsbReceiverSession,
   WebUsbRealtekDevice,
   listAuthorizedUsbDevices,
   supportedUsbFilters,
@@ -42,7 +43,6 @@ import type {
   DiagnosticStageMetric,
   DiagnosticTransferStats,
   DiagnosticsState,
-  FecCounters,
   InitReport,
   LinkQualityReport,
   LogEntry,
@@ -81,7 +81,7 @@ import {
   tauriIsFullscreen,
   tauriListDevices,
   tauriSetFullscreen,
-  tauriStartRx,
+  tauriStartRxStream,
   tauriStopRx,
   TAURI_LOG_EVENT,
   TAURI_RX_BATCH_EVENT,
@@ -91,6 +91,7 @@ import {
   type TauriRxBatchPayload,
   type TauriRawPayloadPayload,
   type TauriStoppedPayload,
+  type TauriStartRxRequest,
   type TauriVpnStatusPayload,
   type TauriVideoFramePayload,
 } from "@/runtime/tauri";
@@ -101,6 +102,7 @@ const RTP_TIMESTAMP_HALF_WRAP = 0x8000_0000;
 const KEYPAIR_STORAGE_KEY = "openipc-rs.station.keypair.v1";
 const DEFAULT_KEYPAIR_URL = "/gs.key";
 const WEBUSB_RX_TRANSFERS_IN_FLIGHT = 4;
+const MAX_VIDEO_DECODE_QUEUE = 3;
 const MOCK_RTP_FPS = 30;
 const MOCK_RTP_PAYLOAD_BYTES = 1_100;
 const MOCK_RTP_SSRC = 0x4f49_5043;
@@ -575,10 +577,6 @@ function summarizeStage(
   };
 }
 
-function parseCounters(json: string): FecCounters {
-  return JSON.parse(json) as FecCounters;
-}
-
 function parseQuality(json: string): LinkQualityReport {
   return JSON.parse(json) as LinkQualityReport;
 }
@@ -689,9 +687,12 @@ export function useOpenIpcRuntime() {
   const desktopRuntime = isTauriRuntime();
   const androidTauriRuntime = isAndroidTauriRuntime();
   const receiverRef = useRef<OpenIpcReceiver | null>(null);
+  const webUsbSessionRef = useRef<WebUsbReceiverSession | null>(null);
   const adaptiveRef = useRef<OpenIpcAdaptiveLink | null>(null);
   const usbRef = useRef<WebUsbRealtekDevice | null>(null);
-  const jaguar3PowerTrackingRef = useRef<WebUsbJaguar3PowerTracking | null>(null);
+  const jaguar3PowerTrackingRef = useRef<WebUsbJaguar3PowerTracking | null>(
+    null,
+  );
   const runningRef = useRef(false);
   const lastJaguar3CoexKeepaliveRef = useRef(0);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -726,6 +727,7 @@ export function useOpenIpcRuntime() {
   const pendingDecodeSamplesRef = useRef(
     new Map<number, PendingDecodeSample>(),
   );
+  const nativeFrameDecodeChainRef = useRef(Promise.resolve());
   const lastDiagnosticsUpdateRef = useRef(0);
   const lastPerfLogRef = useRef(0);
   const lastSlowLogRef = useRef(0);
@@ -754,6 +756,8 @@ export function useOpenIpcRuntime() {
   >([]);
   const settingsRef = useRef(settings);
   const [metrics, setMetrics] = useState<Metrics>({ ...EMPTY_METRICS });
+  const metricsRef = useRef<Metrics>({ ...EMPTY_METRICS });
+  const lastMetricsUpdateRef = useRef(0);
   const [routeStats, setRouteStats] = useState<PayloadRouteStats[]>([]);
   const [audio, setAudio] = useState<AudioStats>({ ...EMPTY_AUDIO_STATS });
   const [videoStats, setVideoStats] = useState<VideoStats>(DEFAULT_VIDEO_STATS);
@@ -764,6 +768,16 @@ export function useOpenIpcRuntime() {
     null,
   );
   const [logs, setLogs] = useState<LogEntry[]>([]);
+
+  function updateMetrics(update: (current: Metrics) => Metrics, force = false) {
+    const next = update(metricsRef.current);
+    metricsRef.current = next;
+    const now = performance.now();
+    if (force || now - lastMetricsUpdateRef.current >= 100) {
+      lastMetricsUpdateRef.current = now;
+      setMetrics(next);
+    }
+  }
 
   const appendLog = useCallback((level: LogLevel, message: string) => {
     const now = new Date();
@@ -782,7 +796,7 @@ export function useOpenIpcRuntime() {
       audioPlayerRef.current = new OpusAudioPlayer(
         (stats) => {
           setAudio(stats);
-          setMetrics((current) => ({
+          updateMetrics((current) => ({
             ...current,
             audioPackets: stats.packets,
             audioBytes: stats.bytes,
@@ -935,7 +949,7 @@ export function useOpenIpcRuntime() {
     setRouteStats(
       [...routeStatsRef.current.values()].sort((a, b) => a.routeId - b.routeId),
     );
-    setMetrics((current) => ({
+    updateMetrics((current) => ({
       ...current,
       rawPayloads: current.rawPayloads + payloads.length,
       rawPayloadBytes:
@@ -1567,6 +1581,16 @@ export function useOpenIpcRuntime() {
         ? packet.codec
         : settingsRef.current.videoCodec;
     const info = frameInfoFromPacket({ ...packet, codec: selectedCodec });
+    const decoder = decoderRef.current;
+    if (decoder && decoder.decodeQueueSize > MAX_VIDEO_DECODE_QUEUE) {
+      // Keeping old compressed frames creates visible glass-to-glass latency.
+      // Reset and wait for a clean IDR instead of decoding stale footage.
+      closeDecoder();
+      diagnosticDroppedBeforeKeyframeRef.current += 1;
+      recordDiagnosticStage("decodeEnqueue", performance.now() - decodeStart);
+      publishVideoStats({ decoderQueueSize: 0 }, true);
+      return;
+    }
     if (waitingForKeyframeRef.current && !info.isKeyFrame) {
       diagnosticDroppedBeforeKeyframeRef.current += 1;
       recordDiagnosticStage("decodeEnqueue", performance.now() - decodeStart);
@@ -2094,6 +2118,57 @@ export function useOpenIpcRuntime() {
     };
   }
 
+  function binaryTauriFrameToOpenIpcFrame(
+    message: ArrayBuffer | Uint8Array,
+  ): OpenIpcVideoFrame | null {
+    const bytes =
+      message instanceof Uint8Array ? message : new Uint8Array(message);
+    if (bytes.byteLength < 17) {
+      return null;
+    }
+    if (
+      bytes[0] !== 0x4f ||
+      bytes[1] !== 0x49 ||
+      bytes[2] !== 0x50 ||
+      bytes[3] !== 0x43 ||
+      bytes[4] !== 1
+    ) {
+      return null;
+    }
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const codec = view.getUint8(5) === 1 ? "h265" : "h264";
+    const codecStringLength = view.getUint8(16);
+    const codecStringStart = 17;
+    const dataStart = codecStringStart + codecStringLength;
+    if (dataStart > bytes.byteLength) {
+      return null;
+    }
+    const configFlags = view.getUint8(15);
+    return {
+      data: bytes.subarray(dataStart),
+      codec,
+      codecString: new TextDecoder().decode(
+        bytes.subarray(codecStringStart, dataStart),
+      ),
+      isKeyFrame: view.getUint8(6) !== 0,
+      timestamp: view.getUint32(11),
+      payloadType: view.getUint8(7),
+      sequenceNumber: view.getUint16(9),
+      nalType: view.getUint8(14),
+      decoderConfigComplete:
+        codec === "h264"
+          ? (configFlags & 0x03) === 0x03
+          : (configFlags & 0x1c) === 0x1c,
+      codecConfig: {
+        h264Sps: (configFlags & 0x01) !== 0,
+        h264Pps: (configFlags & 0x02) !== 0,
+        h265Vps: (configFlags & 0x04) !== 0,
+        h265Sps: (configFlags & 0x08) !== 0,
+        h265Pps: (configFlags & 0x10) !== 0,
+      },
+    };
+  }
+
   function tauriPayloadToOpenIpcPayload(
     payload: TauriRawPayloadPayload,
   ): OpenIpcRawPayload {
@@ -2134,6 +2209,9 @@ export function useOpenIpcRuntime() {
       parseMs: batch.parseMs,
       pipelineMs: batch.pipelineMs,
       totalMs: batch.totalMs,
+      usbReadMs: batch.usbReadMs,
+      pendingUsbTransfers: 0,
+      fecCounters: batch.fecCounters,
       rtpStatus: batch.rtpStatus ?? emptyRtpStatus(),
     };
   }
@@ -2270,7 +2348,7 @@ export function useOpenIpcRuntime() {
           `Android VPN prepared ${vpn.interfaceName || "tun"} ${vpn.address}/${vpn.prefixLength}`,
         );
       }
-      await tauriStartRx({
+      const request: TauriStartRxRequest = {
         keypairBase64: bytesToBase64(keyBytes),
         channelId: parseInteger(currentSettings.channelId, "Channel ID"),
         minimumEpoch: parseEpoch(currentSettings.minimumEpoch).toString(),
@@ -2294,6 +2372,29 @@ export function useOpenIpcRuntime() {
           udpHost: route.udpHost,
           udpPort: route.udpPort,
         })),
+      };
+      await tauriStartRxStream(request, (message) => {
+        const frame = binaryTauriFrameToOpenIpcFrame(message);
+        if (!frame) {
+          appendLog("warn", "Invalid binary video frame from native receiver");
+          return;
+        }
+        frameCountRef.current += 1;
+        updateMetrics((current) => ({
+          ...current,
+          frames: frameCountRef.current,
+          lastFrameBytes: frame.data.byteLength,
+        }));
+        nativeFrameDecodeChainRef.current = nativeFrameDecodeChainRef.current
+          .then(() =>
+            decodeVideoFrame(frame, { loopStartMs: performance.now() }),
+          )
+          .catch((error) => {
+            appendLog(
+              "error",
+              `Native video decode failed: ${messageFrom(error)}`,
+            );
+          });
       });
     } catch (error) {
       if (androidVpnFd !== undefined) {
@@ -2499,7 +2600,7 @@ export function useOpenIpcRuntime() {
           }
         }
 
-        setMetrics((current) => ({
+        updateMetrics((current) => ({
           ...current,
           transfers: current.transfers + 1,
           frames: frameCountRef.current,
@@ -2530,11 +2631,25 @@ export function useOpenIpcRuntime() {
       await startTauriRx();
       return;
     }
-    const receiver = receiverRef.current;
     const device = usbRef.current;
+    const receiver = receiverRef.current;
     if (!receiver || !device) {
       return;
     }
+
+    const currentSettings = settingsRef.current;
+    const session = WebUsbReceiverSession.create(
+      device,
+      receiver,
+      currentSettings.transferSize,
+      WEBUSB_RX_TRANSFERS_IN_FLIGHT,
+      false,
+      routeIdsForRawPayloads(currentSettings.payloadRoutes, false),
+      routeIdsForRtpPayloadTaps(currentSettings.payloadRoutes, false),
+      payloadTypesForRtpPayloadTaps(currentSettings.payloadRoutes, false),
+    );
+    webUsbSessionRef.current = session;
+    receiverRef.current = null;
 
     runningRef.current = true;
     setRunning(true);
@@ -2548,180 +2663,125 @@ export function useOpenIpcRuntime() {
       const batchLoopStart = performance.now();
       try {
         const currentSettings = settingsRef.current;
-        const readStart = performance.now();
-        const transfers = await device.readRxTransfers(
-          currentSettings.transferSize,
-          WEBUSB_RX_TRANSFERS_IN_FLIGHT,
-        );
-        recordDiagnosticStage("usbRead", performance.now() - readStart);
+        const loopStart = performance.now();
+        const nowMs = Date.now();
+        const profile = await session.nextProfile();
+        recordDiagnosticStage("usbRead", profile.usbReadMs);
+        recordDiagnosticStage("realtekParse", profile.parseMs);
+        recordDiagnosticStage("openipcPipeline", profile.pipelineMs);
+        recordTransferProfile(profile);
 
-        for (const transfer of transfers) {
-          if (!runningRef.current) {
-            break;
-          }
+        const adaptiveTracker = adaptiveRef.current;
+        if (adaptiveTracker) {
+          const adaptiveRxStart = performance.now();
+          session.recordAdaptive(adaptiveTracker, nowMs);
+          recordDiagnosticStage(
+            "adaptiveRx",
+            performance.now() - adaptiveRxStart,
+          );
+        }
 
-          const loopStart = performance.now();
-          const nowMs = Date.now();
-          if (
-            device.rxDescriptorKind() === "jaguar3" &&
-            nowMs - lastJaguar3CoexKeepaliveRef.current >= 2000
-          ) {
-            lastJaguar3CoexKeepaliveRef.current = nowMs;
-            void device
-              .runJaguar3CoexKeepalive()
-              .catch((error) =>
-                appendLog(
-                  "warn",
-                  `Jaguar3 coex keepalive failed: ${messageFrom(error)}`,
-                ),
-              );
-            const powerTracking = jaguar3PowerTrackingRef.current;
-            if (powerTracking) {
-              void powerTracking
-                .tick(device)
-                .then((report) => {
-                  if (report.lckRan) {
-                    appendLog(
-                      "info",
-                      `Jaguar3 LCK ran after thermal drift (A=${report.thermalA}, B=${report.thermalB})`,
-                    );
-                  }
-                })
-                .catch((error) =>
-                  appendLog(
-                    "warn",
-                    `Jaguar3 thermal tracking failed: ${messageFrom(error)}`,
-                  ),
-                );
-            }
+        const frames = profile.frames;
+        const fecStart = performance.now();
+        const counters = profile.fecCounters;
+        recordDiagnosticStage("fecCounters", performance.now() - fecStart);
+        if (adaptiveTracker) {
+          const qualityStart = performance.now();
+          setLinkQuality(parseQuality(adaptiveTracker.quality(nowMs)));
+          recordDiagnosticStage(
+            "adaptiveQuality",
+            performance.now() - qualityStart,
+          );
+        }
+        updateMetrics((current) => ({
+          ...current,
+          transfers: current.transfers + 1,
+          bytes: current.bytes + profile.transferBytes,
+          lastTransferBytes: profile.transferBytes,
+          mavlinkPayloads:
+            current.mavlinkPayloads + profile.mavlinkPayloadCount,
+          mavlinkBytes: current.mavlinkBytes + profile.mavlinkBytes,
+          lastMavlinkBytes: profile.mavlinkBytes,
+          fecRecovered: counters.recoveredPackets,
+          fecLost: counters.lostPackets,
+        }));
+
+        if (frames.length > 0) {
+          let lastFrameBytes = 0;
+          for (const frame of frames) {
+            lastFrameBytes = frame.data.byteLength;
+            await decodeVideoFrame(frame, { loopStartMs: loopStart });
           }
-          const adaptiveTracker = adaptiveRef.current;
-          if (adaptiveTracker) {
-            const adaptiveRxStart = performance.now();
-            adaptiveTracker.recordRxTransfer(transfer, nowMs);
-            recordDiagnosticStage(
-              "adaptiveRx",
-              performance.now() - adaptiveRxStart,
+          frameCountRef.current += frames.length;
+          updateMetrics((current) => ({
+            ...current,
+            frames: frameCountRef.current,
+            lastFrameBytes,
+          }));
+        }
+
+        // Keep video decode ahead of telemetry, audio and adaptive-link work.
+        await processRawPayloads(profile);
+        if (currentSettings.adaptiveEnabled && adaptiveTracker) {
+          try {
+            const txPower = Math.max(
+              1,
+              Math.min(40, Math.trunc(currentSettings.alinkTxPower)),
             );
-          }
-          const profile = receiver.pushRxTransferProfiledWithRouteIdsAndRtpTaps(
-            transfer,
-            false,
-            routeIdsForRawPayloads(
-              currentSettings.payloadRoutes,
-              desktopRuntime,
-            ),
-            routeIdsForRtpPayloadTaps(
-              currentSettings.payloadRoutes,
-              desktopRuntime,
-            ),
-            payloadTypesForRtpPayloadTaps(
-              currentSettings.payloadRoutes,
-              desktopRuntime,
-            ),
-          ) as OpenIpcRouteProfile;
-          recordDiagnosticStage("realtekParse", profile.parseMs);
-          recordDiagnosticStage("openipcPipeline", profile.pipelineMs);
-          recordTransferProfile(profile);
-          await processRawPayloads(profile);
-          const frames = profile.frames;
-          const fecStart = performance.now();
-          const counters = parseCounters(receiver.fecCounters());
-          recordDiagnosticStage("fecCounters", performance.now() - fecStart);
-          if (adaptiveTracker) {
-            const qualityStart = performance.now();
-            adaptiveTracker.recordReceiverCounters(receiver, nowMs);
-            setLinkQuality(parseQuality(adaptiveTracker.quality(nowMs)));
-            recordDiagnosticStage(
-              "adaptiveQuality",
-              performance.now() - qualityStart,
-            );
-          }
-          if (currentSettings.adaptiveEnabled && adaptiveTracker) {
-            try {
-              const txPower = Math.max(
-                1,
-                Math.min(40, Math.trunc(currentSettings.alinkTxPower)),
-              );
-              const txPowerKey = `${currentSettings.rfChannel}:${txPower}`;
-              if (appliedTxPowerRef.current !== txPowerKey) {
-                const txPowerStart = performance.now();
-                await device.setTxPowerOverride(
-                  currentSettings.rfChannel,
-                  txPower,
-                );
-                recordDiagnosticStage(
-                  "txPower",
-                  performance.now() - txPowerStart,
-                );
-                appliedTxPowerRef.current = txPowerKey;
-                appendLog("info", `Adaptive uplink TX power set to ${txPower}`);
-              }
-              const adaptiveTxStart = performance.now();
-              const sent = await adaptiveTracker.tickAndSend(
-                device,
-                nowMs,
+            const txPowerKey = `${currentSettings.rfChannel}:${txPower}`;
+            if (appliedTxPowerRef.current !== txPowerKey) {
+              const txPowerStart = performance.now();
+              await device.setTxPowerOverride(
                 currentSettings.rfChannel,
+                txPower,
               );
               recordDiagnosticStage(
-                "adaptiveTx",
-                performance.now() - adaptiveTxStart,
+                "txPower",
+                performance.now() - txPowerStart,
               );
-              if (sent > 0) {
-                setMetrics((current) => ({
-                  ...current,
-                  adaptiveTxFrames: current.adaptiveTxFrames + sent,
-                }));
-              }
-            } catch (error) {
-              setMetrics((current) => ({
-                ...current,
-                adaptiveTxErrors: current.adaptiveTxErrors + 1,
-              }));
-              appendLog("warn", `Adaptive TX failed: ${messageFrom(error)}`);
+              appliedTxPowerRef.current = txPowerKey;
+              appendLog("info", `Adaptive uplink TX power set to ${txPower}`);
             }
-          }
-          setMetrics((current) => ({
-            ...current,
-            transfers: current.transfers + 1,
-            bytes: current.bytes + profile.transferBytes,
-            lastTransferBytes: profile.transferBytes,
-            mavlinkPayloads:
-              current.mavlinkPayloads + profile.mavlinkPayloadCount,
-            mavlinkBytes: current.mavlinkBytes + profile.mavlinkBytes,
-            lastMavlinkBytes: profile.mavlinkBytes,
-            fecRecovered: counters.recoveredPackets,
-            fecLost: counters.lostPackets,
-          }));
-
-          if (frames.length > 0) {
-            let lastFrameBytes = 0;
-            for (const frame of frames) {
-              lastFrameBytes = frame.data.byteLength;
-              await decodeVideoFrame(frame, { loopStartMs: loopStart });
-            }
-            frameCountRef.current += frames.length;
-            setMetrics((current) => ({
-              ...current,
-              frames: frameCountRef.current,
-              lastFrameBytes,
-            }));
-            appendLog(
-              "rx",
-              `${frames.length} frame(s) from ${formatBytes(profile.transferBytes)}`,
+            const adaptiveTxStart = performance.now();
+            const sent = await adaptiveTracker.tickAndSend(
+              device,
+              nowMs,
+              currentSettings.rfChannel,
             );
+            recordDiagnosticStage(
+              "adaptiveTx",
+              performance.now() - adaptiveTxStart,
+            );
+            if (sent > 0) {
+              updateMetrics((current) => ({
+                ...current,
+                adaptiveTxFrames: current.adaptiveTxFrames + sent,
+              }));
+            }
+          } catch (error) {
+            updateMetrics((current) => ({
+              ...current,
+              adaptiveTxErrors: current.adaptiveTxErrors + 1,
+            }));
+            appendLog("warn", `Adaptive TX failed: ${messageFrom(error)}`);
           }
-          recordDiagnosticStage("rxLoop", performance.now() - loopStart);
-          publishDiagnostics();
         }
+        recordDiagnosticStage("rxLoop", performance.now() - loopStart);
+        publishDiagnostics();
       } catch (error) {
         recordDiagnosticStage("rxLoop", performance.now() - batchLoopStart);
         publishDiagnostics(true);
-        setMetrics((current) => ({ ...current, errors: current.errors + 1 }));
+        updateMetrics(
+          (current) => ({ ...current, errors: current.errors + 1 }),
+          true,
+        );
         appendLog("error", messageFrom(error));
         runningRef.current = false;
       }
     }
+
+    webUsbSessionRef.current?.free();
+    webUsbSessionRef.current = null;
 
     if (device.rxDescriptorKind() === "jaguar3") {
       const shutdownStart = performance.now();
@@ -2777,6 +2837,8 @@ export function useOpenIpcRuntime() {
     routeLogThrottleRef.current.clear();
     audioPlayerRef.current?.reset();
     resetDiagnostics();
+    metricsRef.current = { ...EMPTY_METRICS };
+    lastMetricsUpdateRef.current = 0;
     setMetrics({ ...EMPTY_METRICS });
     setRouteStats([]);
     setAudio({ ...EMPTY_AUDIO_STATS });

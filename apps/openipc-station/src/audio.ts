@@ -22,6 +22,8 @@ type WindowWithLegacyAudio = Window & {
 const RTP_TIMESTAMP_WRAP = 0x1_0000_0000;
 const RTP_TIMESTAMP_HALF_WRAP = 0x8000_0000;
 const OPUS_RTP_CLOCK_RATE = 48_000;
+const AUDIO_START_BUFFER_MS = 8;
+const AUDIO_STATS_INTERVAL_MS = 100;
 
 export function parseRtpPacket(packet: Uint8Array): RtpPacketView | null {
   if (packet.byteLength < 12 || packet[0] >> 6 !== 2) {
@@ -75,6 +77,7 @@ export class OpusAudioPlayer {
   private decoderKey = "";
   private clock: RtpClockState | null = null;
   private nextPlayTime = 0;
+  private lastPublishAt = 0;
   private volumeValue = 0.8;
   private statsValue: AudioStats = {
     enabled: false,
@@ -308,8 +311,8 @@ export class OpusAudioPlayer {
       source.buffer = buffer;
       source.connect(this.gainNode ?? context.destination);
       const now = context.currentTime;
-      if (this.nextPlayTime < now + 0.02) {
-        this.nextPlayTime = now + 0.02;
+      if (this.nextPlayTime < now + AUDIO_START_BUFFER_MS / 1000) {
+        this.nextPlayTime = now + AUDIO_START_BUFFER_MS / 1000;
       }
       source.start(this.nextPlayTime);
       this.nextPlayTime += buffer.duration;
@@ -360,7 +363,12 @@ export class OpusAudioPlayer {
     return timestampUs;
   }
 
-  private publish() {
+  private publish(force = false) {
+    const now = performance.now();
+    if (!force && now - this.lastPublishAt < AUDIO_STATS_INTERVAL_MS) {
+      return;
+    }
+    this.lastPublishAt = now;
     this.onStats(this.snapshot());
   }
 }

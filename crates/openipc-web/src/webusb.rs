@@ -16,7 +16,7 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen]
 /// WebUSB-backed Realtek rtl88xx device.
 pub struct WebUsbRealtekDevice {
-    driver: RealtekDevice,
+    pub(crate) driver: RealtekDevice,
 }
 
 #[cfg(target_arch = "wasm32")]

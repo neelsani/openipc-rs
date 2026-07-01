@@ -57,6 +57,19 @@ pub(crate) fn counters_json(counters: FecCounters) -> String {
     )
 }
 
+pub(crate) fn counters_object(counters: FecCounters) -> Result<Object, JsValue> {
+    let object = Object::new();
+    set_number(&object, "totalPackets", counters.total_packets as f64)?;
+    set_number(
+        &object,
+        "recoveredPackets",
+        counters.recovered_packets as f64,
+    )?;
+    set_number(&object, "lostPackets", counters.lost_packets as f64)?;
+    set_number(&object, "badPackets", counters.bad_packets as f64)?;
+    Ok(object)
+}
+
 pub(crate) fn escape_json_str(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {

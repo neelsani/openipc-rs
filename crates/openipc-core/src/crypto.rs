@@ -44,6 +44,23 @@ pub fn decrypt_chacha20poly1305_legacy(
     aad: &[u8],
     ciphertext_and_tag: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
+    let mut plaintext = Vec::with_capacity(ciphertext_and_tag.len());
+    decrypt_chacha20poly1305_legacy_into(key, nonce, aad, ciphertext_and_tag, &mut plaintext)?;
+    Ok(plaintext)
+}
+
+/// Verify and decrypt into a reusable caller-owned buffer.
+///
+/// The legacy WFB packet format is fixed-size and is received at high packet
+/// rates. Reusing this buffer avoids one allocation for every authenticated
+/// data fragment while preserving the allocating convenience API above.
+pub fn decrypt_chacha20poly1305_legacy_into(
+    key: &[u8],
+    nonce: &[u8],
+    aad: &[u8],
+    ciphertext_and_tag: &[u8],
+    plaintext: &mut Vec<u8>,
+) -> Result<(), CryptoError> {
     if ciphertext_and_tag.len() < CHACHA20_POLY1305_TAG_LEN {
         return Err(CryptoError::CiphertextTooShort);
     }
@@ -55,9 +72,10 @@ pub fn decrypt_chacha20poly1305_legacy(
         return Err(CryptoError::AuthenticationFailed);
     }
 
-    let mut plaintext = ciphertext.to_vec();
-    apply_chacha20_legacy_keystream(key, nonce, 64, &mut plaintext)?;
-    Ok(plaintext)
+    plaintext.clear();
+    plaintext.extend_from_slice(ciphertext);
+    apply_chacha20_legacy_keystream(key, nonce, 64, plaintext.as_mut_slice())?;
+    Ok(())
 }
 
 /// Encrypt and authenticate using the legacy WFB ChaCha20-Poly1305 shape.

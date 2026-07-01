@@ -8,12 +8,16 @@ mod adaptive;
 mod js;
 mod mock;
 mod receiver;
+#[cfg(target_arch = "wasm32")]
+mod session;
 mod video;
 mod webusb;
 
 pub use adaptive::OpenIpcAdaptiveLink;
 pub use mock::{OpenIpcMockPayloadRuntime, OpenIpcMockRtpPipeline};
 pub use receiver::OpenIpcReceiver;
+#[cfg(target_arch = "wasm32")]
+pub use session::WebUsbReceiverSession;
 pub use webusb::supported_usb_filters;
 #[cfg(target_arch = "wasm32")]
 pub use webusb::{
@@ -112,6 +116,16 @@ export type OpenIpcRxTransferProfile = {
     parseMs: number;
     pipelineMs: number;
     totalMs: number;
+    usbReadMs: number;
+    pendingUsbTransfers: number;
     rtpStatus: OpenIpcRtpStatus;
+    fecCounters: OpenIpcFecCounters;
+};
+
+export type OpenIpcFecCounters = {
+    totalPackets: number;
+    recoveredPackets: number;
+    lostPackets: number;
+    badPackets: number;
 };
 "#;

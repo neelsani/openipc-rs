@@ -2,7 +2,8 @@
 use crate::tx::{build_usb_tx_frame, RealtekTxDescriptor, RealtekTxOptions};
 use nusb::descriptors::TransferType;
 #[cfg(not(target_arch = "wasm32"))]
-use nusb::transfer::{Buffer, Bulk, In, Out, TransferError};
+use nusb::transfer::{Buffer, Out, TransferError};
+use nusb::transfer::{Bulk, In};
 #[cfg(not(target_arch = "wasm32"))]
 use nusb::MaybeFuture;
 use openipc_core::realtek::{parse_rx_aggregate_with_kind, RealtekRxPacket, RxDescriptorKind};
@@ -50,6 +51,17 @@ pub struct RealtekDevice {
 }
 
 impl RealtekDevice {
+    /// Open the selected bulk-IN endpoint without changing endpoint state.
+    ///
+    /// Long-running receive loops should keep the returned endpoint alive and
+    /// continuously recycle its buffers. Clearing a halt belongs in the
+    /// transfer-error recovery path, not at every receive iteration.
+    pub fn open_bulk_in_endpoint(&self) -> Result<nusb::Endpoint<Bulk, In>, DriverError> {
+        self.interface
+            .endpoint::<Bulk, In>(self.bulk_in_ep)
+            .map_err(|err| DriverError::Nusb(format!("open bulk IN endpoint failed: {err}")))
+    }
+
     #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
     /// Open the first visible adapter matching [`DriverOptions`].
     pub fn open_first(options: DriverOptions) -> Result<Self, DriverError> {
@@ -222,10 +234,7 @@ impl RealtekDevice {
     #[cfg(not(target_arch = "wasm32"))]
     /// Open and clear the selected bulk-IN endpoint.
     pub fn bulk_in_endpoint(&self) -> Result<nusb::Endpoint<Bulk, In>, DriverError> {
-        let mut ep = self
-            .interface
-            .endpoint::<Bulk, In>(self.bulk_in_ep)
-            .map_err(|err| DriverError::Nusb(format!("open bulk IN endpoint failed: {err}")))?;
+        let mut ep = self.open_bulk_in_endpoint()?;
         ep.clear_halt()
             .wait()
             .map_err(|err| DriverError::Nusb(format!("clear halt on bulk IN failed: {err}")))?;

@@ -31,6 +31,7 @@ use openipc_rtl88xx::{
     MonitorOptions, RadioConfig, RealtekDevice, RealtekTxOptions,
 };
 use serde::{Deserialize, Serialize};
+use tauri::ipc::{Channel, Response};
 use tauri::{AppHandle, Emitter, State};
 
 mod commands;
@@ -61,6 +62,7 @@ pub fn run() {
             commands::openipc_connect,
             commands::openipc_connect_from_fd,
             commands::openipc_start_rx,
+            commands::openipc_start_rx_stream,
             commands::openipc_stop_rx,
         ])
         .run(tauri::generate_context!())

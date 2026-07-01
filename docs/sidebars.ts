@@ -22,6 +22,7 @@ const sidebars: SidebarsConfig = {
       label: "Protocol And Hardware",
       items: [
         "video-pipeline",
+        "low-latency",
         "adaptive-link",
         "realtek-driver",
         "devourer-parity",

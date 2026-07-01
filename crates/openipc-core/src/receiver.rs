@@ -4,7 +4,10 @@ use crate::realtek::{parse_rx_aggregate, AggregateError, RealtekRxPacket, RxPack
 use crate::routes::{
     PayloadRouteError, PayloadRouteEvent, PayloadRouteId, PayloadRouteManager, PayloadRuntimeKey,
 };
-use crate::rtp::{DepacketizedFrame, RtpDepacketizer, RtpHeader};
+use crate::rtp::{
+    DepacketizedFrame, RtpDepacketizer, RtpDepacketizerStatus, RtpHeader, RtpReorderBuffer,
+    RtpReorderStatus,
+};
 use crate::wfb::{FecCounters, WfbKeypair};
 
 /// Shared receive runtime for OpenIPC video plus optional raw payload taps.
@@ -19,6 +22,7 @@ pub struct ReceiverRuntime {
     video_runtime: PayloadRuntimeKey,
     video_route_id: PayloadRouteId,
     rtp: RtpDepacketizer,
+    rtp_reorder: Option<RtpReorderBuffer>,
 }
 
 /// Options that control how one receive batch is processed.
@@ -103,6 +107,10 @@ pub struct ReceiverBatch {
     pub counters: ReceiverBatchCounters,
     /// Current cumulative FEC counters for the video runtime.
     pub fec_counters: FecCounters,
+    /// Current cumulative RTP depacketizer diagnostics.
+    pub rtp_status: RtpDepacketizerStatus,
+    /// Current RTP reorder-buffer diagnostics.
+    pub rtp_reorder_status: RtpReorderStatus,
 }
 
 impl ReceiverRuntime {
@@ -120,6 +128,7 @@ impl ReceiverRuntime {
             video_runtime,
             video_route_id,
             rtp: RtpDepacketizer::new(),
+            rtp_reorder: None,
         }
     }
 
@@ -155,6 +164,22 @@ impl ReceiverRuntime {
         Ok(Self::from_routes(routes, video_runtime, video_route_id))
     }
 
+    /// Create a runtime with a fully synthetic video payload route.
+    ///
+    /// Use [`Self::push_mock_payload`] to inject recovered payload bytes. The
+    /// bytes still pass through route fanout and the built-in RTP depacketizer,
+    /// so this is useful for no-hardware video, audio, and route tests.
+    pub fn with_mock_video_route(
+        frame_layout: FrameLayout,
+        video_route_id: PayloadRouteId,
+        channel_id: ChannelId,
+        key_slot: u64,
+    ) -> Self {
+        let mut routes = PayloadRouteManager::new(frame_layout);
+        let video_runtime = routes.add_mock_route(video_route_id, channel_id, key_slot);
+        Self::from_routes(routes, video_runtime, video_route_id)
+    }
+
     /// Return the route-manager runtime key used for video.
     pub const fn video_runtime(&self) -> PayloadRuntimeKey {
         self.video_runtime
@@ -178,6 +203,63 @@ impl ReceiverRuntime {
     /// Mutably borrow the RTP depacketizer for advanced video handling.
     pub fn rtp_mut(&mut self) -> &mut RtpDepacketizer {
         &mut self.rtp
+    }
+
+    /// Return cumulative RTP depacketizer diagnostics for the video route.
+    pub fn rtp_status(&self) -> RtpDepacketizerStatus {
+        self.rtp.status()
+    }
+
+    /// Return cumulative RTP reorder-buffer diagnostics for the video route.
+    pub fn rtp_reorder_status(&self) -> RtpReorderStatus {
+        self.rtp_reorder
+            .as_ref()
+            .map(RtpReorderBuffer::status)
+            .unwrap_or_default()
+    }
+
+    /// Enable or disable the small RTP sequence reorder buffer.
+    ///
+    /// Reordering can improve startup and fragmented-frame recovery on jittery
+    /// links, but it may add a tiny amount of latency when packets arrive out
+    /// of order. It is disabled by default for the lowest-latency path.
+    pub fn set_rtp_reorder_enabled(&mut self, enabled: bool) {
+        if enabled {
+            self.rtp_reorder
+                .get_or_insert_with(RtpReorderBuffer::default);
+        } else {
+            self.rtp_reorder = None;
+        }
+    }
+
+    /// Return true when RTP packets pass through the reorder buffer.
+    pub const fn rtp_reorder_enabled(&self) -> bool {
+        self.rtp_reorder.is_some()
+    }
+
+    /// Process one raw RTP packet on the configured video route.
+    pub fn push_rtp_packet(
+        &mut self,
+        packet: &[u8],
+    ) -> Result<Vec<DepacketizedFrame>, crate::rtp::RtpError> {
+        self.push_video_payload(packet)
+    }
+
+    fn push_video_payload(
+        &mut self,
+        payload: &[u8],
+    ) -> Result<Vec<DepacketizedFrame>, crate::rtp::RtpError> {
+        let mut frames = Vec::new();
+        if let Some(reorder) = self.rtp_reorder.as_mut() {
+            for ordered in reorder.push(payload)? {
+                if let Some(frame) = self.rtp.push(&ordered)? {
+                    frames.push(frame);
+                }
+            }
+        } else if let Some(frame) = self.rtp.push(payload)? {
+            frames.push(frame);
+        }
+        Ok(frames)
     }
 
     /// Add an unencrypted/plain raw-payload route.
@@ -204,6 +286,16 @@ impl ReceiverRuntime {
     ) -> Result<PayloadRuntimeKey, PayloadRouteError> {
         self.routes
             .add_keyed_route(route_id, channel_id, key_slot, keypair, minimum_epoch)
+    }
+
+    /// Add a synthetic raw-payload route.
+    pub fn add_mock_route(
+        &mut self,
+        route_id: PayloadRouteId,
+        channel_id: ChannelId,
+        key_slot: u64,
+    ) -> PayloadRuntimeKey {
+        self.routes.add_mock_route(route_id, channel_id, key_slot)
     }
 
     /// Return cumulative FEC counters for the video runtime.
@@ -314,12 +406,31 @@ impl ReceiverRuntime {
         Ok(batch)
     }
 
+    /// Process one fully synthetic recovered payload.
+    pub fn push_mock_payload(
+        &mut self,
+        runtime: PayloadRuntimeKey,
+        packet_seq: u64,
+        payload: &[u8],
+        options: &ReceiverBatchOptions,
+    ) -> Result<ReceiverBatch, PayloadRouteError> {
+        let mut batch = self.empty_batch();
+        let events = self
+            .routes
+            .push_mock_payload(runtime, packet_seq, payload)?;
+        self.apply_route_events(events, options, &mut batch);
+        batch.fec_counters = self.video_fec_counters();
+        Ok(batch)
+    }
+
     fn empty_batch(&self) -> ReceiverBatch {
         ReceiverBatch {
             frames: Vec::new(),
             raw_payloads: Vec::new(),
             counters: ReceiverBatchCounters::default(),
             fec_counters: self.video_fec_counters(),
+            rtp_status: self.rtp_status(),
+            rtp_reorder_status: self.rtp_reorder_status(),
         }
     }
 
@@ -339,9 +450,9 @@ impl ReceiverRuntime {
                     if route_ids.contains(&self.video_route_id) {
                         batch.counters.wfb_payloads += 1;
                         batch.counters.rtp_packets += 1;
-                        if let Ok(Some(frame)) = self.rtp.push(&payload.data) {
-                            batch.counters.video_frames += 1;
-                            batch.frames.push(frame);
+                        if let Ok(frames) = self.push_rtp_packet(&payload.data) {
+                            batch.counters.video_frames += frames.len();
+                            batch.frames.extend(frames);
                         }
                     }
 
@@ -370,6 +481,8 @@ impl ReceiverRuntime {
                 }
             }
         }
+        batch.rtp_status = self.rtp_status();
+        batch.rtp_reorder_status = self.rtp_reorder_status();
     }
 }
 
@@ -408,6 +521,18 @@ mod tests {
         packet.extend_from_slice(&0x1122_3344u32.to_be_bytes());
         packet.extend_from_slice(payload);
         packet
+    }
+
+    fn h264_stap_a_rtp() -> Vec<u8> {
+        let sps = [0x67, 0x42, 0x00, 0x1e, 0xab];
+        let pps = [0x68, 0xce, 0x06, 0xe2];
+        let idr = [0x65, 0x88, 0x84, 0x21];
+        let mut payload = vec![24];
+        for nalu in [&sps[..], &pps[..], &idr[..]] {
+            payload.extend_from_slice(&(nalu.len() as u16).to_be_bytes());
+            payload.extend_from_slice(nalu);
+        }
+        rtp(crate::rtp::RTP_PAYLOAD_TYPE_H264, &payload)
     }
 
     #[test]
@@ -494,6 +619,29 @@ mod tests {
     }
 
     #[test]
+    fn rtp_reorder_is_opt_in() {
+        let mut runtime = ReceiverRuntime::with_plain_video_route(
+            FrameLayout::WithFcs,
+            PayloadRouteId::new(1),
+            ChannelId::default_video(),
+            0,
+            1,
+            1,
+        )
+        .unwrap();
+
+        assert!(!runtime.rtp_reorder_enabled());
+        assert_eq!(runtime.rtp_reorder_status(), RtpReorderStatus::default());
+
+        runtime.set_rtp_reorder_enabled(true);
+        assert!(runtime.rtp_reorder_enabled());
+
+        runtime.set_rtp_reorder_enabled(false);
+        assert!(!runtime.rtp_reorder_enabled());
+        assert_eq!(runtime.rtp_reorder_status(), RtpReorderStatus::default());
+    }
+
+    #[test]
     fn auxiliary_route_does_not_count_as_video_payload() {
         let video_route = PayloadRouteId::new(1);
         let data_route = PayloadRouteId::new(2);
@@ -531,5 +679,38 @@ mod tests {
         assert_eq!(batch.counters.rtp_packets, 0);
         assert_eq!(batch.counters.raw_payload_count, 1);
         assert_eq!(batch.raw_payloads[0].data, b"data bytes");
+    }
+
+    #[test]
+    fn mock_payload_runtime_uses_same_video_route_and_rtp_depacketizer() {
+        let video_route = PayloadRouteId::new(1);
+        let mut runtime = ReceiverRuntime::with_mock_video_route(
+            FrameLayout::WithFcs,
+            video_route,
+            ChannelId::default_video(),
+            0,
+        );
+
+        let packet = h264_stap_a_rtp();
+        let batch = runtime
+            .push_mock_payload(
+                runtime.video_runtime(),
+                123,
+                &packet,
+                &ReceiverBatchOptions {
+                    raw_payload_routes: vec![video_route],
+                    ..ReceiverBatchOptions::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(batch.counters.wfb_payloads, 1);
+        assert_eq!(batch.counters.rtp_packets, 1);
+        assert_eq!(batch.counters.video_frames, 1);
+        assert_eq!(batch.frames.len(), 1);
+        assert_eq!(batch.frames[0].codec, crate::rtp::Codec::H264);
+        assert!(batch.frames[0].is_keyframe);
+        assert_eq!(batch.raw_payloads[0].data, packet);
+        assert_eq!(batch.fec_counters, FecCounters::default());
     }
 }

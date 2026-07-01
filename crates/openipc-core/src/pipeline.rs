@@ -189,6 +189,49 @@ impl PayloadPipeline {
     }
 }
 
+/// Fully synthetic payload pipeline for tests and no-hardware development.
+///
+/// This type starts at the recovered-payload boundary. It does not parse
+/// 802.11, decrypt WFB, or run FEC. Instead, callers inject payload bytes that
+/// are emitted as [`PayloadPipelineEvent::Payload`] for the configured channel.
+/// That lets higher layers exercise route fanout, RTP depacketization, audio
+/// taps, metrics, and rendering without pretending to have a radio.
+#[derive(Debug, Clone)]
+pub struct MockPayloadPipeline {
+    channel_id: ChannelId,
+}
+
+impl MockPayloadPipeline {
+    /// Create a mock pipeline for one OpenIPC/WFB channel id.
+    pub const fn new(channel_id: ChannelId) -> Self {
+        Self { channel_id }
+    }
+
+    /// Return this mock pipeline's channel id.
+    pub const fn channel_id(&self) -> ChannelId {
+        self.channel_id
+    }
+
+    /// Mock channels do not run FEC, so counters are always zero.
+    pub const fn fec_counters(&self) -> FecCounters {
+        FecCounters {
+            total_packets: 0,
+            recovered_packets: 0,
+            lost_packets: 0,
+            bad_packets: 0,
+        }
+    }
+
+    /// Emit one synthetic recovered payload.
+    pub fn push_payload(&mut self, packet_seq: u64, data: &[u8]) -> Vec<PayloadPipelineEvent> {
+        vec![PayloadPipelineEvent::Payload(RecoveredPayload {
+            channel_id: self.channel_id,
+            packet_seq,
+            data: data.to_vec(),
+        })]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,5 +273,22 @@ mod tests {
         };
         assert_eq!(payload.channel_id, channel_id);
         assert_eq!(payload.data, b"data bytes");
+    }
+
+    #[test]
+    fn mock_payload_pipeline_emits_recovered_payloads_without_wfb() {
+        let channel_id = ChannelId::default_video();
+        let mut pipeline = MockPayloadPipeline::new(channel_id);
+        let events = pipeline.push_payload(42, b"mock rtp bytes");
+
+        assert_eq!(
+            events,
+            vec![PayloadPipelineEvent::Payload(RecoveredPayload {
+                channel_id,
+                packet_seq: 42,
+                data: b"mock rtp bytes".to_vec(),
+            })]
+        );
+        assert_eq!(pipeline.fec_counters(), FecCounters::default());
     }
 }

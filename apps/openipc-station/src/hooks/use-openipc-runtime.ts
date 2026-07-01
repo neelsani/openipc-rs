@@ -9,12 +9,15 @@ import {
 import { OpusAudioPlayer, parseRtpPacket } from "@/audio";
 import initWasm, {
   OpenIpcAdaptiveLink,
+  OpenIpcMockPayloadRuntime,
+  OpenIpcMockRtpPipeline,
   OpenIpcReceiver,
   WebUsbPowerTracking8822c,
   WebUsbRealtekDevice,
   listAuthorizedUsbDevices,
   supportedUsbFilters,
   type OpenIpcVideoFrame,
+  type OpenIpcMockFrame,
   type OpenIpcRawPayload,
   type OpenIpcRxTransferProfile,
 } from "@openipc/wasm";
@@ -47,6 +50,7 @@ import type {
   Metrics,
   PayloadRouteConfig,
   PayloadRouteStats,
+  RtpStatus,
   RtpClockState,
   RuntimeState,
   UsbInfo,
@@ -97,6 +101,9 @@ const RTP_TIMESTAMP_HALF_WRAP = 0x8000_0000;
 const KEYPAIR_STORAGE_KEY = "openipc-rs.station.keypair.v1";
 const DEFAULT_KEYPAIR_URL = "/gs.key";
 const WEBUSB_RX_TRANSFERS_IN_FLIGHT = 4;
+const MOCK_RTP_FPS = 30;
+const MOCK_RTP_PAYLOAD_BYTES = 1_100;
+const MOCK_RTP_SSRC = 0x4f49_5043;
 
 type FullscreenDocument = Document & {
   webkitExitFullscreen?: () => Promise<void> | void;
@@ -224,6 +231,13 @@ type OpenIpcVideoDecoderConfig = VideoDecoderConfig & {
   };
 };
 
+type MockEncodedFrame = {
+  data: Uint8Array;
+  keyFrame: boolean;
+  timestamp: number;
+  codecString: string;
+};
+
 type OpenIpcRouteProfile = OpenIpcRxTransferProfile & {
   rawPayloads?: OpenIpcRawPayload[];
 };
@@ -252,6 +266,10 @@ function describeDecoderConfig(config: OpenIpcVideoDecoderConfig): string {
   const format = config.avc?.format ?? config.hevc?.format ?? "default";
   const hardware = config.hardwareAcceleration ?? "no-preference";
   return `${config.codec} / ${format} / ${hardware}`;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 async function probeCodecSupport(
@@ -398,6 +416,38 @@ function emptyTransferStats(): DiagnosticTransferStats {
   };
 }
 
+function emptyRtpStatus(): RtpStatus {
+  return {
+    packets: 0,
+    framesEmitted: 0,
+    configWaitDrops: 0,
+    keyframesWithPrependedConfig: 0,
+    parameterSetsPrepended: 0,
+    fragmentSequenceGaps: 0,
+    fragmentOverflows: 0,
+    unsupportedPayloads: 0,
+    malformedPackets: 0,
+    lastPayloadType: null,
+    lastSequenceNumber: null,
+    lastTimestamp: null,
+    lastCodec: null,
+    lastNalType: null,
+    codecConfig: {
+      h264Sps: false,
+      h264Pps: false,
+      h265Vps: false,
+      h265Sps: false,
+      h265Pps: false,
+    },
+    h264ConfigComplete: false,
+    h265ConfigComplete: false,
+    reorderBufferedPackets: 0,
+    reorderedPackets: 0,
+    latePackets: 0,
+    forcedFlushes: 0,
+  };
+}
+
 function routeNeedsRawPayload(
   route: PayloadRouteConfig,
   udpAvailable: boolean,
@@ -492,6 +542,7 @@ function createEmptyDiagnostics(): DiagnosticsState {
     transfers: emptyTransferStats(),
     pendingDecodes: 0,
     waitingForKeyframe: true,
+    rtpStatus: emptyRtpStatus(),
     fallbackFrames: 0,
     droppedBeforeKeyframe: 0,
     renderedFrames: 0,
@@ -664,6 +715,7 @@ export function useOpenIpcRuntime() {
   const diagnosticStageRef = useRef(createStageAccumulators());
   const diagnosticTransfersRef =
     useRef<DiagnosticTransferStats>(emptyTransferStats());
+  const diagnosticRtpStatusRef = useRef<RtpStatus>(emptyRtpStatus());
   const diagnosticEventsRef = useRef<DiagnosticEvent[]>([]);
   const diagnosticEventIdRef = useRef(0);
   const diagnosticFallbackFramesRef = useRef(0);
@@ -679,6 +731,8 @@ export function useOpenIpcRuntime() {
   const lastSlowLogRef = useRef(0);
   const tauriUnlistenRef = useRef<Array<() => void>>([]);
   const androidVpnFdRef = useRef<number | null>(null);
+  const mockRunningRef = useRef(false);
+  const mockPreviousUsbInfoRef = useRef<UsbInfo | null>(null);
 
   const [runtime, setRuntime] = useState<RuntimeState>("loading");
   const [wasmReady, setWasmReady] = useState(false);
@@ -799,6 +853,9 @@ export function useOpenIpcRuntime() {
     );
     totals.mavlinkPayloads += profile.mavlinkPayloadCount;
     totals.mavlinkBytes += profile.mavlinkBytes;
+    if (profile.rtpStatus) {
+      diagnosticRtpStatusRef.current = profile.rtpStatus;
+    }
   }
 
   async function processRawPayloads(profile: OpenIpcRouteProfile) {
@@ -910,6 +967,7 @@ export function useOpenIpcRuntime() {
       transfers: { ...diagnosticTransfersRef.current },
       pendingDecodes: pendingDecodeSamplesRef.current.size,
       waitingForKeyframe: waitingForKeyframeRef.current,
+      rtpStatus: diagnosticRtpStatusRef.current,
       fallbackFrames: diagnosticFallbackFramesRef.current,
       droppedBeforeKeyframe: diagnosticDroppedBeforeKeyframeRef.current,
       renderedFrames: decodedFrameCountRef.current,
@@ -939,6 +997,7 @@ export function useOpenIpcRuntime() {
   function resetDiagnostics() {
     diagnosticStageRef.current = createStageAccumulators();
     diagnosticTransfersRef.current = emptyTransferStats();
+    diagnosticRtpStatusRef.current = emptyRtpStatus();
     diagnosticEventsRef.current = [];
     diagnosticEventIdRef.current = 0;
     diagnosticFallbackFramesRef.current = 0;
@@ -1225,6 +1284,127 @@ export function useOpenIpcRuntime() {
     }
   }
 
+  function videoFrameFromMock(frame: OpenIpcMockFrame): VideoFrame {
+    const timestamp = Math.round(
+      Number(frame.frameIndex) * (1_000_000 / MOCK_RTP_FPS),
+    );
+    return new VideoFrame(frame.rgba, {
+      format: "RGBA",
+      codedWidth: frame.width,
+      codedHeight: frame.height,
+      timestamp,
+      duration: Math.round(1_000_000 / MOCK_RTP_FPS),
+    });
+  }
+
+  function h264RtpPacketsFromAnnexB(
+    frame: MockEncodedFrame,
+    sequenceNumber: number,
+  ): { packets: Uint8Array[]; nextSequenceNumber: number } {
+    const nalus = annexBNalUnits(frame.data);
+    const packets: Uint8Array[] = [];
+    let nextSequenceNumber = sequenceNumber;
+    nalus.forEach((nalu, index) => {
+      if (nalu.byteLength === 0) {
+        return;
+      }
+      const lastNalu = index === nalus.length - 1;
+      if (nalu.byteLength <= MOCK_RTP_PAYLOAD_BYTES) {
+        packets.push(
+          rtpPacket(nalu, frame.timestamp, nextSequenceNumber, lastNalu),
+        );
+        nextSequenceNumber = (nextSequenceNumber + 1) & 0xffff;
+        return;
+      }
+
+      const nalHeader = nalu[0];
+      const nalType = nalHeader & 0x1f;
+      const fuIndicator = (nalHeader & 0xe0) | 28;
+      let offset = 1;
+      let first = true;
+      while (offset < nalu.byteLength) {
+        const remaining = nalu.byteLength - offset;
+        const chunkLength = Math.min(remaining, MOCK_RTP_PAYLOAD_BYTES - 2);
+        const end = offset + chunkLength >= nalu.byteLength;
+        const payload = new Uint8Array(2 + chunkLength);
+        payload[0] = fuIndicator;
+        payload[1] = (first ? 0x80 : 0) | (end ? 0x40 : 0) | nalType;
+        payload.set(nalu.subarray(offset, offset + chunkLength), 2);
+        packets.push(
+          rtpPacket(
+            payload,
+            frame.timestamp,
+            nextSequenceNumber,
+            end && lastNalu,
+          ),
+        );
+        nextSequenceNumber = (nextSequenceNumber + 1) & 0xffff;
+        offset += chunkLength;
+        first = false;
+      }
+    });
+    return { packets, nextSequenceNumber };
+  }
+
+  function rtpPacket(
+    payload: Uint8Array,
+    timestamp: number,
+    sequenceNumber: number,
+    marker: boolean,
+  ): Uint8Array {
+    const packet = new Uint8Array(12 + payload.byteLength);
+    packet[0] = 0x80;
+    packet[1] = (marker ? 0x80 : 0) | 96;
+    packet[2] = (sequenceNumber >> 8) & 0xff;
+    packet[3] = sequenceNumber & 0xff;
+    packet[4] = (timestamp >> 24) & 0xff;
+    packet[5] = (timestamp >> 16) & 0xff;
+    packet[6] = (timestamp >> 8) & 0xff;
+    packet[7] = timestamp & 0xff;
+    packet[8] = (MOCK_RTP_SSRC >> 24) & 0xff;
+    packet[9] = (MOCK_RTP_SSRC >> 16) & 0xff;
+    packet[10] = (MOCK_RTP_SSRC >> 8) & 0xff;
+    packet[11] = MOCK_RTP_SSRC & 0xff;
+    packet.set(payload, 12);
+    return packet;
+  }
+
+  function annexBNalUnits(data: Uint8Array): Uint8Array[] {
+    const starts: Array<{ offset: number; codeLength: number }> = [];
+    for (let offset = 0; offset + 3 < data.byteLength; offset += 1) {
+      const codeLength = annexBStartCodeLength(data, offset);
+      if (codeLength > 0) {
+        starts.push({ offset, codeLength });
+        offset += codeLength - 1;
+      }
+    }
+
+    if (starts.length === 0) {
+      return [];
+    }
+
+    return starts
+      .map((start, index) => {
+        const naluStart = start.offset + start.codeLength;
+        const naluEnd = starts[index + 1]?.offset ?? data.byteLength;
+        return data.subarray(naluStart, naluEnd);
+      })
+      .filter((nalu) => nalu.byteLength > 0);
+  }
+
+  function annexBStartCodeLength(data: Uint8Array, offset: number): number {
+    if (data[offset] !== 0 || data[offset + 1] !== 0) {
+      return 0;
+    }
+    if (data[offset + 2] === 1) {
+      return 3;
+    }
+    if (data[offset + 2] === 0 && data[offset + 3] === 1) {
+      return 4;
+    }
+    return 0;
+  }
+
   function closeDecoder() {
     decoderRef.current?.close();
     decoderRef.current = null;
@@ -1309,6 +1489,13 @@ export function useOpenIpcRuntime() {
       publishVideoStats({ decoderName: "WebCodecs unavailable" }, true);
       return false;
     }
+    if (
+      decoderRef.current &&
+      !info.isKeyFrame &&
+      decoderKeyRef.current.startsWith(`${info.codec}:`)
+    ) {
+      return true;
+    }
     for (const codecString of alternateCodecStrings(info)) {
       for (const config of decoderConfigsFor(info, codecString)) {
         const format = decoderConfigFormat(info, config);
@@ -1380,6 +1567,12 @@ export function useOpenIpcRuntime() {
         ? packet.codec
         : settingsRef.current.videoCodec;
     const info = frameInfoFromPacket({ ...packet, codec: selectedCodec });
+    if (waitingForKeyframeRef.current && !info.isKeyFrame) {
+      diagnosticDroppedBeforeKeyframeRef.current += 1;
+      recordDiagnosticStage("decodeEnqueue", performance.now() - decodeStart);
+      publishDiagnostics();
+      return;
+    }
     const configStart = performance.now();
     const configured = await configureDecoder(info);
     recordDiagnosticStage("decodeConfig", performance.now() - configStart);
@@ -1387,12 +1580,6 @@ export function useOpenIpcRuntime() {
       diagnosticFallbackFramesRef.current += 1;
       recordDiagnosticStage("decodeEnqueue", performance.now() - decodeStart);
       drawFrame(packet.data, frameCountRef.current);
-      publishDiagnostics();
-      return;
-    }
-    if (waitingForKeyframeRef.current && !info.isKeyFrame) {
-      diagnosticDroppedBeforeKeyframeRef.current += 1;
-      recordDiagnosticStage("decodeEnqueue", performance.now() - decodeStart);
       publishDiagnostics();
       return;
     }
@@ -1522,7 +1709,9 @@ export function useOpenIpcRuntime() {
       return;
     }
     if (!keyBytes) {
-      receiverRef.current = new OpenIpcReceiver();
+      const receiver = new OpenIpcReceiver();
+      receiver.setRtpReorderEnabled(settings.rtpReorderEnabled);
+      receiverRef.current = receiver;
       adaptiveRef.current = null;
       applyRxDescriptorKind();
       rtpClockRef.current = null;
@@ -1535,6 +1724,7 @@ export function useOpenIpcRuntime() {
       keyBytes,
       minimumEpoch,
     );
+    receiver.setRtpReorderEnabled(settings.rtpReorderEnabled);
     for (const route of settings.payloadRoutes.filter((candidate) =>
       routeNeedsRuntimeRoute(candidate, desktopRuntime),
     )) {
@@ -1565,6 +1755,7 @@ export function useOpenIpcRuntime() {
     settings.channelId,
     settings.minimumEpoch,
     settings.payloadRoutes,
+    settings.rtpReorderEnabled,
   ]);
 
   function applyKeypair(bytes: Uint8Array, name: string, persist: boolean) {
@@ -1663,7 +1854,9 @@ export function useOpenIpcRuntime() {
         if (cancelled) {
           return;
         }
-        receiverRef.current = new OpenIpcReceiver();
+        const receiver = new OpenIpcReceiver();
+        receiver.setRtpReorderEnabled(settingsRef.current.rtpReorderEnabled);
+        receiverRef.current = receiver;
         setWasmReady(true);
         setWebUsbSupported("usb" in navigator);
         setRuntime("ready");
@@ -1893,6 +2086,11 @@ export function useOpenIpcRuntime() {
       codecString: frame.codecString,
       isKeyFrame: frame.isKeyFrame,
       timestamp: frame.timestamp,
+      payloadType: frame.payloadType,
+      sequenceNumber: frame.sequenceNumber,
+      nalType: frame.nalType,
+      decoderConfigComplete: frame.decoderConfigComplete,
+      codecConfig: frame.codecConfig,
     };
   }
 
@@ -1936,6 +2134,7 @@ export function useOpenIpcRuntime() {
       parseMs: batch.parseMs,
       pipelineMs: batch.pipelineMs,
       totalMs: batch.totalMs,
+      rtpStatus: batch.rtpStatus ?? emptyRtpStatus(),
     };
   }
 
@@ -2076,6 +2275,7 @@ export function useOpenIpcRuntime() {
         channelId: parseInteger(currentSettings.channelId, "Channel ID"),
         minimumEpoch: parseEpoch(currentSettings.minimumEpoch).toString(),
         transferSize: currentSettings.transferSize,
+        rtpReorderEnabled: currentSettings.rtpReorderEnabled,
         adaptiveEnabled: currentSettings.adaptiveEnabled,
         vpnEnabled: currentSettings.vpnEnabled,
         vpnTunFd: androidVpnFd,
@@ -2105,6 +2305,223 @@ export function useOpenIpcRuntime() {
       setVpnStatus(null);
       cleanupTauriSubscriptions();
       throw error;
+    }
+  }
+
+  async function startCodecMockRx() {
+    if (runningRef.current) {
+      return;
+    }
+    if (
+      !("VideoEncoder" in window) ||
+      !("VideoDecoder" in window) ||
+      !("VideoFrame" in window) ||
+      !("EncodedVideoChunk" in window)
+    ) {
+      appendLog(
+        "error",
+        "WebCodecs encode/decode APIs are not available in this runtime",
+      );
+      return;
+    }
+
+    await initWasm();
+    closeDecoder();
+    resetDiagnostics();
+    mockPreviousUsbInfoRef.current = usbInfo;
+    mockRunningRef.current = true;
+    runningRef.current = true;
+    setUsbInfo({
+      label: "WebCodecs mock",
+      bulkIn: 0,
+      bulkOut: 0,
+    });
+    setRunning(true);
+    setRuntime("running");
+    setLinkQuality(null);
+
+    const restoreMockState = (nextRuntime: RuntimeState) => {
+      mockRunningRef.current = false;
+      runningRef.current = false;
+      setRunning(false);
+      setRuntime(nextRuntime);
+      setUsbInfo(mockPreviousUsbInfoRef.current);
+      mockPreviousUsbInfoRef.current = null;
+    };
+
+    const width = 320;
+    const height = 180;
+    const codecString = "avc1.42E01E";
+    const encoderConfig: VideoEncoderConfig = {
+      codec: codecString,
+      width,
+      height,
+      bitrate: 1_200_000,
+      framerate: MOCK_RTP_FPS,
+      hardwareAcceleration: "prefer-hardware",
+      latencyMode: "realtime",
+      avc: { format: "annexb" },
+    };
+    let support: VideoEncoderSupport;
+    try {
+      support = await VideoEncoder.isConfigSupported(encoderConfig);
+    } catch (error) {
+      restoreMockState("ready");
+      appendLog(
+        "error",
+        `WebCodecs H.264 encoder probe failed: ${messageFrom(error)}`,
+      );
+      return;
+    }
+    if (support.supported === false) {
+      restoreMockState("ready");
+      appendLog("error", "WebCodecs H.264 Annex-B encoder is unavailable");
+      return;
+    }
+
+    const acceptedConfig = support.config ?? encoderConfig;
+    const acceptedCodec = acceptedConfig.codec || codecString;
+    const encodedFrames: MockEncodedFrame[] = [];
+    let failed = false;
+    let rtpSequenceNumber = 1;
+    const encoder = new VideoEncoder({
+      output: (chunk) => {
+        const data = new Uint8Array(chunk.byteLength);
+        chunk.copyTo(data);
+        encodedFrames.push({
+          data,
+          keyFrame: chunk.type === "key",
+          timestamp: 0,
+          codecString: acceptedCodec,
+        });
+      },
+      error: (error) => {
+        decoderErrorCountRef.current += 1;
+        appendLog("error", `VideoEncoder error: ${error.message}`);
+        publishVideoStats(
+          {
+            decoderName: `Encoder error: ${error.message}`,
+            decoderErrors: decoderErrorCountRef.current,
+          },
+          true,
+        );
+      },
+    });
+
+    try {
+      encoder.configure(acceptedConfig);
+    } catch (error) {
+      if (encoder.state !== "closed") {
+        encoder.close();
+      }
+      restoreMockState("ready");
+      appendLog(
+        "error",
+        `WebCodecs H.264 encoder configure failed: ${messageFrom(error)}`,
+      );
+      return;
+    }
+    publishVideoStats(
+      {
+        codec: "H264",
+        decoderName: `WebCodecs encode/decode ${acceptedCodec}`,
+        resolution: `${width}x${height}`,
+        inputFps: 0,
+        renderFps: 0,
+        decodedFrames: 0,
+        decoderErrors: decoderErrorCountRef.current,
+        decoderQueueSize: 0,
+      },
+      true,
+    );
+    appendLog("info", `WebCodecs mock started (${acceptedCodec} Annex-B)`);
+
+    const pipeline = new OpenIpcMockRtpPipeline(width, height, MOCK_RTP_FPS);
+    const mockPayloadRuntime = new OpenIpcMockPayloadRuntime(
+      parseInteger(settingsRef.current.channelId, "Channel ID"),
+    );
+    mockPayloadRuntime.setRtpReorderEnabled(
+      settingsRef.current.rtpReorderEnabled,
+    );
+    const frameIntervalMs = 1000 / MOCK_RTP_FPS;
+    let mockEncodedFrameIndex = 0;
+    try {
+      while (runningRef.current && mockRunningRef.current) {
+        const loopStart = performance.now();
+        const pipelineStart = performance.now();
+        const mockFrame = pipeline.nextFrame() as OpenIpcMockFrame;
+        recordDiagnosticStage(
+          "openipcPipeline",
+          performance.now() - pipelineStart,
+        );
+
+        const videoFrame = videoFrameFromMock(mockFrame);
+        try {
+          encoder.encode(videoFrame, {
+            keyFrame: mockEncodedFrameIndex % MOCK_RTP_FPS === 0,
+          });
+          mockEncodedFrameIndex += 1;
+        } finally {
+          videoFrame.close();
+        }
+        await encoder.flush();
+
+        let lastFrameBytes = 0;
+        let transferBytes = 0;
+        while (encodedFrames.length > 0) {
+          const encoded = encodedFrames.shift();
+          if (!encoded) {
+            continue;
+          }
+          encoded.timestamp = mockFrame.timestamp;
+          const packetized = h264RtpPacketsFromAnnexB(
+            encoded,
+            rtpSequenceNumber,
+          );
+          rtpSequenceNumber = packetized.nextSequenceNumber;
+          if (packetized.packets.length === 0) {
+            appendLog("warn", "WebCodecs mock produced no Annex-B NAL units");
+            continue;
+          }
+          for (const rtpPacketBytes of packetized.packets) {
+            const profile = mockPayloadRuntime.pushPayloadProfiled(
+              rtpPacketBytes,
+            ) as OpenIpcRouteProfile;
+            recordDiagnosticStage("realtekParse", profile.parseMs);
+            recordDiagnosticStage("openipcPipeline", profile.pipelineMs);
+            recordTransferProfile(profile);
+            transferBytes += profile.transferBytes;
+            for (const frame of profile.frames) {
+              lastFrameBytes = frame.data.byteLength;
+              await decodeVideoFrame(frame, { loopStartMs: loopStart });
+            }
+            frameCountRef.current += profile.frames.length;
+          }
+        }
+
+        setMetrics((current) => ({
+          ...current,
+          transfers: current.transfers + 1,
+          frames: frameCountRef.current,
+          bytes: current.bytes + transferBytes,
+          lastTransferBytes: transferBytes,
+          lastFrameBytes,
+        }));
+        recordDiagnosticStage("rxLoop", performance.now() - loopStart);
+        const elapsed = performance.now() - loopStart;
+        await sleep(Math.max(0, frameIntervalMs - elapsed));
+      }
+    } catch (error) {
+      failed = true;
+      setMetrics((current) => ({ ...current, errors: current.errors + 1 }));
+      appendLog("error", `WebCodecs mock failed: ${messageFrom(error)}`);
+      setRuntime("error");
+    } finally {
+      if (encoder.state !== "closed") {
+        encoder.close();
+      }
+      restoreMockState(failed ? "error" : "ready");
+      appendLog("info", "WebCodecs mock stopped");
     }
   }
 
@@ -2329,6 +2746,12 @@ export function useOpenIpcRuntime() {
 
   function stopRx() {
     runningRef.current = false;
+    if (mockRunningRef.current) {
+      mockRunningRef.current = false;
+      setRunning(false);
+      setRuntime("ready");
+      return;
+    }
     if (desktopRuntime) {
       setRunning(false);
       setRuntime("ready");
@@ -2438,6 +2861,10 @@ export function useOpenIpcRuntime() {
         ),
       resetCounters,
       setFullscreen: (enabled: boolean) => void setFullscreenMode(enabled),
+      startCodecMockRx: () =>
+        void startCodecMockRx().catch((error) =>
+          appendLog("error", messageFrom(error)),
+        ),
       startRx: () =>
         void startRx().catch((error) => appendLog("error", messageFrom(error))),
       stopRx,

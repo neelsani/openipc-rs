@@ -7,7 +7,7 @@ use openipc_core::{
 use wasm_bindgen::prelude::*;
 
 use crate::js::{counters_json, elapsed_ms, now_ms, parse_hex_u64, raw_payload_object, set_number};
-use crate::video::video_frame_object;
+use crate::video::{rtp_status_object, video_frame_object};
 
 const VIDEO_ROUTE_ID: PayloadRouteId = PayloadRouteId::new(1);
 const TELEMETRY_ROUTE_ID: PayloadRouteId = PayloadRouteId::new(2);
@@ -106,6 +106,12 @@ impl OpenIpcReceiver {
         Ok(())
     }
 
+    #[wasm_bindgen(js_name = setRtpReorderEnabled)]
+    /// Enable or disable the small RTP sequence reorder buffer.
+    pub fn set_rtp_reorder_enabled(&mut self, enabled: bool) {
+        self.runtime.set_rtp_reorder_enabled(enabled);
+    }
+
     #[wasm_bindgen(js_name = withKeypairAndMavlinkChannel)]
     /// Create an encrypted WFB receiver with an explicit raw telemetry channel.
     ///
@@ -147,10 +153,9 @@ impl OpenIpcReceiver {
     /// Push one raw RTP packet and return Annex-B bytes when a frame completes.
     pub fn push_rtp_packet(&mut self, data: &[u8]) -> Option<Uint8Array> {
         self.runtime
-            .rtp_mut()
-            .push(data)
+            .push_rtp_packet(data)
             .ok()
-            .flatten()
+            .and_then(|mut frames| frames.drain(..).next())
             .map(|frame| Uint8Array::from(frame.data.as_slice()))
     }
 
@@ -160,7 +165,12 @@ impl OpenIpcReceiver {
     )]
     /// Push one RTP packet and return a typed frame object when one completes.
     pub fn push_rtp_packet_detailed(&mut self, data: &[u8]) -> Result<JsValue, JsValue> {
-        match self.runtime.rtp_mut().push(data).ok().flatten() {
+        match self
+            .runtime
+            .push_rtp_packet(data)
+            .ok()
+            .and_then(|mut frames| frames.drain(..).next())
+        {
             Some(frame) => Ok(video_frame_object(frame)?.into()),
             None => Ok(JsValue::NULL),
         }
@@ -393,6 +403,7 @@ impl OpenIpcReceiver {
         let counters = batch.counters;
         let frames = frame_objects_array(batch.frames)?;
         let raw_payloads = raw_payload_array(batch.raw_payloads)?;
+        let rtp_status = rtp_status_object(batch.rtp_status, batch.rtp_reorder_status)?;
 
         let object = Object::new();
         Reflect::set(&object, &JsValue::from_str("frames"), &frames)?;
@@ -402,6 +413,7 @@ impl OpenIpcReceiver {
             &JsValue::from_str("mavlinkPayloads"),
             &raw_payloads,
         )?;
+        Reflect::set(&object, &JsValue::from_str("rtpStatus"), &rtp_status)?;
         set_number(
             &object,
             "rawPayloadCount",

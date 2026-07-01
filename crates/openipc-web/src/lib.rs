@@ -6,11 +6,13 @@
 
 mod adaptive;
 mod js;
+mod mock;
 mod receiver;
 mod video;
 mod webusb;
 
 pub use adaptive::OpenIpcAdaptiveLink;
+pub use mock::{OpenIpcMockPayloadRuntime, OpenIpcMockRtpPipeline};
 pub use receiver::OpenIpcReceiver;
 pub use webusb::supported_usb_filters;
 #[cfg(target_arch = "wasm32")]
@@ -31,6 +33,53 @@ export type OpenIpcVideoFrame = {
     codecString: string;
     isKeyFrame: boolean;
     timestamp: number;
+    payloadType: number;
+    sequenceNumber: number;
+    nalType: number;
+    decoderConfigComplete: boolean;
+    codecConfig: OpenIpcCodecConfigState;
+};
+
+export type OpenIpcCodecConfigState = {
+    h264Sps: boolean;
+    h264Pps: boolean;
+    h265Vps: boolean;
+    h265Sps: boolean;
+    h265Pps: boolean;
+};
+
+export type OpenIpcRtpStatus = {
+    packets: number;
+    framesEmitted: number;
+    configWaitDrops: number;
+    keyframesWithPrependedConfig: number;
+    parameterSetsPrepended: number;
+    fragmentSequenceGaps: number;
+    fragmentOverflows: number;
+    unsupportedPayloads: number;
+    malformedPackets: number;
+    lastPayloadType: number | null;
+    lastSequenceNumber: number | null;
+    lastTimestamp: number | null;
+    lastCodec: "h264" | "h265" | null;
+    lastNalType: number | null;
+    codecConfig: OpenIpcCodecConfigState;
+    h264ConfigComplete: boolean;
+    h265ConfigComplete: boolean;
+    reorderBufferedPackets: number;
+    reorderedPackets: number;
+    latePackets: number;
+    forcedFlushes: number;
+};
+
+export type OpenIpcMockFrame = {
+    width: number;
+    height: number;
+    frameIndex: string;
+    timestamp: number;
+    rtpPackets: number;
+    rtpBytes: number;
+    rgba: Uint8Array;
 };
 
 export type OpenIpcRawPayload = {
@@ -63,5 +112,6 @@ export type OpenIpcRxTransferProfile = {
     parseMs: number;
     pipelineMs: number;
     totalMs: number;
+    rtpStatus: OpenIpcRtpStatus;
 };
 "#;

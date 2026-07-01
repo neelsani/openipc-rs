@@ -65,6 +65,7 @@ export interface Settings {
   channelWidth: 5 | 10 | 20 | 40 | 80;
   channelOffset: number;
   codec: CodecPref;
+  rtpReorder: boolean;
   adaptiveLink: boolean;
   txPower: number;
   channelId: number;
@@ -141,6 +142,21 @@ export interface StationState {
     audioPackets: number;
     audioDecodedFrames: number;
     audioErrors: number;
+    rtpConfigReady: boolean;
+    rtpConfigState: string;
+    rtpLastCodec: string;
+    rtpLastPayloadType: number | null;
+    rtpLastNalType: number | null;
+    rtpConfigWaitDrops: number;
+    rtpConfigKeyframesPrepended: number;
+    rtpConfigParameterSetsPrepended: number;
+    rtpFragmentGaps: number;
+    rtpMalformedPackets: number;
+    rtpUnsupportedPayloads: number;
+    rtpReorderBuffered: number;
+    rtpReorderedPackets: number;
+    rtpLatePackets: number;
+    rtpForcedFlushes: number;
     adaptiveTxFrames: number;
     adaptiveTxErrors: number;
   };
@@ -422,6 +438,7 @@ export function useStation() {
       channelWidth: runtime.settings.channelWidthMhz,
       channelOffset: runtime.settings.channelOffset,
       codec: runtime.settings.videoCodec,
+      rtpReorder: runtime.settings.rtpReorderEnabled,
       adaptiveLink: runtime.settings.adaptiveEnabled,
       txPower: runtime.settings.alinkTxPower,
       channelId: safeNumber(runtime.settings.channelId),
@@ -456,6 +473,7 @@ export function useStation() {
           : current.minimumEpoch,
       transferSize: patch.usbTransferSize ?? current.transferSize,
       videoCodec: patch.codec ?? current.videoCodec,
+      rtpReorderEnabled: patch.rtpReorder ?? current.rtpReorderEnabled,
       adaptiveEnabled: patch.adaptiveLink ?? current.adaptiveEnabled,
       rfChannel: patch.channelNum ?? current.rfChannel,
       channelWidthMhz: patch.channelWidth ?? current.channelWidthMhz,
@@ -475,6 +493,22 @@ export function useStation() {
         runtime.linkQuality.linkScore[1],
       )
     : 0;
+  const rtp = runtime.diagnostics.rtpStatus;
+  const rtpConfig = rtp.codecConfig;
+  const rtpConfigReady =
+    runtime.settings.videoCodec === "h265"
+      ? rtp.h265ConfigComplete
+      : runtime.settings.videoCodec === "h264"
+        ? rtp.h264ConfigComplete
+        : rtp.h264ConfigComplete || rtp.h265ConfigComplete;
+  const rtpConfigState =
+    rtp.lastCodec === "h265"
+      ? `H265 VPS ${rtpConfig.h265Vps ? "yes" : "no"} / SPS ${
+          rtpConfig.h265Sps ? "yes" : "no"
+        } / PPS ${rtpConfig.h265Pps ? "yes" : "no"}`
+      : `H264 SPS ${rtpConfig.h264Sps ? "yes" : "no"} / PPS ${
+          rtpConfig.h264Pps ? "yes" : "no"
+        }`;
   const linkActive = runtime.running && runtime.linkQuality !== null;
   const hasVideo =
     runtime.videoStats.decodedFrames > 0 ||
@@ -561,6 +595,21 @@ export function useStation() {
       audioPackets: runtime.audio.packets,
       audioDecodedFrames: runtime.audio.decodedFrames,
       audioErrors: runtime.audio.errors,
+      rtpConfigReady,
+      rtpConfigState,
+      rtpLastCodec: rtp.lastCodec ? rtp.lastCodec.toUpperCase() : "Unknown",
+      rtpLastPayloadType: rtp.lastPayloadType,
+      rtpLastNalType: rtp.lastNalType,
+      rtpConfigWaitDrops: rtp.configWaitDrops,
+      rtpConfigKeyframesPrepended: rtp.keyframesWithPrependedConfig,
+      rtpConfigParameterSetsPrepended: rtp.parameterSetsPrepended,
+      rtpFragmentGaps: rtp.fragmentSequenceGaps,
+      rtpMalformedPackets: rtp.malformedPackets,
+      rtpUnsupportedPayloads: rtp.unsupportedPayloads,
+      rtpReorderBuffered: rtp.reorderBufferedPackets,
+      rtpReorderedPackets: rtp.reorderedPackets,
+      rtpLatePackets: rtp.latePackets,
+      rtpForcedFlushes: rtp.forcedFlushes,
       adaptiveTxFrames: runtime.metrics.adaptiveTxFrames,
       adaptiveTxErrors: runtime.metrics.adaptiveTxErrors,
     },
@@ -596,6 +645,15 @@ export function useStation() {
     }
     return null;
   })();
+  const canStartCodecMock =
+    import.meta.env.DEV &&
+    state.receiver !== "loading" &&
+    !state.receiving &&
+    runtime.wasmReady &&
+    typeof window !== "undefined" &&
+    runtime.webCodecsSupported &&
+    "VideoEncoder" in window &&
+    "VideoFrame" in window;
 
   return {
     canvasRef: runtime.canvasRef as RefObject<HTMLCanvasElement | null>,
@@ -614,12 +672,15 @@ export function useStation() {
       resetDecoder: runtime.actions.closeDecoder,
       setFullscreen: runtime.actions.setFullscreen,
       setMode: (_mode: UsbMode) => undefined,
+      startCodecMockRx: runtime.actions.startCodecMockRx,
       startRx: runtime.actions.startRx,
       stop: runtime.actions.stopRx,
       toggleRecord: runtime.actions.toggleRecording,
     },
     startBlockReason,
     canStart: startBlockReason === null,
+    showCodecMock: import.meta.env.DEV,
+    canStartCodecMock,
   };
 }
 

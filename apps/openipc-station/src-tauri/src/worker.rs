@@ -231,6 +231,7 @@ pub(crate) fn run_rx_worker(
         minimum_epoch,
     )
     .map_err(|err| err.to_string())?;
+    receiver.set_rtp_reorder_enabled(request.rtp_reorder_enabled);
     let enabled_routes: Vec<_> = request
         .payload_routes
         .iter()
@@ -516,6 +517,8 @@ pub(crate) fn build_rx_batch(
     let pipeline_ms = elapsed_ms(pipeline_start);
     let counters = batch.fec_counters;
     let batch_counters = batch.counters;
+    let rtp_status = batch.rtp_status;
+    let rtp_reorder_status = batch.rtp_reorder_status;
     for payload in &batch.raw_payloads {
         if let Some(runtime) = context.tun.as_deref_mut() {
             if runtime.handles_route(payload.route_id) {
@@ -593,6 +596,7 @@ pub(crate) fn build_rx_batch(
         parse_ms,
         pipeline_ms,
         total_ms: elapsed_ms(context.loop_start),
+        rtp_status: rtp_status_payload(rtp_status, rtp_reorder_status),
         fec_counters: fec_counters_payload(counters),
         link_quality,
         adaptive_tx_frames,

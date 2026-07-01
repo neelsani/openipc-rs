@@ -16,7 +16,10 @@ use nusb::transfer::{Bulk, Out};
 use nusb::MaybeFuture;
 use openipc_core::radiotap::TxRadioParams;
 use openipc_core::realtek::{parse_rx_aggregate_with_kind, RxPacketAttrib, RxPacketType};
-use openipc_core::rtp::{Codec, DepacketizedFrame, RTP_PAYLOAD_TYPE_OPUS};
+use openipc_core::rtp::{
+    Codec, CodecConfigState, DepacketizedFrame, RtpDepacketizerStatus, RtpReorderStatus,
+    RTP_PAYLOAD_TYPE_OPUS,
+};
 use openipc_core::{
     AdaptiveLinkSender, ChannelId, FecCounters, FrameLayout, PayloadRouteId, RadioPort,
     ReceiverBatchOptions, ReceiverRuntime, RtpPayloadTap, WfbKeypair, WfbTransmitter, WfbTxKeypair,

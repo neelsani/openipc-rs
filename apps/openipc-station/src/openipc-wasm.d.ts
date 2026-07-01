@@ -7,6 +7,53 @@ declare module "@openipc/wasm" {
     codecString: string;
     isKeyFrame: boolean;
     timestamp: number;
+    payloadType: number;
+    sequenceNumber: number;
+    nalType: number;
+    decoderConfigComplete: boolean;
+    codecConfig: OpenIpcCodecConfigState;
+  };
+
+  export type OpenIpcCodecConfigState = {
+    h264Sps: boolean;
+    h264Pps: boolean;
+    h265Vps: boolean;
+    h265Sps: boolean;
+    h265Pps: boolean;
+  };
+
+  export type OpenIpcRtpStatus = {
+    packets: number;
+    framesEmitted: number;
+    configWaitDrops: number;
+    keyframesWithPrependedConfig: number;
+    parameterSetsPrepended: number;
+    fragmentSequenceGaps: number;
+    fragmentOverflows: number;
+    unsupportedPayloads: number;
+    malformedPackets: number;
+    lastPayloadType: number | null;
+    lastSequenceNumber: number | null;
+    lastTimestamp: number | null;
+    lastCodec: "h264" | "h265" | null;
+    lastNalType: number | null;
+    codecConfig: OpenIpcCodecConfigState;
+    h264ConfigComplete: boolean;
+    h265ConfigComplete: boolean;
+    reorderBufferedPackets: number;
+    reorderedPackets: number;
+    latePackets: number;
+    forcedFlushes: number;
+  };
+
+  export type OpenIpcMockFrame = {
+    width: number;
+    height: number;
+    frameIndex: string;
+    timestamp: number;
+    rtpPackets: number;
+    rtpBytes: number;
+    rgba: Uint8Array;
   };
 
   export type OpenIpcRawPayload = {
@@ -39,6 +86,7 @@ declare module "@openipc/wasm" {
     parseMs: number;
     pipelineMs: number;
     totalMs: number;
+    rtpStatus: OpenIpcRtpStatus;
   };
 
   export class OpenIpcReceiver {
@@ -79,6 +127,7 @@ declare module "@openipc/wasm" {
     pushRtpPacket(data: Uint8Array): Uint8Array | undefined;
     pushRtpPacketDetailed(data: Uint8Array): OpenIpcVideoFrame | null;
     setRxDescriptorKind(kind: "jaguar1" | "jaguar3"): void;
+    setRtpReorderEnabled(enabled: boolean): void;
     pushRxTransfer(data: Uint8Array): Uint8Array[];
     pushRxTransferDetailed(data: Uint8Array): OpenIpcVideoFrame[];
     pushRxTransferDetailedWithOptions(
@@ -227,6 +276,17 @@ declare module "@openipc/wasm" {
     readonly chip: string;
     readonly channel: number;
     readonly ran: boolean;
+  }
+
+  export class OpenIpcMockRtpPipeline {
+    constructor(width: number, height: number, fps: number);
+    nextFrame(): OpenIpcMockFrame;
+  }
+
+  export class OpenIpcMockPayloadRuntime {
+    constructor(channelId: number);
+    setRtpReorderEnabled(enabled: boolean): void;
+    pushPayloadProfiled(payload: Uint8Array): OpenIpcRxTransferProfile;
   }
 
   export class WebUsbRealtekDevice {

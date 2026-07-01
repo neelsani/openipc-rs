@@ -86,6 +86,8 @@ pub(crate) struct StartRxRequest {
     pub(crate) channel_id: u32,
     pub(crate) minimum_epoch: String,
     pub(crate) transfer_size: usize,
+    #[serde(default)]
+    pub(crate) rtp_reorder_enabled: bool,
     pub(crate) adaptive_enabled: bool,
     pub(crate) vpn_enabled: bool,
     pub(crate) vpn_tun_fd: Option<i32>,
@@ -125,6 +127,21 @@ pub(crate) struct VideoFramePayload {
     pub(crate) codec_string: String,
     pub(crate) is_key_frame: bool,
     pub(crate) timestamp: u32,
+    pub(crate) payload_type: u8,
+    pub(crate) sequence_number: u16,
+    pub(crate) nal_type: u8,
+    pub(crate) decoder_config_complete: bool,
+    pub(crate) codec_config: CodecConfigPayload,
+}
+
+#[derive(Debug, Serialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CodecConfigPayload {
+    pub(crate) h264_sps: bool,
+    pub(crate) h264_pps: bool,
+    pub(crate) h265_vps: bool,
+    pub(crate) h265_sps: bool,
+    pub(crate) h265_pps: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -182,6 +199,7 @@ pub(crate) struct RxBatchPayload {
     pub(crate) parse_ms: f64,
     pub(crate) pipeline_ms: f64,
     pub(crate) total_ms: f64,
+    pub(crate) rtp_status: RtpStatusPayload,
     pub(crate) fec_counters: FecCountersPayload,
     pub(crate) link_quality: Option<LinkQualityPayload>,
     pub(crate) adaptive_tx_frames: usize,
@@ -191,6 +209,32 @@ pub(crate) struct RxBatchPayload {
     pub(crate) adaptive_quality_ms: f64,
     pub(crate) tx_power_ms: f64,
     pub(crate) adaptive_tx_ms: f64,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RtpStatusPayload {
+    pub(crate) packets: u64,
+    pub(crate) frames_emitted: u64,
+    pub(crate) config_wait_drops: u64,
+    pub(crate) keyframes_with_prepended_config: u64,
+    pub(crate) parameter_sets_prepended: u64,
+    pub(crate) fragment_sequence_gaps: u64,
+    pub(crate) fragment_overflows: u64,
+    pub(crate) unsupported_payloads: u64,
+    pub(crate) malformed_packets: u64,
+    pub(crate) last_payload_type: Option<u8>,
+    pub(crate) last_sequence_number: Option<u16>,
+    pub(crate) last_timestamp: Option<u32>,
+    pub(crate) last_codec: Option<&'static str>,
+    pub(crate) last_nal_type: Option<u8>,
+    pub(crate) codec_config: CodecConfigPayload,
+    pub(crate) h264_config_complete: bool,
+    pub(crate) h265_config_complete: bool,
+    pub(crate) reorder_buffered_packets: usize,
+    pub(crate) reordered_packets: u64,
+    pub(crate) late_packets: u64,
+    pub(crate) forced_flushes: u64,
 }
 
 #[derive(Debug, Serialize, Clone)]

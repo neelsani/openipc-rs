@@ -668,6 +668,19 @@ export function SettingsPanel({ api }: { api: StationApi }) {
             ]}
           />
         </FieldRow>
+        <FieldRow
+          label="RTP reorder"
+          hint={
+            state.receiving ? "Restart required to apply" : "Off by default"
+          }
+        >
+          <Toggle
+            checked={s.rtpReorder}
+            disabled={state.receiving}
+            onChange={(v) => actions.patchSettings({ rtpReorder: v })}
+            label="RTP reorder"
+          />
+        </FieldRow>
         <FieldRow label="Decoder" hint="WebCodecs backend">
           <span className="font-mono text-[11px] text-muted-foreground">
             {state.v.decoderName}

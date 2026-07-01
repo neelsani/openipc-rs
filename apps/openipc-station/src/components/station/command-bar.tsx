@@ -68,7 +68,14 @@ function BuildInfoBadge() {
 }
 
 export function CommandBar({ api }: { api: StationApi }) {
-  const { state, actions, startBlockReason, canStart } = api;
+  const {
+    state,
+    actions,
+    startBlockReason,
+    canStart,
+    showCodecMock,
+    canStartCodecMock,
+  } = api;
   const meta = STATE_LABEL[state.receiver];
   const statusText =
     state.error ??
@@ -148,7 +155,7 @@ export function CommandBar({ api }: { api: StationApi }) {
           </div>
         </div>
 
-        <div className="grid grid-cols-3 gap-2 md:ml-auto md:flex md:flex-wrap md:items-center">
+        <div className="grid grid-cols-4 gap-2 md:ml-auto md:flex md:flex-wrap md:items-center">
           {/* Connect */}
           <button
             type="button"
@@ -200,6 +207,19 @@ export function CommandBar({ api }: { api: StationApi }) {
             >
               <Square className="h-3.5 w-3.5" />
               Stop
+            </button>
+          )}
+
+          {showCodecMock && (
+            <button
+              type="button"
+              onClick={actions.startCodecMockRx}
+              disabled={!canStartCodecMock}
+              title="Run a no-hardware WebCodecs H.264 encode/decode test"
+              className="inline-flex min-w-0 items-center justify-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-secondary disabled:cursor-not-allowed disabled:text-muted-foreground md:py-1"
+            >
+              <Play className="h-3.5 w-3.5" />
+              Codec
             </button>
           )}
 

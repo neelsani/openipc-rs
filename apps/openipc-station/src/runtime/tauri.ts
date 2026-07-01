@@ -9,6 +9,7 @@ import type {
   UsbInfo,
   VpnStatus,
 } from "@/lib/types";
+import type { CodecConfigState } from "@/lib/types";
 
 const TAURI_INTERNALS_KEY = "__TAURI_INTERNALS__";
 
@@ -109,6 +110,7 @@ export type TauriStartRxRequest = {
   channelId: number;
   minimumEpoch: string;
   transferSize: number;
+  rtpReorderEnabled: boolean;
   adaptiveEnabled: boolean;
   vpnEnabled: boolean;
   vpnTunFd?: number;
@@ -134,6 +136,11 @@ export type TauriVideoFramePayload = {
   codecString: string;
   isKeyFrame: boolean;
   timestamp: number;
+  payloadType: number;
+  sequenceNumber: number;
+  nalType: number;
+  decoderConfigComplete: boolean;
+  codecConfig: CodecConfigState;
 };
 
 export type TauriRawPayloadPayload = {

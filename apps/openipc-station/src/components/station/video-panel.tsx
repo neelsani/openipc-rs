@@ -24,9 +24,12 @@ function EmptyState({ state }: { state: StationApi["state"] }) {
     detail = "VideoDecoder is not available in this browser.";
   } else if (state.receiving && state.waitingKeyframe) {
     icon = <Loader2 className="h-8 w-8 animate-spin text-primary" />;
-    title = "Waiting for keyframe";
-    detail =
-      "Adapter connected, packets arriving — waiting for an IDR frame to begin decoding.";
+    title = state.v.rtpConfigReady
+      ? "Starting decoder"
+      : "Waiting for codec config";
+    detail = state.v.rtpConfigReady
+      ? "Video config is cached. Waiting for the first decodable frame."
+      : "Receiver is running. Waiting for SPS/PPS/VPS before decode can start.";
   } else if (state.receiving && !state.hasVideo) {
     icon = <SignalLow className="h-8 w-8" />;
     title = "No signal";

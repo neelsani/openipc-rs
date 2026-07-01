@@ -108,6 +108,38 @@ export type DiagnosticTransferStats = {
   mavlinkBytes: number;
 };
 
+export type CodecConfigState = {
+  h264Sps: boolean;
+  h264Pps: boolean;
+  h265Vps: boolean;
+  h265Sps: boolean;
+  h265Pps: boolean;
+};
+
+export type RtpStatus = {
+  packets: number;
+  framesEmitted: number;
+  configWaitDrops: number;
+  keyframesWithPrependedConfig: number;
+  parameterSetsPrepended: number;
+  fragmentSequenceGaps: number;
+  fragmentOverflows: number;
+  unsupportedPayloads: number;
+  malformedPackets: number;
+  lastPayloadType: number | null;
+  lastSequenceNumber: number | null;
+  lastTimestamp: number | null;
+  lastCodec: "h264" | "h265" | null;
+  lastNalType: number | null;
+  codecConfig: CodecConfigState;
+  h264ConfigComplete: boolean;
+  h265ConfigComplete: boolean;
+  reorderBufferedPackets: number;
+  reorderedPackets: number;
+  latePackets: number;
+  forcedFlushes: number;
+};
+
 export type DiagnosticEvent = {
   id: number;
   stage: DiagnosticStageId;
@@ -122,6 +154,7 @@ export type DiagnosticsState = {
   transfers: DiagnosticTransferStats;
   pendingDecodes: number;
   waitingForKeyframe: boolean;
+  rtpStatus: RtpStatus;
   fallbackFrames: number;
   droppedBeforeKeyframe: number;
   renderedFrames: number;
@@ -157,6 +190,7 @@ export type Settings = {
   minimumEpoch: string;
   transferSize: number;
   videoCodec: VideoCodecPreference;
+  rtpReorderEnabled: boolean;
   adaptiveEnabled: boolean;
   rfChannel: number;
   channelWidthMhz: ChannelWidthMhz;

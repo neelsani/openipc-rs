@@ -264,6 +264,77 @@ export function DiagnosticsPanel({ api }: { api: StationApi }) {
             <Stat label="WFB payloads" value={v.wfbPayloads.toLocaleString()} />
             <Stat label="RTP packets" value={v.rtpPackets.toLocaleString()} />
             <Stat label="Video frames" value={v.videoFrames.toLocaleString()} />
+            <Stat
+              label="Codec config"
+              value={v.rtpConfigReady ? "ready" : "waiting"}
+              tone={v.rtpConfigReady ? "good" : "warn"}
+            />
+            <Stat
+              label="Config sets"
+              value={v.rtpConfigState}
+              tone={v.rtpConfigReady ? "good" : "muted"}
+            />
+            <Stat label="RTP codec" value={v.rtpLastCodec} tone="muted" />
+            <Stat
+              label="RTP PT"
+              value={v.rtpLastPayloadType ?? "—"}
+              tone="muted"
+            />
+            <Stat
+              label="NAL type"
+              value={v.rtpLastNalType ?? "—"}
+              tone="muted"
+            />
+            <Stat
+              label="Config drops"
+              value={v.rtpConfigWaitDrops.toLocaleString()}
+              tone={v.rtpConfigWaitDrops > 0 ? "warn" : "muted"}
+            />
+            <Stat
+              label="Config keyframes"
+              value={v.rtpConfigKeyframesPrepended.toLocaleString()}
+              tone={v.rtpConfigKeyframesPrepended > 0 ? "good" : "muted"}
+            />
+            <Stat
+              label="Config NALs prepended"
+              value={v.rtpConfigParameterSetsPrepended.toLocaleString()}
+              tone={v.rtpConfigParameterSetsPrepended > 0 ? "good" : "muted"}
+            />
+            <Stat
+              label="Fragment gaps"
+              value={v.rtpFragmentGaps.toLocaleString()}
+              tone={v.rtpFragmentGaps > 0 ? "warn" : "muted"}
+            />
+            <Stat
+              label="RTP malformed"
+              value={v.rtpMalformedPackets.toLocaleString()}
+              tone={v.rtpMalformedPackets > 0 ? "warn" : "muted"}
+            />
+            <Stat
+              label="Unsupported PT"
+              value={v.rtpUnsupportedPayloads.toLocaleString()}
+              tone={v.rtpUnsupportedPayloads > 0 ? "warn" : "muted"}
+            />
+            <Stat
+              label="Reorder buffer"
+              value={v.rtpReorderBuffered.toLocaleString()}
+              tone={v.rtpReorderBuffered > 0 ? "warn" : "muted"}
+            />
+            <Stat
+              label="Reordered"
+              value={v.rtpReorderedPackets.toLocaleString()}
+              tone={v.rtpReorderedPackets > 0 ? "good" : "muted"}
+            />
+            <Stat
+              label="Late RTP"
+              value={v.rtpLatePackets.toLocaleString()}
+              tone={v.rtpLatePackets > 0 ? "warn" : "muted"}
+            />
+            <Stat
+              label="Forced flush"
+              value={v.rtpForcedFlushes.toLocaleString()}
+              tone={v.rtpForcedFlushes > 0 ? "warn" : "muted"}
+            />
             <Stat label="Raw payloads" value={v.rawPayloads.toLocaleString()} />
             <Stat label="Raw bytes" value={fmtBytes(v.rawPayloadBytes)} />
             <Stat

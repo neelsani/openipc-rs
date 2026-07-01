@@ -252,6 +252,7 @@ export const DEFAULT_SETTINGS: Settings = {
   minimumEpoch: "0",
   transferSize: DEFAULT_TRANSFER_SIZE,
   videoCodec: "auto",
+  rtpReorderEnabled: false,
   adaptiveEnabled: false,
   rfChannel: 161,
   channelWidthMhz: 20,
@@ -315,6 +316,7 @@ export function sanitizeSettings(value: Partial<Settings>): Settings {
       ["auto", "h264", "h265"],
       "auto",
     ),
+    rtpReorderEnabled: value.rtpReorderEnabled === true,
     adaptiveEnabled: value.adaptiveEnabled === true,
     rfChannel: oneOfNumber(
       value.rfChannel,

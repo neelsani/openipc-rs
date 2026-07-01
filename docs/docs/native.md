@@ -70,15 +70,15 @@ cargo build -p openipc-cli
 cargo build -p wfb-rs
 ```
 
-| Binary        | Purpose                                                                 |
-| ------------- | ----------------------------------------------------------------------- |
-| `openipc-rs`  | General probe, capture decode, and video receive helper.                |
-| `wfb_keygen`  | Generate WFB-compatible `drone.key` and `gs.key`.                       |
-| `wfb_rx`      | Realtek USB RX to recovered WFB payload UDP output.                     |
-| `wfb_tx`      | UDP input to WFB/FEC/radiotap/Realtek USB frame injection.              |
-| `wfb_tx_cmd`  | Control a running `wfb_tx` FEC/radio settings over UDP.                 |
-| `wfb_tun`     | Length-prefixed WFB tunnel UDP/TUN bridge on Unix.                      |
-| `wfb_rtsp`    | Minimal RTSP/RTP UDP proxy for local H.264/H.265 RTP streams.           |
+| Binary       | Purpose                                                       |
+| ------------ | ------------------------------------------------------------- |
+| `openipc-rs` | General probe, capture decode, and video receive helper.      |
+| `wfb_keygen` | Generate WFB-compatible `drone.key` and `gs.key`.             |
+| `wfb_rx`     | Realtek USB RX to recovered WFB payload UDP output.           |
+| `wfb_tx`     | UDP input to WFB/FEC/radiotap/Realtek USB frame injection.    |
+| `wfb_tx_cmd` | Control a running `wfb_tx` FEC/radio settings over UDP.       |
+| `wfb_tun`    | Length-prefixed WFB tunnel UDP/TUN bridge on Unix.            |
+| `wfb_rtsp`   | Minimal RTSP/RTP UDP proxy for local H.264/H.265 RTP streams. |
 
 ## List Devices
 

@@ -31,6 +31,40 @@ pub(crate) fn video_frame_payload(frame: DepacketizedFrame) -> VideoFramePayload
         codec_string,
         is_key_frame: frame.is_keyframe,
         timestamp: frame.timestamp,
+        payload_type: frame.payload_type,
+        sequence_number: frame.sequence_number,
+        nal_type: frame.nal_type,
+        decoder_config_complete: frame.codec_config.is_complete_for(frame.codec),
+        codec_config: codec_config_payload(frame.codec_config),
+    }
+}
+
+pub(crate) fn rtp_status_payload(
+    status: RtpDepacketizerStatus,
+    reorder: RtpReorderStatus,
+) -> RtpStatusPayload {
+    RtpStatusPayload {
+        packets: status.packets,
+        frames_emitted: status.frames_emitted,
+        config_wait_drops: status.config_wait_drops,
+        keyframes_with_prepended_config: status.keyframes_with_prepended_config,
+        parameter_sets_prepended: status.parameter_sets_prepended,
+        fragment_sequence_gaps: status.fragment_sequence_gaps,
+        fragment_overflows: status.fragment_overflows,
+        unsupported_payloads: status.unsupported_payloads,
+        malformed_packets: status.malformed_packets,
+        last_payload_type: status.last_payload_type,
+        last_sequence_number: status.last_sequence_number,
+        last_timestamp: status.last_timestamp,
+        last_codec: status.last_codec.map(codec_name),
+        last_nal_type: status.last_nal_type,
+        codec_config: codec_config_payload(status.codec_config),
+        h264_config_complete: status.codec_config.is_complete_for(Codec::H264),
+        h265_config_complete: status.codec_config.is_complete_for(Codec::H265),
+        reorder_buffered_packets: reorder.buffered_packets,
+        reordered_packets: reorder.reordered_packets,
+        late_packets: reorder.late_packets,
+        forced_flushes: reorder.forced_flushes,
     }
 }
 
@@ -47,6 +81,16 @@ fn codec_name(codec: Codec) -> &'static str {
     match codec {
         Codec::H264 => "h264",
         Codec::H265 => "h265",
+    }
+}
+
+fn codec_config_payload(config: CodecConfigState) -> CodecConfigPayload {
+    CodecConfigPayload {
+        h264_sps: config.h264_sps,
+        h264_pps: config.h264_pps,
+        h265_vps: config.h265_vps,
+        h265_sps: config.h265_sps,
+        h265_pps: config.h265_pps,
     }
 }
 

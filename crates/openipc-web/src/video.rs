@@ -1,10 +1,13 @@
 use js_sys::{Object, Reflect, Uint8Array};
-use openipc_core::{Codec, DepacketizedFrame};
+use openipc_core::{
+    Codec, CodecConfigState, DepacketizedFrame, RtpDepacketizerStatus, RtpReorderStatus,
+};
 use wasm_bindgen::prelude::*;
 
 pub(crate) fn video_frame_object(frame: DepacketizedFrame) -> Result<Object, JsValue> {
     let object = Object::new();
     let codec_string = codec_string(&frame);
+    let codec_config = JsValue::from(codec_config_object(frame.codec_config)?);
     Reflect::set(
         &object,
         &JsValue::from_str("data"),
@@ -29,6 +32,119 @@ pub(crate) fn video_frame_object(frame: DepacketizedFrame) -> Result<Object, JsV
         &object,
         &JsValue::from_str("timestamp"),
         &JsValue::from_f64(f64::from(frame.timestamp)),
+    )?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("payloadType"),
+        &JsValue::from_f64(f64::from(frame.payload_type)),
+    )?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("sequenceNumber"),
+        &JsValue::from_f64(f64::from(frame.sequence_number)),
+    )?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("nalType"),
+        &JsValue::from_f64(f64::from(frame.nal_type)),
+    )?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("decoderConfigComplete"),
+        &JsValue::from_bool(frame.codec_config.is_complete_for(frame.codec)),
+    )?;
+    Reflect::set(&object, &JsValue::from_str("codecConfig"), &codec_config)?;
+    Ok(object)
+}
+
+pub(crate) fn rtp_status_object(
+    status: RtpDepacketizerStatus,
+    reorder: RtpReorderStatus,
+) -> Result<Object, JsValue> {
+    let object = Object::new();
+    let codec_config = JsValue::from(codec_config_object(status.codec_config)?);
+    set_u64(&object, "packets", status.packets)?;
+    set_u64(&object, "framesEmitted", status.frames_emitted)?;
+    set_u64(&object, "configWaitDrops", status.config_wait_drops)?;
+    set_u64(
+        &object,
+        "keyframesWithPrependedConfig",
+        status.keyframes_with_prepended_config,
+    )?;
+    set_u64(
+        &object,
+        "parameterSetsPrepended",
+        status.parameter_sets_prepended,
+    )?;
+    set_u64(
+        &object,
+        "fragmentSequenceGaps",
+        status.fragment_sequence_gaps,
+    )?;
+    set_u64(&object, "fragmentOverflows", status.fragment_overflows)?;
+    set_u64(&object, "unsupportedPayloads", status.unsupported_payloads)?;
+    set_u64(&object, "malformedPackets", status.malformed_packets)?;
+    set_option_u8(&object, "lastPayloadType", status.last_payload_type)?;
+    set_option_u16(&object, "lastSequenceNumber", status.last_sequence_number)?;
+    set_option_u32(&object, "lastTimestamp", status.last_timestamp)?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("lastCodec"),
+        &status
+            .last_codec
+            .map(codec_name)
+            .map(JsValue::from_str)
+            .unwrap_or(JsValue::NULL),
+    )?;
+    set_option_u8(&object, "lastNalType", status.last_nal_type)?;
+    Reflect::set(&object, &JsValue::from_str("codecConfig"), &codec_config)?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("h264ConfigComplete"),
+        &JsValue::from_bool(status.codec_config.is_complete_for(Codec::H264)),
+    )?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("h265ConfigComplete"),
+        &JsValue::from_bool(status.codec_config.is_complete_for(Codec::H265)),
+    )?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("reorderBufferedPackets"),
+        &JsValue::from_f64(reorder.buffered_packets as f64),
+    )?;
+    set_u64(&object, "reorderedPackets", reorder.reordered_packets)?;
+    set_u64(&object, "latePackets", reorder.late_packets)?;
+    set_u64(&object, "forcedFlushes", reorder.forced_flushes)?;
+    Ok(object)
+}
+
+fn codec_config_object(config: CodecConfigState) -> Result<Object, JsValue> {
+    let object = Object::new();
+    Reflect::set(
+        &object,
+        &JsValue::from_str("h264Sps"),
+        &JsValue::from_bool(config.h264_sps),
+    )?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("h264Pps"),
+        &JsValue::from_bool(config.h264_pps),
+    )?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("h265Vps"),
+        &JsValue::from_bool(config.h265_vps),
+    )?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("h265Sps"),
+        &JsValue::from_bool(config.h265_sps),
+    )?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("h265Pps"),
+        &JsValue::from_bool(config.h265_pps),
     )?;
     Ok(object)
 }
@@ -111,6 +227,48 @@ fn start_code_len(frame: &[u8], offset: usize) -> usize {
 
 fn hex_byte(value: u8) -> String {
     format!("{value:02X}")
+}
+
+fn set_u64(object: &Object, key: &str, value: u64) -> Result<(), JsValue> {
+    Reflect::set(
+        object,
+        &JsValue::from_str(key),
+        &JsValue::from_f64(value as f64),
+    )?;
+    Ok(())
+}
+
+fn set_option_u8(object: &Object, key: &str, value: Option<u8>) -> Result<(), JsValue> {
+    Reflect::set(
+        object,
+        &JsValue::from_str(key),
+        &value
+            .map(|value| JsValue::from_f64(f64::from(value)))
+            .unwrap_or(JsValue::NULL),
+    )?;
+    Ok(())
+}
+
+fn set_option_u16(object: &Object, key: &str, value: Option<u16>) -> Result<(), JsValue> {
+    Reflect::set(
+        object,
+        &JsValue::from_str(key),
+        &value
+            .map(|value| JsValue::from_f64(f64::from(value)))
+            .unwrap_or(JsValue::NULL),
+    )?;
+    Ok(())
+}
+
+fn set_option_u32(object: &Object, key: &str, value: Option<u32>) -> Result<(), JsValue> {
+    Reflect::set(
+        object,
+        &JsValue::from_str(key),
+        &value
+            .map(|value| JsValue::from_f64(f64::from(value)))
+            .unwrap_or(JsValue::NULL),
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

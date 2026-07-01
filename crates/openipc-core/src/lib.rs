@@ -13,6 +13,8 @@ pub mod crypto;
 pub mod fec;
 /// Minimal 802.11 frame parsing and construction helpers.
 pub mod ieee80211;
+/// Synthetic RTP source for no-hardware development.
+pub mod mock;
 /// Single-channel WFB payload recovery pipeline.
 pub mod pipeline;
 /// Radiotap TX metadata builders and parsers.
@@ -34,7 +36,8 @@ pub use adaptive::{AdaptiveLink, AdaptiveLinkSender, LinkQuality};
 pub use channel::{ChannelId, RadioPort};
 pub use fec::{FecCode, FecError};
 pub use ieee80211::{FrameLayout, WifiFrame};
-pub use pipeline::{PayloadPipeline, PayloadPipelineEvent, RecoveredPayload};
+pub use mock::{MockRtpFrame, MockRtpPipeline};
+pub use pipeline::{MockPayloadPipeline, PayloadPipeline, PayloadPipelineEvent, RecoveredPayload};
 pub use radiotap::{
     build_stream_radiotap, parse_tx_mode_str, ChannelBandwidth, TxMode, TxModeKind, TxRadioParams,
     FRAME_TYPE_DATA, FRAME_TYPE_RTS,
@@ -48,9 +51,13 @@ pub use receiver::{
     RtpPayloadTap,
 };
 pub use routes::{
-    PayloadRouteError, PayloadRouteEvent, PayloadRouteId, PayloadRouteManager, PayloadRuntimeKey,
+    PayloadChannelRuntime, PayloadRouteError, PayloadRouteEvent, PayloadRouteId,
+    PayloadRouteManager, PayloadRuntimeKey,
 };
-pub use rtp::{Codec, DepacketizedFrame, RtpDepacketizer, RtpHeader};
+pub use rtp::{
+    Codec, CodecConfigState, DepacketizedFrame, RtpDepacketizer, RtpDepacketizerStatus, RtpHeader,
+    RtpReorderBuffer, RtpReorderStatus,
+};
 pub use wfb::{
     FecCounters, PlainAssembler, WfbKeypair, WfbOutput, WfbPacket, WfbReceiver, WfbSession,
 };

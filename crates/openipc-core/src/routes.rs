@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use crate::channel::ChannelId;
 use crate::ieee80211::{FrameLayout, WifiFrame};
-use crate::pipeline::{PayloadPipeline, PayloadPipelineEvent, RecoveredPayload};
+use crate::pipeline::{
+    MockPayloadPipeline, PayloadPipeline, PayloadPipelineEvent, RecoveredPayload,
+};
 use crate::wfb::{FecCounters, WfbError, WfbKeypair};
 
 /// Application-defined identifier for a recovered-payload output.
@@ -112,9 +114,111 @@ impl From<WfbError> for PayloadRouteError {
 }
 
 #[derive(Debug, Clone)]
-struct PayloadChannelRuntime {
-    pipeline: PayloadPipeline,
+enum PayloadChannelPipeline {
+    Real(Box<PayloadPipeline>),
+    Mock(MockPayloadPipeline),
+}
+
+impl PayloadChannelPipeline {
+    fn channel_id(&self) -> ChannelId {
+        match self {
+            Self::Real(pipeline) => pipeline.channel_id(),
+            Self::Mock(pipeline) => pipeline.channel_id(),
+        }
+    }
+
+    fn fec_counters(&self) -> FecCounters {
+        match self {
+            Self::Real(pipeline) => pipeline.fec_counters(),
+            Self::Mock(pipeline) => pipeline.fec_counters(),
+        }
+    }
+
+    fn accepts_80211_frame(&self, frame: &[u8]) -> bool {
+        match self {
+            Self::Real(pipeline) => pipeline.accepts_80211_frame(frame),
+            Self::Mock(_) => false,
+        }
+    }
+
+    fn push_80211_frame(&mut self, frame: &[u8]) -> Result<Vec<PayloadPipelineEvent>, WfbError> {
+        match self {
+            Self::Real(pipeline) => pipeline.push_80211_frame(frame),
+            Self::Mock(_) => Ok(vec![PayloadPipelineEvent::IgnoredFrame]),
+        }
+    }
+
+    fn push_decrypted_80211_frame(
+        &mut self,
+        frame: &[u8],
+        decrypted_fragment: &[u8],
+    ) -> Result<Vec<PayloadPipelineEvent>, WfbError> {
+        match self {
+            Self::Real(pipeline) => pipeline.push_decrypted_80211_frame(frame, decrypted_fragment),
+            Self::Mock(_) => Ok(vec![PayloadPipelineEvent::IgnoredFrame]),
+        }
+    }
+
+    fn push_decrypted_fragment(
+        &mut self,
+        data_nonce: u64,
+        decrypted_fragment: &[u8],
+    ) -> Result<Vec<PayloadPipelineEvent>, WfbError> {
+        match self {
+            Self::Real(pipeline) => {
+                pipeline.push_decrypted_fragment(data_nonce, decrypted_fragment)
+            }
+            Self::Mock(pipeline) => Ok(pipeline.push_payload(data_nonce, decrypted_fragment)),
+        }
+    }
+
+    fn push_mock_payload(&mut self, packet_seq: u64, data: &[u8]) -> Vec<PayloadPipelineEvent> {
+        match self {
+            Self::Real(_) => vec![PayloadPipelineEvent::IgnoredFrame],
+            Self::Mock(pipeline) => pipeline.push_payload(packet_seq, data),
+        }
+    }
+}
+
+/// One route-manager runtime for a single WFB/OpenIPC channel and key slot.
+///
+/// A runtime can be backed by the real WFB [`PayloadPipeline`] or by a fully
+/// synthetic [`MockPayloadPipeline`]. Route IDs attached to the same runtime
+/// share the same recovered payload stream.
+#[derive(Debug, Clone)]
+pub struct PayloadChannelRuntime {
+    pipeline: PayloadChannelPipeline,
     route_ids: Vec<PayloadRouteId>,
+}
+
+impl PayloadChannelRuntime {
+    fn real(pipeline: PayloadPipeline, route_id: PayloadRouteId) -> Self {
+        Self {
+            pipeline: PayloadChannelPipeline::Real(Box::new(pipeline)),
+            route_ids: vec![route_id],
+        }
+    }
+
+    fn mock(channel_id: ChannelId, route_id: PayloadRouteId) -> Self {
+        Self {
+            pipeline: PayloadChannelPipeline::Mock(MockPayloadPipeline::new(channel_id)),
+            route_ids: vec![route_id],
+        }
+    }
+
+    /// Return this runtime's channel id.
+    pub fn channel_id(&self) -> ChannelId {
+        self.pipeline.channel_id()
+    }
+
+    /// Return the route ids attached to this runtime.
+    pub fn route_ids(&self) -> &[PayloadRouteId] {
+        self.route_ids.as_slice()
+    }
+
+    fn push_route_id(&mut self, route_id: PayloadRouteId) {
+        push_route_id(&mut self.route_ids, route_id);
+    }
 }
 
 /// Fanout manager for one or more OpenIPC/WFB payload routes.
@@ -160,18 +264,13 @@ impl PayloadRouteManager {
     ) -> Result<PayloadRuntimeKey, PayloadRouteError> {
         let key = PayloadRuntimeKey::new(channel_id, key_slot);
         if let Some(runtime) = self.runtimes.get_mut(&key) {
-            push_route_id(&mut runtime.route_ids, route_id);
+            runtime.push_route_id(route_id);
             return Ok(key);
         }
 
         let pipeline = PayloadPipeline::new(channel_id, self.frame_layout, fec_k, fec_n)?;
-        self.runtimes.insert(
-            key,
-            PayloadChannelRuntime {
-                pipeline,
-                route_ids: vec![route_id],
-            },
-        );
+        self.runtimes
+            .insert(key, PayloadChannelRuntime::real(pipeline, route_id));
         Ok(key)
     }
 
@@ -188,27 +287,44 @@ impl PayloadRouteManager {
     ) -> Result<PayloadRuntimeKey, PayloadRouteError> {
         let key = PayloadRuntimeKey::new(channel_id, key_slot);
         if let Some(runtime) = self.runtimes.get_mut(&key) {
-            push_route_id(&mut runtime.route_ids, route_id);
+            runtime.push_route_id(route_id);
             return Ok(key);
         }
 
         let pipeline =
             PayloadPipeline::with_keypair(channel_id, self.frame_layout, keypair, minimum_epoch)?;
-        self.runtimes.insert(
-            key,
-            PayloadChannelRuntime {
-                pipeline,
-                route_ids: vec![route_id],
-            },
-        );
+        self.runtimes
+            .insert(key, PayloadChannelRuntime::real(pipeline, route_id));
         Ok(key)
+    }
+
+    /// Add a fully synthetic route for no-hardware tests and development.
+    ///
+    /// Mock routes skip 802.11, WFB decrypt, and FEC. Push recovered payload
+    /// bytes with [`Self::push_mock_payload`]; downstream route fanout and RTP
+    /// handling still run exactly like real routes.
+    pub fn add_mock_route(
+        &mut self,
+        route_id: PayloadRouteId,
+        channel_id: ChannelId,
+        key_slot: u64,
+    ) -> PayloadRuntimeKey {
+        let key = PayloadRuntimeKey::new(channel_id, key_slot);
+        if let Some(runtime) = self.runtimes.get_mut(&key) {
+            runtime.push_route_id(route_id);
+            return key;
+        }
+
+        self.runtimes
+            .insert(key, PayloadChannelRuntime::mock(channel_id, route_id));
+        key
     }
 
     /// Return route ids attached to a runtime key.
     pub fn route_ids(&self, key: PayloadRuntimeKey) -> Option<&[PayloadRouteId]> {
         self.runtimes
             .get(&key)
-            .map(|runtime| runtime.route_ids.as_slice())
+            .map(PayloadChannelRuntime::route_ids)
     }
 
     /// Return cumulative FEC counters for a runtime key.
@@ -250,11 +366,7 @@ impl PayloadRouteManager {
             matched = true;
             match runtime.pipeline.push_80211_frame(frame) {
                 Ok(events) => {
-                    route_events.extend(map_pipeline_events(
-                        *key,
-                        runtime.route_ids.as_slice(),
-                        events,
-                    ));
+                    route_events.extend(map_pipeline_events(*key, runtime.route_ids(), events));
                 }
                 Err(err) => {
                     if first_error.is_none() {
@@ -289,11 +401,7 @@ impl PayloadRouteManager {
         let events = runtime
             .pipeline
             .push_decrypted_80211_frame(frame, decrypted_fragment)?;
-        Ok(map_pipeline_events(
-            key,
-            runtime.route_ids.as_slice(),
-            events,
-        ))
+        Ok(map_pipeline_events(key, runtime.route_ids(), events))
     }
 
     /// Push a decrypted fragment directly into one runtime.
@@ -310,11 +418,22 @@ impl PayloadRouteManager {
         let events = runtime
             .pipeline
             .push_decrypted_fragment(data_nonce, decrypted_fragment)?;
-        Ok(map_pipeline_events(
-            key,
-            runtime.route_ids.as_slice(),
-            events,
-        ))
+        Ok(map_pipeline_events(key, runtime.route_ids(), events))
+    }
+
+    /// Push a fully synthetic recovered payload into one mock runtime.
+    pub fn push_mock_payload(
+        &mut self,
+        key: PayloadRuntimeKey,
+        packet_seq: u64,
+        data: &[u8],
+    ) -> Result<Vec<PayloadRouteEvent>, PayloadRouteError> {
+        let runtime = self
+            .runtimes
+            .get_mut(&key)
+            .ok_or(PayloadRouteError::UnknownRuntime(key))?;
+        let events = runtime.pipeline.push_mock_payload(packet_seq, data);
+        Ok(map_pipeline_events(key, runtime.route_ids(), events))
     }
 }
 

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "apps/openipc-cli",
+    "apps/wfb-rs",
     "crates/openipc-core",
     "crates/openipc-rtl88xx",
     "crates/openipc-web",

@@ -834,8 +834,11 @@ mod tests {
 
     #[test]
     fn maps_40mhz_primary_channels_like_aviateur_devourer() {
+        assert_eq!(center_channel(1, ChannelWidth::Mhz40, 0), 1);
         assert_eq!(center_channel(36, ChannelWidth::Mhz40, 0), 38);
         assert_eq!(center_channel(40, ChannelWidth::Mhz40, 0), 38);
+        assert_eq!(center_channel(44, ChannelWidth::Mhz40, 0), 46);
+        assert_eq!(center_channel(153, ChannelWidth::Mhz40, 0), 155);
         assert_eq!(center_channel(161, ChannelWidth::Mhz40, 0), 163);
         assert_eq!(center_channel(8, ChannelWidth::Mhz40, 0), 6);
     }
@@ -843,7 +846,32 @@ mod tests {
     #[test]
     fn maps_80mhz_primary_channels_like_aviateur_devourer() {
         assert_eq!(center_channel(36, ChannelWidth::Mhz80, 0), 42);
+        assert_eq!(center_channel(48, ChannelWidth::Mhz80, 0), 42);
+        assert_eq!(center_channel(52, ChannelWidth::Mhz80, 0), 58);
+        assert_eq!(center_channel(64, ChannelWidth::Mhz80, 0), 58);
+        assert_eq!(center_channel(100, ChannelWidth::Mhz80, 0), 106);
+        assert_eq!(center_channel(112, ChannelWidth::Mhz80, 0), 106);
+        assert_eq!(center_channel(116, ChannelWidth::Mhz80, 0), 122);
         assert_eq!(center_channel(120, ChannelWidth::Mhz80, 0), 122);
+        assert_eq!(center_channel(132, ChannelWidth::Mhz80, 0), 138);
+        assert_eq!(center_channel(144, ChannelWidth::Mhz80, 0), 138);
+        assert_eq!(center_channel(149, ChannelWidth::Mhz80, 0), 155);
         assert_eq!(center_channel(161, ChannelWidth::Mhz80, 0), 155);
+        assert_eq!(center_channel(165, ChannelWidth::Mhz80, 0), 171);
+        assert_eq!(center_channel(177, ChannelWidth::Mhz80, 0), 171);
+    }
+
+    #[test]
+    fn keeps_narrowband_and_20mhz_primary_channel_as_center() {
+        for width in [ChannelWidth::Mhz5, ChannelWidth::Mhz10, ChannelWidth::Mhz20] {
+            assert_eq!(center_channel(6, width, 3), 6);
+            assert_eq!(center_channel(149, width, 3), 149);
+        }
+    }
+
+    #[test]
+    fn falls_back_to_primary_plus_offset_for_unknown_80mhz_channel() {
+        assert_eq!(center_channel(183, ChannelWidth::Mhz80, 6), 189);
+        assert_eq!(center_channel(253, ChannelWidth::Mhz80, 6), 255);
     }
 }

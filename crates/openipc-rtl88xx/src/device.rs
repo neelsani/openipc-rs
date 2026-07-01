@@ -2,7 +2,7 @@
 use crate::tx::{build_usb_tx_frame, RealtekTxDescriptor, RealtekTxOptions};
 use nusb::descriptors::TransferType;
 #[cfg(not(target_arch = "wasm32"))]
-use nusb::transfer::{Buffer, Bulk, ControlIn, ControlOut, ControlType, In, Out, Recipient};
+use nusb::transfer::{Buffer, Bulk, In, Out, TransferError};
 #[cfg(not(target_arch = "wasm32"))]
 use nusb::MaybeFuture;
 use openipc_core::realtek::{parse_rx_aggregate_with_kind, RealtekRxPacket, RxDescriptorKind};
@@ -14,6 +14,12 @@ use crate::types::{
     is_supported_id, ChipInfo, DriverOptions, InitReport, MonitorOptions, RadioConfig,
 };
 use crate::types::{supported_family_hint, ChipFamily, DriverError};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::usb_recovery::{
+    retry_delay_ms, should_retry_transfer_error, transfer_error, BULK_RETRY_ATTEMPTS,
+};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::usb_transport::{read_register_with_recovery, write_register_with_recovery};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::{
     BbDbgportRead, FalseAlarmCounters, IqkReport, Jaguar3PowerTrackingReport,
@@ -59,9 +65,57 @@ impl RealtekDevice {
         Self::from_nusb_device(device, options)
     }
 
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+    /// Open every visible adapter matching [`DriverOptions`].
+    ///
+    /// This is intended for mirror/transmit workflows where one WFB packet
+    /// should be injected through all attached matching radios.
+    pub fn open_all(options: DriverOptions) -> Result<Vec<Self>, DriverError> {
+        let infos: Vec<_> = nusb::list_devices()
+            .wait()
+            .map_err(|err| DriverError::Nusb(format!("list_devices failed: {err}")))?
+            .filter(|dev| device_matches_options(dev.vendor_id(), dev.product_id(), options))
+            .collect();
+
+        if infos.is_empty() {
+            return Err(DriverError::DeviceNotFound);
+        }
+
+        let mut devices = Vec::new();
+        let mut errors = Vec::new();
+        for info in infos {
+            let vendor_id = info.vendor_id();
+            let product_id = info.product_id();
+            match info.open().wait() {
+                Ok(device) => match Self::from_nusb_device(device, options) {
+                    Ok(device) => devices.push(device),
+                    Err(err) => errors.push(format!("{vendor_id:04x}:{product_id:04x}: {err}")),
+                },
+                Err(err) => errors.push(format!("{vendor_id:04x}:{product_id:04x}: {err}")),
+            }
+        }
+
+        if devices.is_empty() {
+            return Err(DriverError::Nusb(format!(
+                "no matching Realtek adapters could be opened: {}",
+                errors.join("; ")
+            )));
+        }
+
+        Ok(devices)
+    }
+
     #[cfg(target_os = "android")]
     /// Android does not support desktop enumeration; use `nusb::Device::from_fd`.
     pub fn open_first(_options: DriverOptions) -> Result<Self, DriverError> {
+        Err(DriverError::Nusb(
+            "Android USB discovery must use UsbManager and nusb::Device::from_fd".to_owned(),
+        ))
+    }
+
+    #[cfg(target_os = "android")]
+    /// Android does not support desktop enumeration; open devices from granted fds.
+    pub fn open_all(_options: DriverOptions) -> Result<Vec<Self>, DriverError> {
         Err(DriverError::Nusb(
             "Android USB discovery must use UsbManager and nusb::Device::from_fd".to_owned(),
         ))
@@ -329,11 +383,22 @@ impl RealtekDevice {
         ep: &mut nusb::Endpoint<Bulk, Out>,
         usb_frame: &[u8],
     ) -> Result<usize, DriverError> {
-        let completion = ep.transfer_blocking(Buffer::from(usb_frame), USB_TIMEOUT);
-        completion
-            .status
-            .map_err(|err| DriverError::Nusb(format!("bulk OUT transfer failed: {err}")))?;
-        Ok(completion.actual_len)
+        for attempt in 0..BULK_RETRY_ATTEMPTS {
+            let completion = ep.transfer_blocking(Buffer::from(usb_frame), USB_TIMEOUT);
+            match completion.status {
+                Ok(()) => return Ok(completion.actual_len),
+                Err(err) if should_retry_transfer_error(err, attempt, BULK_RETRY_ATTEMPTS) => {
+                    if err == TransferError::Stall {
+                        let _ = ep.clear_halt().wait();
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        retry_delay_ms(attempt) as u64
+                    ));
+                }
+                Err(err) => return Err(transfer_error("bulk OUT transfer failed", err)),
+            }
+        }
+        unreachable!("retry loop either returns or reports the final USB error")
     }
 
     /// Parse a Realtek RX aggregate using the shared core parser.
@@ -356,20 +421,7 @@ impl RealtekDevice {
     #[cfg(not(target_arch = "wasm32"))]
     /// Perform a Realtek vendor control read.
     pub fn read_register(&self, register: u16, len: u16) -> Result<Vec<u8>, DriverError> {
-        self.interface
-            .control_in(
-                ControlIn {
-                    control_type: ControlType::Vendor,
-                    recipient: Recipient::Device,
-                    request: REALTEK_VENDOR_READ_REQUEST,
-                    value: register,
-                    index: 0,
-                    length: len,
-                },
-                USB_TIMEOUT,
-            )
-            .wait()
-            .map_err(|err| DriverError::Nusb(format!("vendor read 0x{register:04x} failed: {err}")))
+        read_register_with_recovery(&self.interface, register, len)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -383,22 +435,7 @@ impl RealtekDevice {
     #[cfg(not(target_arch = "wasm32"))]
     /// Perform a Realtek vendor control write.
     pub fn write_register(&self, register: u16, bytes: &[u8]) -> Result<(), DriverError> {
-        self.interface
-            .control_out(
-                ControlOut {
-                    control_type: ControlType::Vendor,
-                    recipient: Recipient::Device,
-                    request: REALTEK_VENDOR_WRITE_REQUEST,
-                    value: register,
-                    index: 0,
-                    data: bytes,
-                },
-                USB_TIMEOUT,
-            )
-            .wait()
-            .map_err(|err| {
-                DriverError::Nusb(format!("vendor write 0x{register:04x} failed: {err}"))
-            })
+        write_register_with_recovery(&self.interface, register, bytes)
     }
 
     #[cfg(target_arch = "wasm32")]

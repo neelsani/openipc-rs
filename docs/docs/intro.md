@@ -22,6 +22,7 @@ openipc-rs/
   crates/openipc-core/        protocol, WFB, RTP, video, adaptive link
   crates/openipc-rtl88xx/     shared async Realtek rtl88xx USB/HAL driver
   apps/openipc-cli/           native CLI utilities
+  apps/wfb-rs/                WFB-ng-style Rust binaries over the userland driver
   crates/openipc-web/         wasm-bindgen SDK
   apps/openipc-station/       browser and Tauri station UI
   plugins/tauri-plugin-openipc-usb/
@@ -47,6 +48,13 @@ The platform boundary is kept at the edges:
 - playback is handled by WebCodecs in the React app,
 - desktop builds use Tauri only as the application shell around the same React
   UI and native Rust backend.
+
+The `wfb-rs` package is the native WFB-ng-style tool set. It rewrites the
+receive/transmit/helper binary roles in Rust and uses the `openipc-rtl88xx`
+userland Realtek driver for radio I/O, rather than relying on Linux kernel
+monitor-mode interfaces. That keeps the main radio path usable on Linux,
+macOS, and Windows, subject to each operating system's USB permission and driver
+binding requirements.
 
 ## Current Status
 

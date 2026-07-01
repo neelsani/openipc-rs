@@ -452,6 +452,120 @@ mod tests {
     }
 
     #[test]
+    fn ignores_short_tail_after_aligned_packet() {
+        let mut aggregate = Vec::new();
+        aggregate.extend_from_slice(&descriptor(4, 0, 0, 77));
+        aggregate.extend_from_slice(&[1, 2, 3, 4]);
+        aggregate.extend_from_slice(&[0, 0, 0, 0]);
+        aggregate.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+
+        let packets = parse_rx_aggregate(&aggregate).unwrap();
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].data, &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn rejects_zero_length_descriptor() {
+        let aggregate = descriptor(0, 0, 0, 1);
+
+        let err = parse_rx_aggregate(&aggregate).unwrap_err();
+        assert_eq!(
+            err,
+            AggregateError::InvalidPacketLength {
+                pkt_len: 0,
+                pkt_offset: RX_DESC_SIZE,
+                remaining: RX_DESC_SIZE,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_descriptor_payload_past_transfer() {
+        let mut aggregate = Vec::new();
+        aggregate.extend_from_slice(&descriptor(8, 0, 0, 1));
+        aggregate.extend_from_slice(&[1, 2, 3, 4]);
+
+        let err = parse_rx_aggregate(&aggregate).unwrap_err();
+        assert_eq!(
+            err,
+            AggregateError::InvalidPacketLength {
+                pkt_len: 8,
+                pkt_offset: RX_DESC_SIZE + 8,
+                remaining: RX_DESC_SIZE + 4,
+            }
+        );
+    }
+
+    #[test]
+    fn surfaces_crc_and_icv_flags_from_jaguar1_descriptor() {
+        let mut desc = descriptor(4, 0, 0, 9);
+        let mut d0 = u32::from_le_bytes(desc[0..4].try_into().unwrap());
+        put_bits(&mut d0, 14, 1, 1);
+        put_bits(&mut d0, 15, 1, 1);
+        desc[0..4].copy_from_slice(&d0.to_le_bytes());
+
+        let mut aggregate = Vec::new();
+        aggregate.extend_from_slice(&desc);
+        aggregate.extend_from_slice(&[1, 2, 3, 4]);
+
+        let packets = parse_rx_aggregate(&aggregate).unwrap();
+        assert!(packets[0].attrib.crc_err);
+        assert!(packets[0].attrib.icv_err);
+        assert_eq!(packets[0].data, &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn does_not_decode_payload_as_phy_status_when_drvinfo_absent() {
+        let mut payload = vec![0u8; 32];
+        payload[0] = 55;
+        payload[1] = 66;
+        payload[13] = 0x80;
+        payload[15] = 0x7f;
+        payload[23] = 77;
+
+        let mut aggregate = Vec::new();
+        aggregate.extend_from_slice(&descriptor(payload.len() as u16, 0, 0, 1));
+        aggregate.extend_from_slice(&payload);
+
+        let packets = parse_rx_aggregate(&aggregate).unwrap();
+        assert_eq!(packets[0].attrib.rssi, [0; 4]);
+        assert_eq!(packets[0].attrib.snr, [0; 4]);
+        assert_eq!(packets[0].attrib.evm, [0; 4]);
+        assert_eq!(packets[0].data, payload);
+    }
+
+    #[test]
+    fn parses_phy_status_only_from_driver_info_bytes() {
+        let mut phy = vec![0u8; 32];
+        phy[0] = 42;
+        phy[1] = 43;
+        phy[13] = 0xf0;
+        phy[14] = 0x0f;
+        phy[15] = 0x80;
+        phy[16] = 0x7f;
+        phy[19] = 0xee;
+        phy[20] = 0xdd;
+        phy[21] = 0xcc;
+        phy[22] = 0xbb;
+        phy[23] = 44;
+        phy[24] = 45;
+
+        let mut aggregate = Vec::new();
+        aggregate.extend_from_slice(&descriptor(3, 4, 1, 1));
+        aggregate.extend_from_slice(&phy);
+        aggregate.push(0xaa);
+        aggregate.extend_from_slice(&[1, 2, 3]);
+
+        let packets = parse_rx_aggregate(&aggregate).unwrap();
+        assert_eq!(packets[0].attrib.drvinfo_sz, 32);
+        assert_eq!(packets[0].attrib.shift_sz, 1);
+        assert_eq!(packets[0].attrib.rssi, [42, 43, 44, 45]);
+        assert_eq!(packets[0].attrib.snr, [-128, 127, -52, -69]);
+        assert_eq!(packets[0].attrib.evm, [-16, 15, -18, -35]);
+        assert_eq!(packets[0].data, &[1, 2, 3]);
+    }
+
+    #[test]
     fn parses_c2h_packet_header() {
         let packet = parse_c2h_packet(&[0x42, 0x7f, 1, 2]).unwrap();
         assert_eq!(packet.cmd_id, 0x42);
@@ -518,5 +632,34 @@ mod tests {
         assert_eq!(packets.len(), 1);
         assert_eq!(packets[0].attrib.pkt_rpt_type, RxPacketType::C2hPacket);
         assert_eq!(packets[0].data, &[0x61, 0x01, 0x02]);
+    }
+
+    #[test]
+    fn c2h_payload_respects_drvinfo_and_shift_offsets() {
+        let mut desc = descriptor(3, 1, 2, 0);
+        let mut d2 = u32::from_le_bytes(desc[8..12].try_into().unwrap());
+        put_bits(&mut d2, 28, 1, 1);
+        desc[8..12].copy_from_slice(&d2.to_le_bytes());
+
+        let mut aggregate = Vec::new();
+        aggregate.extend_from_slice(&desc);
+        aggregate.extend_from_slice(&[0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48]);
+        aggregate.extend_from_slice(&[0xaa, 0xbb]);
+        aggregate.extend_from_slice(&[0x61, 0x07, 0xcc]);
+
+        let packets = parse_rx_aggregate(&aggregate).unwrap();
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].attrib.pkt_rpt_type, RxPacketType::C2hPacket);
+        assert_eq!(packets[0].attrib.drvinfo_sz, 8);
+        assert_eq!(packets[0].attrib.shift_sz, 2);
+        assert_eq!(packets[0].data, &[0x61, 0x07, 0xcc]);
+        assert_eq!(
+            parse_c2h_packet(packets[0].data),
+            Some(C2hPacket {
+                cmd_id: 0x61,
+                seq: Some(0x07),
+                payload: &[0xcc],
+            })
+        );
     }
 }

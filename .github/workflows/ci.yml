@@ -89,6 +89,7 @@ jobs:
 
                   cargo_manifests = [
                       "apps/openipc-cli/Cargo.toml",
+                      "apps/wfb-rs/Cargo.toml",
                       "crates/openipc-core/Cargo.toml",
                       "crates/openipc-rtl88xx/Cargo.toml",
                       "crates/openipc-web/Cargo.toml",
@@ -513,6 +514,7 @@ jobs:
               run: |
                   VERSION="${GITHUB_REF_NAME#v}"
                   for manifest in \
+                    apps/wfb-rs/Cargo.toml \
                     crates/openipc-core/Cargo.toml \
                     crates/openipc-rtl88xx/Cargo.toml \
                     crates/openipc-web/Cargo.toml

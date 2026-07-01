@@ -29,6 +29,8 @@ mod rtl_data;
 mod time;
 mod tx;
 mod types;
+mod usb_recovery;
+mod usb_transport;
 
 pub use async_diagnostics::{BbDbgportRead, ThermalBucket, ThermalStatus};
 pub use async_iqk::IqkReport;

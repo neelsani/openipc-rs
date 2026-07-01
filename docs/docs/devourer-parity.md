@@ -134,7 +134,18 @@ No test can prove RF without hardware, but the repo should catch translation
 drift early:
 
 - unit tests for descriptor bit positions and checksums,
-- parser tests for aggregate alignment and C2H reports,
+- parser tests for aggregate alignment, malformed lengths, C2H reports,
+  C2H metadata offsets, bad-FCS flags, and PHY-status boundaries,
+- firmware-header tests for the chip-family signatures and RTL8814 64-byte
+  reserved-page header path,
+- TX tests for chip-family descriptor selection, checksum calculation, VHT
+  rate/PHY flags, 5 GHz CCK clamping, and payload-size rejection,
+- radio-channel tests for the 40/80 MHz center-channel mappings used by
+  devourer and aviateur,
+- fake USB control-transport tests for retrying native register reads/writes
+  after stalls or cancelled transfers while failing fast on disconnect,
+- recovery-classifier tests for transient stalls/timeouts versus fatal USB
+  errors,
 - generated-table sanity tests for known table lengths and boundary values,
 - protocol tests for WFB session/decrypt/FEC behavior,
 - optional PixelPilot/zfex reference tests for FEC parity when the fixture path

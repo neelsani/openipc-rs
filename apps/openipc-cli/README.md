@@ -9,6 +9,18 @@ directly.
 
 ## Commands
 
+Build the CLI:
+
+```sh
+cargo build -p openipc-cli
+```
+
+The package produces one binary:
+
+| Binary       | Purpose                                                          |
+| ------------ | ---------------------------------------------------------------- |
+| `openipc-rs` | General OpenIPC probe, capture decode, and video receive helper. |
+
 List supported adapters:
 
 ```sh
@@ -79,5 +91,4 @@ Realtek USB aggregate
   -> Annex-B video bytes or optional raw RTP UDP mirror
 ```
 
-The bundled graphical desktop app lives in `apps/openipc-station` and uses the
-same Rust driver stack through Tauri.
+WFB-ng-style tools live in `apps/wfb-rs`.

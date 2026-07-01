@@ -165,6 +165,15 @@ driver itself stays platform-neutral: higher layers wrap the descriptor with
 `nusb::Device::from_fd` and pass the resulting device into
 `RealtekDevice::from_nusb_device`.
 
+USB control transfers now pass through an internal fakeable transport boundary
+on native builds. That lets tests exercise register retry behavior without a
+physical adapter. Normal control transfers and regular bulk RX/TX retry
+cancelled/time-out and endpoint-stall failures; disconnects, invalid requests,
+and hardware faults fail fast so the application can surface a reconnect or
+hardware error. Firmware bulk writes are intentionally conservative and do not
+retry timed-out chunks, because replaying an ambiguous firmware chunk can make a
+cold-start failure harder to diagnose.
+
 ## Diagnostics And Polling
 
 The crate exposes diagnostics as explicit calls: thermal meter reads, false

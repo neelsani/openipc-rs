@@ -1,0 +1,46 @@
+[package]
+name = "wfb-rs"
+version = "0.1.21"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rust WFB-style command-line tools built on openipc-rs"
+readme = "README.md"
+homepage = "https://github.com/neelsani/openipc-rs"
+documentation = "https://openipc-rs.neels.dev/docs/native"
+keywords = ["openipc", "fpv", "wfb", "wifi", "realtek"]
+categories = ["command-line-utilities", "multimedia::video"]
+
+[dependencies]
+openipc-core = { version = "0.1.21", path = "../../crates/openipc-core" }
+openipc-rtl88xx = { version = "0.1.21", path = "../../crates/openipc-rtl88xx" }
+nusb.workspace = true
+crypto_box = "0.9"
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+[target.'cfg(unix)'.dependencies]
+tun = "0.8"
+
+[[bin]]
+name = "wfb_keygen"
+path = "src/bin/wfb_keygen.rs"
+
+[[bin]]
+name = "wfb_rx"
+path = "src/bin/wfb_rx.rs"
+
+[[bin]]
+name = "wfb_tx"
+path = "src/bin/wfb_tx.rs"
+
+[[bin]]
+name = "wfb_tx_cmd"
+path = "src/bin/wfb_tx_cmd.rs"
+
+[[bin]]
+name = "wfb_tun"
+path = "src/bin/wfb_tun.rs"
+
+[[bin]]
+name = "wfb_rtsp"
+path = "src/bin/wfb_rtsp.rs"

@@ -234,6 +234,18 @@ Current status:
   wrapper: thermal bucket, false-alarm counters, 8814 queue-depth registers,
   BB register reads, BB dbgport snapshots, Jaguar3 thermal tracking ticks, C2H
   payloads, and RTL8814 TX-status reports.
+- Software-only hardening tests now cover malformed RX aggregates, zero-length
+  descriptors, aggregate tail handling, C2H driver-info/shift offsets, PHY
+  status byte boundaries, CRC/ICV flag surfacing, firmware-header stripping,
+  chip-family TX descriptor selection, descriptor checksums, oversized TX
+  payload rejection, VHT descriptor fields, and center-channel mapping for
+  common 40/80 MHz channels.
+- Native register control transfers now go through a small fakeable transport
+  boundary with retry tests. Control transfers and normal bulk RX/TX retry
+  transient cancellation/timeouts and endpoint stalls, clearing the endpoint
+  halt before retrying stalled bulk endpoints. Disconnects, invalid requests,
+  unknown OS errors, and hardware faults still fail fast. Firmware bulk writes
+  keep a conservative no-replay policy on timeout.
 - The remaining work is hardware proof: cold-plug runs, register-trace
   comparison, and a fixture matrix across adapter models and operating systems.
 

@@ -13,6 +13,7 @@ crates/openipc-core       WFB, RTP, FEC, crypto, video and raw payload pipeline
 crates/openipc-rtl88xx    Realtek rtl88xx USB WiFi driver
 crates/openipc-web        wasm-bindgen package for browser/WebUSB apps
 apps/openipc-cli          Native command-line utilities
+apps/wfb-rs               WFB-style Rust command-line tools
 apps/openipc-station      React/Vite browser app and Tauri desktop app
 plugins/tauri-plugin-openipc-usb
                           Android USB and VPN permission bridge used by Station
@@ -27,6 +28,7 @@ scripts                   cleanup helpers
 | `openipc-core`    | [crates.io](https://crates.io/crates/openipc-core)    | Shared protocol code: WFB, FEC, RTP, crypto, video frame extraction, generic raw payload taps, adaptive-link packet logic. |
 | `openipc-rtl88xx` | [crates.io](https://crates.io/crates/openipc-rtl88xx) | Realtek rtl88xx USB WiFi driver/HAL for monitor receive and adaptive-link transmit.                                        |
 | `openipc-web`     | [crates.io](https://crates.io/crates/openipc-web)     | Rust/WASM bindings for browser WebUSB applications.                                                                        |
+| `wfb-rs`          | [crates.io](https://crates.io/crates/wfb-rs)          | WFB-style command-line tools backed by the Rust userland Realtek driver.                                                   |
 | `@openipc-rs/web` | [npm](https://www.npmjs.com/package/@openipc-rs/web)  | Generated npm package from `openipc-web`, with WASM, JS glue, and TypeScript definitions.                                  |
 
 ## Quick Start
@@ -90,6 +92,7 @@ Use the native CLI:
 cargo run -p openipc-cli -- list-supported
 cargo run -p openipc-cli -- probe
 cargo run -p openipc-cli -- recv --key gs.key --rf-channel 36 --adaptive-link
+cargo build -p wfb-rs # builds wfb_rx, wfb_tx, wfb_keygen, wfb_tx_cmd, wfb_tun, wfb_rtsp
 ```
 
 Build the WASM SDK:

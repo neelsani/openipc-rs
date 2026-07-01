@@ -40,7 +40,8 @@ commit runs the normal `master` path and the tag runs the release path.
 
 Pushes to tags like `v0.2.0` run the release publishing jobs after validation:
 
-- publishable `openipc-*` Rust crates publish to crates.io with
+- publishable Rust crates (`openipc-core`, `openipc-rtl88xx`, `openipc-web`,
+  and `wfb-rs`) publish to crates.io with
   `cargo publish --workspace`,
 - `@openipc-rs/web` builds with Bun and publishes to npm with npm trusted
   publishing,

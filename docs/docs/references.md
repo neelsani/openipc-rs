@@ -39,4 +39,5 @@ designing `openipc-rs`.
 - [openipc-core on crates.io](https://crates.io/crates/openipc-core)
 - [openipc-rtl88xx on crates.io](https://crates.io/crates/openipc-rtl88xx)
 - [openipc-web on crates.io](https://crates.io/crates/openipc-web)
+- [wfb-rs on crates.io](https://crates.io/crates/wfb-rs)
 - [@openipc-rs/web on npm](https://www.npmjs.com/package/@openipc-rs/web)

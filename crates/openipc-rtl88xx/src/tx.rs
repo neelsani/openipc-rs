@@ -312,7 +312,8 @@ mod tests {
     use super::*;
     use openipc_core::ieee80211::build_wfb_header_with_frame_type;
     use openipc_core::radiotap::{
-        build_radiotap_header, ChannelBandwidth, TxRadioParams, FRAME_TYPE_RTS,
+        build_radiotap_header, build_stream_radiotap, ChannelBandwidth, TxRadioParams,
+        FRAME_TYPE_RTS,
     };
     use openipc_core::ChannelId;
 
@@ -335,6 +336,47 @@ mod tests {
             checksum ^= le16(&copy, 2 * idx) ^ le16(&copy, 2 * idx + 1);
         }
         checksum
+    }
+
+    fn checksum_jaguar1_descriptor(desc: &[u8]) -> u16 {
+        let mut copy = desc.to_vec();
+        copy[28] = 0;
+        copy[29] = 0;
+        let mut checksum = 0u16;
+        for idx in 0..16 {
+            checksum ^= le16(&copy, idx);
+        }
+        checksum
+    }
+
+    #[test]
+    fn descriptor_selector_matches_chip_family() {
+        assert_eq!(
+            RealtekTxDescriptor::for_chip_family(ChipFamily::Rtl8812),
+            RealtekTxDescriptor::Jaguar1
+        );
+        assert_eq!(
+            RealtekTxDescriptor::for_chip_family(ChipFamily::Rtl8821),
+            RealtekTxDescriptor::Jaguar1
+        );
+        assert_eq!(
+            RealtekTxDescriptor::for_chip_family(ChipFamily::Rtl8814),
+            RealtekTxDescriptor::Rtl8814
+        );
+        assert_eq!(
+            RealtekTxDescriptor::for_chip_family(ChipFamily::Rtl8822c),
+            RealtekTxDescriptor::Jaguar3
+        );
+    }
+
+    #[test]
+    fn rejects_payload_larger_than_descriptor_length_field() {
+        let mut packet = vec![0x00, 0x00, 0x08, 0x00, 0, 0, 0, 0];
+        packet.extend(std::iter::repeat_n(0u8, u16::MAX as usize + 1));
+
+        let err = build_usb_tx_frame(&packet, RealtekTxOptions::default()).unwrap_err();
+
+        assert_eq!(err, RealtekTxError::PayloadTooLarge);
     }
 
     #[test]
@@ -361,6 +403,10 @@ mod tests {
         assert_eq!(test_bits(read_le32(&usb, 16), 0, 7), 0x0c);
         assert_eq!(test_bits(read_le32(&usb, 24), 0, 12), 1);
         assert_eq!(test_bits(read_le32(&usb, 32), 15, 1), 1);
+        assert_eq!(
+            test_bits(read_le32(&usb, 28), 0, 16) as u16,
+            checksum_jaguar1_descriptor(&usb[..TX_DESC_SIZE])
+        );
         assert_eq!(
             &usb[TX_DESC_SIZE..TX_DESC_SIZE + 2],
             &[FRAME_TYPE_RTS, 0x01]
@@ -460,6 +506,30 @@ mod tests {
         assert_eq!(test_bits(read_le32(&usb, 16), 0, 7), 0x0c + 5);
         assert_eq!(test_bits(read_le32(&usb, 20), 5, 2), 1);
         assert_eq!(test_bits(read_le32(&usb, 20), 4, 1), 1);
+    }
+
+    #[test]
+    fn vht_descriptor_sets_rate_id_rate_and_phy_flags() {
+        let mut mode = TxMode::vht(2, 3);
+        mode.bandwidth = ChannelBandwidth::Mhz80;
+        mode.short_gi = true;
+        mode.ldpc = true;
+        mode.stbc = true;
+        let mut packet = build_stream_radiotap(mode);
+        packet.extend_from_slice(&build_wfb_header_with_frame_type(
+            ChannelId::default_video(),
+            [0x10, 0x00],
+            FRAME_TYPE_RTS,
+        ));
+
+        let usb = build_usb_tx_frame(&packet, RealtekTxOptions::default()).unwrap();
+
+        assert_eq!(test_bits(read_le32(&usb, 4), 16, 5), 9);
+        assert_eq!(test_bits(read_le32(&usb, 16), 0, 7), 0x2c + 13);
+        assert_eq!(test_bits(read_le32(&usb, 20), 4, 1), 1);
+        assert_eq!(test_bits(read_le32(&usb, 20), 5, 2), 2);
+        assert_eq!(test_bits(read_le32(&usb, 20), 7, 1), 1);
+        assert_eq!(test_bits(read_le32(&usb, 20), 8, 2), 1);
     }
 
     #[test]

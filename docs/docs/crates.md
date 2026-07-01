@@ -14,7 +14,8 @@ two crates.
 | `openipc-rtl88xx`          | [crates.io](https://crates.io/crates/openipc-rtl88xx) | Opening supported Realtek USB WiFi adapters, running monitor-mode initialization, reading bulk-IN transfers, sending adaptive-link bulk-OUT packets, and setting TX power overrides.                                 |
 | `openipc-web`              | [crates.io](https://crates.io/crates/openipc-web)     | Rust/WASM bindings. Downstream Rust users normally do not call this directly unless they are building the npm package from source.                                                                                   |
 | `@openipc-rs/web`          | [npm](https://www.npmjs.com/package/@openipc-rs/web)  | Browser SDK generated from `openipc-web`: WASM, JavaScript glue, and TypeScript definitions for WebUSB apps.                                                                                                         |
-| `openipc-cli`              | Not published                                         | Native command-line utilities under `apps/openipc-cli` for probes, capture decoding, receive-loop testing, Annex-B output, and optional RTP UDP mirroring.                                                           |
+| `openipc-cli`              | Not published                                         | Native command-line utilities under `apps/openipc-cli` for probes, capture decoding, receive-loop testing, Annex-B output, and RTP UDP mirroring.                                                                    |
+| `wfb-rs`                   | [crates.io](https://crates.io/crates/wfb-rs)          | WFB-style command-line tools including `wfb_rx`, `wfb_tx`, `wfb_keygen`, `wfb_tx_cmd`, `wfb_tun`, and `wfb_rtsp` over the Rust userland driver.                                                                       |
 | `openipc-station`          | Not published                                         | The React/Vite station app and Tauri desktop shell under `apps/openipc-station`, including WebCodecs playback, route management, adaptive-link controls, and native VPN tunnel bridging where supported.             |
 | `tauri-plugin-openipc-usb` | Not published                                         | Local Tauri plugin used by Station's Android build to request USB/VPN permission through Android APIs and hand file descriptors to the Rust backend.                                                                 |
 
@@ -38,6 +39,15 @@ WASM loading boundary and exposes TypeScript-friendly classes such as
 Use `openipc-cli` when you want the existing command-line probes or a reference
 native receive loop. It is an app package, so libraries should depend on
 `openipc-core` and `openipc-rtl88xx` instead.
+
+Use `wfb-rs` when you specifically want WFB-ng-shaped command-line tools backed
+by the Rust userland Realtek driver. The binaries are Rust rewrites of the
+receive, transmit, key, control, tunnel, and RTSP helper roles: they are not
+wrappers around upstream WFB-ng. In particular, `wfb_rx` and `wfb_tx` do not
+use Linux pcap/PF_PACKET monitor interfaces. They open supported Realtek USB
+adapters directly through `nusb` and `openipc-rtl88xx`, so the main radio tools
+are intended for Linux, macOS, and Windows. `wfb_tun` is Unix-only because it
+depends on a TUN interface.
 
 `tauri-plugin-openipc-usb` is an app-support crate, not a public SDK. It exists
 because Android apps cannot enumerate USB devices from the normal Linux sysfs

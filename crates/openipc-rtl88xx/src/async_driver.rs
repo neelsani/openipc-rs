@@ -4,7 +4,9 @@
 //! wrap blocking `nusb` operations so the same HAL sequences can be shared
 //! across targets; call them from a worker or other blocking context.
 
-use nusb::transfer::{Buffer, Bulk, ControlIn, ControlOut, ControlType, In, Out, Recipient};
+use nusb::transfer::{Buffer, Bulk, In, Out, TransferError};
+#[cfg(target_arch = "wasm32")]
+use nusb::transfer::{ControlIn, ControlOut, ControlType, Recipient};
 #[cfg(not(target_arch = "wasm32"))]
 use nusb::MaybeFuture;
 
@@ -19,6 +21,14 @@ use crate::types::{
     ChipFamily, ChipInfo, DriverError, DriverOptions, InitReport, InitStatus, MonitorOptions,
     RadioConfig,
 };
+#[cfg(target_arch = "wasm32")]
+use crate::usb_recovery::CONTROL_RETRY_ATTEMPTS;
+use crate::usb_recovery::{
+    retry_delay_ms, should_retry_transfer_error, transfer_error, BULK_RETRY_ATTEMPTS,
+    FIRMWARE_BULK_RETRY_ATTEMPTS,
+};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::usb_transport::{read_register_with_recovery, write_register_with_recovery};
 use crate::PowerTrackingState;
 
 impl RealtekDevice {
@@ -222,13 +232,22 @@ impl RealtekDevice {
             .clear_halt()
             .await
             .map_err(|err| DriverError::Nusb(format!("clear halt on bulk IN failed: {err}")))?;
-        let buffer = endpoint.allocate(length);
-        endpoint.submit(buffer);
-        let completion = endpoint.next_complete().await;
-        completion
-            .status
-            .map_err(|err| DriverError::Nusb(format!("bulk IN transfer failed: {err}")))?;
-        Ok(completion.buffer[..completion.actual_len].to_vec())
+        for attempt in 0..BULK_RETRY_ATTEMPTS {
+            let buffer = endpoint.allocate(length);
+            endpoint.submit(buffer);
+            let completion = endpoint.next_complete().await;
+            match completion.status {
+                Ok(()) => return Ok(completion.buffer[..completion.actual_len].to_vec()),
+                Err(err) if should_retry_transfer_error(err, attempt, BULK_RETRY_ATTEMPTS) => {
+                    if err == TransferError::Stall {
+                        let _ = endpoint.clear_halt().await;
+                    }
+                    crate::time::sleep_ms(retry_delay_ms(attempt)).await;
+                }
+                Err(err) => return Err(transfer_error("bulk IN transfer failed", err)),
+            }
+        }
+        unreachable!("retry loop either returns or reports the final USB error")
     }
 
     /// Read a small batch of USB bulk-IN transfers from the receive endpoint.
@@ -273,11 +292,20 @@ impl RealtekDevice {
             .clear_halt()
             .wait()
             .map_err(|err| DriverError::Nusb(format!("clear halt on bulk IN failed: {err}")))?;
-        let completion = endpoint.transfer_blocking(endpoint.allocate(length), USB_TIMEOUT);
-        completion
-            .status
-            .map_err(|err| DriverError::Nusb(format!("bulk IN transfer failed: {err}")))?;
-        Ok(completion.buffer[..completion.actual_len].to_vec())
+        for attempt in 0..BULK_RETRY_ATTEMPTS {
+            let completion = endpoint.transfer_blocking(endpoint.allocate(length), USB_TIMEOUT);
+            match completion.status {
+                Ok(()) => return Ok(completion.buffer[..completion.actual_len].to_vec()),
+                Err(err) if should_retry_transfer_error(err, attempt, BULK_RETRY_ATTEMPTS) => {
+                    if err == TransferError::Stall {
+                        let _ = endpoint.clear_halt().wait();
+                    }
+                    crate::time::sleep_ms(retry_delay_ms(attempt)).await;
+                }
+                Err(err) => return Err(transfer_error("bulk IN transfer failed", err)),
+            }
+        }
+        unreachable!("retry loop either returns or reports the final USB error")
     }
 
     /// Read a small batch of USB bulk-IN transfers from the receive endpoint.
@@ -288,32 +316,52 @@ impl RealtekDevice {
         in_flight: usize,
     ) -> Result<Vec<Vec<u8>>, DriverError> {
         let count = in_flight.clamp(1, 16);
-        let mut endpoint = self
-            .interface
-            .endpoint::<Bulk, In>(self.bulk_in_ep)
-            .map_err(|err| DriverError::Nusb(format!("open bulk IN endpoint failed: {err}")))?;
-        endpoint
-            .clear_halt()
-            .wait()
-            .map_err(|err| DriverError::Nusb(format!("clear halt on bulk IN failed: {err}")))?;
-        for _ in 0..count {
-            let buffer = endpoint.allocate(length);
-            endpoint.submit(buffer);
+        for attempt in 0..BULK_RETRY_ATTEMPTS {
+            let mut endpoint = self
+                .interface
+                .endpoint::<Bulk, In>(self.bulk_in_ep)
+                .map_err(|err| DriverError::Nusb(format!("open bulk IN endpoint failed: {err}")))?;
+            endpoint
+                .clear_halt()
+                .wait()
+                .map_err(|err| DriverError::Nusb(format!("clear halt on bulk IN failed: {err}")))?;
+            for _ in 0..count {
+                let buffer = endpoint.allocate(length);
+                endpoint.submit(buffer);
+            }
+            let mut transfers = Vec::with_capacity(count);
+            let mut retry = false;
+            for _ in 0..count {
+                let Some(completion) = endpoint.wait_next_complete(USB_TIMEOUT) else {
+                    endpoint.cancel_all();
+                    if attempt + 1 < BULK_RETRY_ATTEMPTS {
+                        retry = true;
+                        break;
+                    }
+                    return Err(DriverError::Nusb(
+                        "bulk IN transfer timed out while reading in-flight batch".to_owned(),
+                    ));
+                };
+                match completion.status {
+                    Ok(()) => transfers.push(completion.buffer[..completion.actual_len].to_vec()),
+                    Err(err) if should_retry_transfer_error(err, attempt, BULK_RETRY_ATTEMPTS) => {
+                        endpoint.cancel_all();
+                        if err == TransferError::Stall {
+                            let _ = endpoint.clear_halt().wait();
+                        }
+                        retry = true;
+                        break;
+                    }
+                    Err(err) => return Err(transfer_error("bulk IN transfer failed", err)),
+                }
+            }
+            if retry {
+                crate::time::sleep_ms(retry_delay_ms(attempt)).await;
+                continue;
+            }
+            return Ok(transfers);
         }
-        let mut transfers = Vec::with_capacity(count);
-        for _ in 0..count {
-            let Some(completion) = endpoint.wait_next_complete(USB_TIMEOUT) else {
-                endpoint.cancel_all();
-                return Err(DriverError::Nusb(
-                    "bulk IN transfer timed out while reading in-flight batch".to_owned(),
-                ));
-            };
-            completion
-                .status
-                .map_err(|err| DriverError::Nusb(format!("bulk IN transfer failed: {err}")))?;
-            transfers.push(completion.buffer[..completion.actual_len].to_vec());
-        }
-        Ok(transfers)
+        unreachable!("retry loop either returns or reports the final USB error")
     }
 
     /// Write one USB bulk-OUT transfer to the transmit endpoint.
@@ -327,12 +375,21 @@ impl RealtekDevice {
             .clear_halt()
             .await
             .map_err(|err| DriverError::Nusb(format!("clear halt on bulk OUT failed: {err}")))?;
-        endpoint.submit(Buffer::from(transfer));
-        let completion = endpoint.next_complete().await;
-        completion
-            .status
-            .map_err(|err| DriverError::Nusb(format!("bulk OUT transfer failed: {err}")))?;
-        Ok(completion.actual_len)
+        for attempt in 0..BULK_RETRY_ATTEMPTS {
+            endpoint.submit(Buffer::from(transfer));
+            let completion = endpoint.next_complete().await;
+            match completion.status {
+                Ok(()) => return Ok(completion.actual_len),
+                Err(err) if should_retry_transfer_error(err, attempt, BULK_RETRY_ATTEMPTS) => {
+                    if err == TransferError::Stall {
+                        let _ = endpoint.clear_halt().await;
+                    }
+                    crate::time::sleep_ms(retry_delay_ms(attempt)).await;
+                }
+                Err(err) => return Err(transfer_error("bulk OUT transfer failed", err)),
+            }
+        }
+        unreachable!("retry loop either returns or reports the final USB error")
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -344,12 +401,23 @@ impl RealtekDevice {
             .interface
             .endpoint::<Bulk, Out>(self.bulk_out_ep)
             .map_err(|err| DriverError::Nusb(format!("open bulk OUT endpoint failed: {err}")))?;
-        endpoint.submit(Buffer::from(transfer));
-        let completion = endpoint.next_complete().await;
-        completion
-            .status
-            .map_err(|err| DriverError::Nusb(format!("raw bulk OUT transfer failed: {err}")))?;
-        Ok(completion.actual_len)
+        for attempt in 0..FIRMWARE_BULK_RETRY_ATTEMPTS {
+            endpoint.submit(Buffer::from(transfer));
+            let completion = endpoint.next_complete().await;
+            match completion.status {
+                Ok(()) => return Ok(completion.actual_len),
+                Err(err)
+                    if should_retry_transfer_error(err, attempt, FIRMWARE_BULK_RETRY_ATTEMPTS) =>
+                {
+                    if err == TransferError::Stall {
+                        let _ = endpoint.clear_halt().await;
+                    }
+                    crate::time::sleep_ms(retry_delay_ms(attempt)).await;
+                }
+                Err(err) => return Err(transfer_error("raw bulk OUT transfer failed", err)),
+            }
+        }
+        unreachable!("retry loop either returns or reports the final USB error")
     }
 
     /// Write one USB bulk-OUT transfer to the transmit endpoint.
@@ -363,11 +431,20 @@ impl RealtekDevice {
             .clear_halt()
             .wait()
             .map_err(|err| DriverError::Nusb(format!("clear halt on bulk OUT failed: {err}")))?;
-        let completion = endpoint.transfer_blocking(Buffer::from(transfer), USB_TIMEOUT);
-        completion
-            .status
-            .map_err(|err| DriverError::Nusb(format!("bulk OUT transfer failed: {err}")))?;
-        Ok(completion.actual_len)
+        for attempt in 0..BULK_RETRY_ATTEMPTS {
+            let completion = endpoint.transfer_blocking(Buffer::from(transfer), USB_TIMEOUT);
+            match completion.status {
+                Ok(()) => return Ok(completion.actual_len),
+                Err(err) if should_retry_transfer_error(err, attempt, BULK_RETRY_ATTEMPTS) => {
+                    if err == TransferError::Stall {
+                        let _ = endpoint.clear_halt().wait();
+                    }
+                    crate::time::sleep_ms(retry_delay_ms(attempt)).await;
+                }
+                Err(err) => return Err(transfer_error("bulk OUT transfer failed", err)),
+            }
+        }
+        unreachable!("retry loop either returns or reports the final USB error")
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -379,11 +456,23 @@ impl RealtekDevice {
             .interface
             .endpoint::<Bulk, Out>(self.bulk_out_ep)
             .map_err(|err| DriverError::Nusb(format!("open bulk OUT endpoint failed: {err}")))?;
-        let completion = endpoint.transfer_blocking(Buffer::from(transfer), USB_FIRMWARE_TIMEOUT);
-        completion
-            .status
-            .map_err(|err| DriverError::Nusb(format!("raw bulk OUT transfer failed: {err}")))?;
-        Ok(completion.actual_len)
+        for attempt in 0..FIRMWARE_BULK_RETRY_ATTEMPTS {
+            let completion =
+                endpoint.transfer_blocking(Buffer::from(transfer), USB_FIRMWARE_TIMEOUT);
+            match completion.status {
+                Ok(()) => return Ok(completion.actual_len),
+                Err(err)
+                    if should_retry_transfer_error(err, attempt, FIRMWARE_BULK_RETRY_ATTEMPTS) =>
+                {
+                    if err == TransferError::Stall {
+                        let _ = endpoint.clear_halt().wait();
+                    }
+                    crate::time::sleep_ms(retry_delay_ms(attempt)).await;
+                }
+                Err(err) => return Err(transfer_error("raw bulk OUT transfer failed", err)),
+            }
+        }
+        unreachable!("retry loop either returns or reports the final USB error")
     }
 
     /// Convert a radiotap + 802.11 packet into a Realtek TX frame and transmit it.
@@ -404,20 +493,35 @@ impl RealtekDevice {
         register: u16,
         len: u16,
     ) -> Result<Vec<u8>, DriverError> {
-        self.interface
-            .control_in(
-                ControlIn {
-                    control_type: ControlType::Vendor,
-                    recipient: Recipient::Device,
-                    request: REALTEK_VENDOR_READ_REQUEST,
-                    value: register,
-                    index: 0,
-                    length: len,
-                },
-                USB_TIMEOUT,
-            )
-            .await
-            .map_err(|err| DriverError::Nusb(format!("vendor read 0x{register:04x} failed: {err}")))
+        for attempt in 0..CONTROL_RETRY_ATTEMPTS {
+            match self
+                .interface
+                .control_in(
+                    ControlIn {
+                        control_type: ControlType::Vendor,
+                        recipient: Recipient::Device,
+                        request: REALTEK_VENDOR_READ_REQUEST,
+                        value: register,
+                        index: 0,
+                        length: len,
+                    },
+                    USB_TIMEOUT,
+                )
+                .await
+            {
+                Ok(bytes) => return Ok(bytes),
+                Err(err) if should_retry_transfer_error(err, attempt, CONTROL_RETRY_ATTEMPTS) => {
+                    crate::time::sleep_ms(retry_delay_ms(attempt)).await;
+                }
+                Err(err) => {
+                    return Err(transfer_error(
+                        format!("vendor read 0x{register:04x} failed"),
+                        err,
+                    ));
+                }
+            }
+        }
+        unreachable!("retry loop either returns or reports the final USB error")
     }
 
     /// Read raw bytes from a Realtek vendor register.
@@ -427,20 +531,7 @@ impl RealtekDevice {
         register: u16,
         len: u16,
     ) -> Result<Vec<u8>, DriverError> {
-        self.interface
-            .control_in(
-                ControlIn {
-                    control_type: ControlType::Vendor,
-                    recipient: Recipient::Device,
-                    request: REALTEK_VENDOR_READ_REQUEST,
-                    value: register,
-                    index: 0,
-                    length: len,
-                },
-                USB_TIMEOUT,
-            )
-            .wait()
-            .map_err(|err| DriverError::Nusb(format!("vendor read 0x{register:04x} failed: {err}")))
+        read_register_with_recovery(&self.interface, register, len)
     }
 
     /// Write raw bytes to a Realtek vendor register.
@@ -450,22 +541,35 @@ impl RealtekDevice {
         register: u16,
         bytes: &[u8],
     ) -> Result<(), DriverError> {
-        self.interface
-            .control_out(
-                ControlOut {
-                    control_type: ControlType::Vendor,
-                    recipient: Recipient::Device,
-                    request: REALTEK_VENDOR_WRITE_REQUEST,
-                    value: register,
-                    index: 0,
-                    data: bytes,
-                },
-                USB_TIMEOUT,
-            )
-            .await
-            .map_err(|err| {
-                DriverError::Nusb(format!("vendor write 0x{register:04x} failed: {err}"))
-            })
+        for attempt in 0..CONTROL_RETRY_ATTEMPTS {
+            match self
+                .interface
+                .control_out(
+                    ControlOut {
+                        control_type: ControlType::Vendor,
+                        recipient: Recipient::Device,
+                        request: REALTEK_VENDOR_WRITE_REQUEST,
+                        value: register,
+                        index: 0,
+                        data: bytes,
+                    },
+                    USB_TIMEOUT,
+                )
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(err) if should_retry_transfer_error(err, attempt, CONTROL_RETRY_ATTEMPTS) => {
+                    crate::time::sleep_ms(retry_delay_ms(attempt)).await;
+                }
+                Err(err) => {
+                    return Err(transfer_error(
+                        format!("vendor write 0x{register:04x} failed"),
+                        err,
+                    ));
+                }
+            }
+        }
+        unreachable!("retry loop either returns or reports the final USB error")
     }
 
     /// Write raw bytes to a Realtek vendor register.
@@ -475,22 +579,7 @@ impl RealtekDevice {
         register: u16,
         bytes: &[u8],
     ) -> Result<(), DriverError> {
-        self.interface
-            .control_out(
-                ControlOut {
-                    control_type: ControlType::Vendor,
-                    recipient: Recipient::Device,
-                    request: REALTEK_VENDOR_WRITE_REQUEST,
-                    value: register,
-                    index: 0,
-                    data: bytes,
-                },
-                USB_TIMEOUT,
-            )
-            .wait()
-            .map_err(|err| {
-                DriverError::Nusb(format!("vendor write 0x{register:04x} failed: {err}"))
-            })
+        write_register_with_recovery(&self.interface, register, bytes)
     }
 
     /// Read an 8-bit little-endian Realtek register value.

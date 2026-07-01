@@ -4,8 +4,12 @@ sidebar_position: 4
 
 # Native
 
-The native CLI lives in `apps/openipc-cli` and builds a binary named
-`openipc-rs`.
+Native command-line tools are split into two app packages:
+
+- `apps/openipc-cli` builds the general `openipc-rs` helper for adapter probes,
+  capture decoding, and OpenIPC receive-loop testing.
+- `apps/wfb-rs` builds WFB-style binaries for receive, transmit, key
+  generation, command control, tunneling, and simple RTSP proxying.
 
 For embedding the crates directly in your own Rust application, see
 [Rust Library Usage](./rust-library.md).
@@ -17,7 +21,64 @@ For embedding the crates directly in your own Rust application, see
 - receiving live OpenIPC video,
 - writing Annex-B H.264/H.265 output,
 - mirroring recovered RTP to UDP for compatibility testing,
-- exercising adaptive-link feedback without the station UI.
+- exercising adaptive-link feedback without the station UI,
+- running WFB-style userland tools over the Rust Realtek driver.
+
+The WFB-style tools are not pcap/PF_PACKET drop-in replacements for upstream
+`wfb-ng`. `wfb_rx` and `wfb_tx` open a supported Realtek USB adapter directly
+through `nusb` and `openipc-rtl88xx`.
+
+## Rust WFB-ng-Style Binaries
+
+`wfb-rs` is a Rust rewrite of the WFB-ng binary roles that are useful for
+OpenIPC FPV bring-up:
+
+- `wfb_rx` replaces the receive-side aggregator path with
+  Realtek USB bulk-IN reads, Rust RX descriptor parsing, WFB session/FEC
+  recovery, decryption, and UDP payload output.
+- `wfb_tx` replaces the transmit-side UDP-to-radio path with Rust WFB packet
+  creation, FEC, radiotap/802.11 header construction, Realtek TX descriptor
+  creation, and USB bulk-OUT injection.
+- `wfb_keygen`, `wfb_tx_cmd`, `wfb_tun`, and `wfb_rtsp` cover the supporting
+  key, control, tunnel, and RTP/RTSP helper roles.
+
+The important architectural difference from upstream WFB-ng is the radio
+boundary. Upstream WFB-ng normally expects a WiFi adapter that has already been
+configured by the operating-system driver and then talks through Linux monitor
+mode interfaces such as pcap/PF_PACKET. `wfb-rs` instead talks directly to
+supported Realtek USB adapters through the Rust `openipc-rtl88xx` userland
+driver. That means the same Rust code owns monitor initialization, RX aggregate
+parsing, TX descriptor generation, and frame injection.
+
+Because the radio path uses `nusb` instead of Linux-only monitor interfaces,
+the main RX/TX tools are designed to run on Linux, macOS, and Windows. Platform
+USB permissions and driver binding still matter: Linux may need udev rules,
+Windows needs a user-space USB-compatible driver binding, and macOS may show
+permission prompts. `wfb_tun` is the exception in this package today because it
+uses a Unix TUN interface.
+
+This is not a binding to upstream WFB-ng and it does not link against
+`devourer`. The implementation is written in Rust on top of `openipc-core` and
+`openipc-rtl88xx`, with `nusb` providing the cross-platform USB transport.
+Some helper roles are intentionally smaller than upstream, so check the parity
+table below before relying on a specific WFB-ng flag or mode.
+
+## Binaries
+
+```sh
+cargo build -p openipc-cli
+cargo build -p wfb-rs
+```
+
+| Binary        | Purpose                                                                 |
+| ------------- | ----------------------------------------------------------------------- |
+| `openipc-rs`  | General probe, capture decode, and video receive helper.                |
+| `wfb_keygen`  | Generate WFB-compatible `drone.key` and `gs.key`.                       |
+| `wfb_rx`      | Realtek USB RX to recovered WFB payload UDP output.                     |
+| `wfb_tx`      | UDP input to WFB/FEC/radiotap/Realtek USB frame injection.              |
+| `wfb_tx_cmd`  | Control a running `wfb_tx` FEC/radio settings over UDP.                 |
+| `wfb_tun`     | Length-prefixed WFB tunnel UDP/TUN bridge on Unix.                      |
+| `wfb_rtsp`    | Minimal RTSP/RTP UDP proxy for local H.264/H.265 RTP streams.           |
 
 ## List Devices
 
@@ -96,6 +157,73 @@ as ground-station secret key plus air-side public key for the TX direction. Use
 `--alink-tx-power` is a manual Realtek TXAGC override for the feedback uplink.
 Adaptive link itself sends quality information to the air unit; it does not mean
 the ground station automatically chooses RF power on its own.
+
+## WFB-Style Payload RX/TX
+
+Generate key files:
+
+```sh
+cargo run -p wfb-rs --bin wfb_keygen
+```
+
+Receive raw WFB payloads on the default video radio port and forward them to
+UDP:
+
+```sh
+cargo run -p wfb-rs --bin wfb_rx -- \
+  -K gs.key \
+  -i 7669206 \
+  -p 0 \
+  -c 127.0.0.1 \
+  -u 5600 \
+  --rf-channel 161
+```
+
+Transmit UDP payloads over the adapter:
+
+```sh
+cargo run -p wfb-rs --bin wfb_tx -- \
+  -K drone.key \
+  -i 7669206 \
+  -p 0 \
+  -u 5600 \
+  -k 8 \
+  -n 12 \
+  -J 10 \
+  -E 5000 \
+  --rf-channel 161 \
+  -C 7000
+```
+
+Change a running transmitter:
+
+```sh
+cargo run -p wfb-rs --bin wfb_tx_cmd -- 7000 get_radio
+cargo run -p wfb-rs --bin wfb_tx_cmd -- 7000 set_fec -k 4 -n 8
+```
+
+Bridge tunnel payloads to a TUN device:
+
+```sh
+sudo target/debug/wfb_tun -t wfb-tun -a 10.5.0.2/24 -l 5800 -c 127.0.0.1 -u 5801
+```
+
+Expose recovered RTP packets as a simple RTSP stream:
+
+```sh
+target/debug/wfb_rtsp -P 5600 -p 8554 -u /wfb h264
+```
+
+The Rust `wfb_rtsp` helper is intentionally smaller than upstream WFB-ng's
+GStreamer wrapper: it forwards RTP from UDP to the RTSP client's selected RTP
+port. It does not depayload, jitter-buffer, or repacketize.
+
+`wfb_keygen` currently implements random key generation. The original
+password-derived mode uses libsodium Argon2i and is intentionally not faked
+with a different derivation.
+
+For the full upstream-option parity table, including unsupported and remaining
+no-op flags for each WFB-style binary, see `apps/wfb-rs/README.md`.
 
 ## USB Permissions
 

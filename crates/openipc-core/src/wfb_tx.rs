@@ -10,8 +10,8 @@ use crate::radiotap::{build_radiotap_header, TxRadioParams};
 use crate::wfb::{
     WfbError, CHACHA20_POLY1305_KEY_LEN, CRYPTO_BOX_NONCE_LEN, CRYPTO_BOX_PUBLICKEY_LEN,
     CRYPTO_BOX_SECRETKEY_LEN, MAX_BLOCK_IDX, MAX_FEC_PAYLOAD, MAX_PAYLOAD_SIZE, WBLOCK_HDR_LEN,
-    WFB_FEC_VDM_RS, WFB_PACKET_DATA, WFB_PACKET_KEY, WPACKET_HDR_LEN, WSESSION_DATA_LEN,
-    WSESSION_HDR_LEN,
+    WFB_FEC_VDM_RS, WFB_PACKET_DATA, WFB_PACKET_FEC_ONLY, WFB_PACKET_KEY, WPACKET_HDR_LEN,
+    WSESSION_DATA_LEN, WSESSION_HDR_LEN,
 };
 
 /// Key material used by the ground station when transmitting WFB uplink data.
@@ -127,7 +127,7 @@ impl WfbTransmitter {
     /// Build the current session packet as a radiotap + 802.11 radio packet.
     pub fn session_radio_packet(&mut self, params: TxRadioParams) -> Vec<u8> {
         let packet = self.session_packet.clone();
-        self.wrap_forwarder_packet(&packet, params)
+        self.radio_packet_for_forwarder_packet(&packet, params)
     }
 
     /// Fragment, encrypt, FEC-encode, and wrap one payload for radio injection.
@@ -139,8 +139,51 @@ impl WfbTransmitter {
         let packets = self.forwarder_packets_for_payload(payload, 0)?;
         Ok(packets
             .into_iter()
-            .map(|packet| self.wrap_forwarder_packet(&packet, params))
+            .map(|packet| self.radio_packet_for_forwarder_packet(&packet, params))
             .collect())
+    }
+
+    /// Wrap a WFB forwarder packet in radiotap + 802.11 headers for injection.
+    ///
+    /// This is useful for applications that need access to the raw forwarder
+    /// packet first, for example to mirror it to a debug UDP path or to delay
+    /// parity fragments before the final radio wrapping step.
+    pub fn radio_packet_for_forwarder_packet(
+        &mut self,
+        forwarder_packet: &[u8],
+        params: TxRadioParams,
+    ) -> Vec<u8> {
+        self.wrap_forwarder_packet(forwarder_packet, params)
+    }
+
+    /// Return true when the current FEC block contains at least one fragment.
+    pub const fn has_open_fec_block(&self) -> bool {
+        self.fragment_index != 0
+    }
+
+    /// Emit one FEC-only empty fragment to advance or close a partial block.
+    ///
+    /// WFB-ng uses this when no input payload arrives for `fec_timeout`: each
+    /// timeout contributes one empty source fragment until the current block is
+    /// complete and parity can be generated. If no block is open, no packet is
+    /// emitted.
+    pub fn forwarder_packets_for_fec_only(&mut self) -> Result<Vec<Vec<u8>>, WfbError> {
+        if !self.has_open_fec_block() {
+            return Ok(Vec::new());
+        }
+        self.forwarder_packets_for_payload(&[], WFB_PACKET_FEC_ONLY)
+    }
+
+    /// Emit enough FEC-only empty fragments to close a partial FEC block.
+    ///
+    /// This mirrors the control-path behavior in WFB-ng when FEC settings are
+    /// changed: the old block is completed before a new session is started.
+    pub fn close_fec_block(&mut self) -> Result<Vec<Vec<u8>>, WfbError> {
+        let mut out = Vec::new();
+        while self.has_open_fec_block() {
+            out.extend(self.forwarder_packets_for_fec_only()?);
+        }
+        Ok(out)
     }
 
     /// Fragment, encrypt, and FEC-encode one payload as WFB forwarder packets.
@@ -152,6 +195,9 @@ impl WfbTransmitter {
         payload: &[u8],
         flags: u8,
     ) -> Result<Vec<Vec<u8>>, WfbError> {
+        if flags & WFB_PACKET_FEC_ONLY != 0 && !self.has_open_fec_block() {
+            return Ok(Vec::new());
+        }
         if payload.len() > MAX_PAYLOAD_SIZE {
             return Err(WfbError::PayloadTooLarge);
         }
@@ -311,5 +357,33 @@ mod tests {
             crate::wfb::WfbEvent::Payload(payload) => assert_eq!(payload.payload, b"hello"),
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn fec_only_closes_partial_blocks_without_payload_events() {
+        let channel = ChannelId::from_link_port(0x112233, crate::RadioPort::TunnelTx);
+        let (tx_keys, rx_keys) = linked_keypairs();
+        let mut tx = WfbTransmitter::new(channel, tx_keys, 42, 2, 3).unwrap();
+        let mut rx = WfbReceiver::new(channel, rx_keys, 0);
+
+        rx.push_forwarder_packet(tx.session_forwarder_packet())
+            .unwrap();
+        let first = tx.forwarder_packets_for_payload(b"hello", 0).unwrap();
+        assert_eq!(first.len(), 1);
+        assert!(tx.has_open_fec_block());
+
+        let close = tx.forwarder_packets_for_fec_only().unwrap();
+        assert_eq!(close.len(), 2);
+        assert!(!tx.has_open_fec_block());
+
+        let mut payloads = Vec::new();
+        for packet in first.iter().chain(close.iter()) {
+            for event in rx.push_forwarder_packet(packet).unwrap() {
+                if let crate::wfb::WfbEvent::Payload(payload) = event {
+                    payloads.push(payload.payload);
+                }
+            }
+        }
+        assert_eq!(payloads, vec![b"hello".to_vec()]);
     }
 }

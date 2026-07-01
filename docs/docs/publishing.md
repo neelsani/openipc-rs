@@ -147,13 +147,14 @@ The library crates are intended for crates.io publication:
 - `openipc-core`
 - `openipc-rtl88xx`
 - `openipc-web`
+- `wfb-rs`
 
 `apps/openipc-cli`, `apps/openipc-station/src-tauri`, and the local Android USB
 plugin are versioned with the workspace but marked `publish = false`.
 
 `openipc-core` is the easiest crate to publish because it owns protocol logic
-and does not need USB access. The hardware and WASM crates depend on the
-published `nusb-webusb` package while importing it as `nusb`:
+and does not need USB access. `openipc-rtl88xx`, `openipc-web`, and `wfb-rs`
+depend on the published `nusb-webusb` package while importing it as `nusb`:
 
 ```toml
 nusb = { package = "nusb-webusb", version = "0.2.3" }

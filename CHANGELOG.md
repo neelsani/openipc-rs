@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.22 - 2026-07-01
+
+### Features
+- Feat: add publishable wfb-rs tools (86555b9)
+
+
 ## 0.1.21 - 2026-06-30
 
 ### Changes

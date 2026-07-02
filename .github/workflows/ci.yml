@@ -319,7 +319,7 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: apps/nebulus
-          command: pages deploy dist --project-name=openipc-rs-nebulus --branch=master
+          command: pages deploy dist --project-name=nebulus --branch=master
 
       - name: Skip Nebulus deploy
         if: env.CLOUDFLARE_API_TOKEN == '' || env.CLOUDFLARE_ACCOUNT_ID == ''

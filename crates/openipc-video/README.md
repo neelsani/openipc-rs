@@ -12,7 +12,7 @@ random-access frame, and returns the newest retained decoder surface.
 | macOS   | VideoToolbox             | IOSurface-backed `CVPixelBuffer`            |
 | Linux   | `cros-codecs` + VA-API   | GBM/DMA-backed frame                        |
 | Windows | Media Foundation + D3D11 | `ID3D11Texture2D` subresource               |
-| Android | NDK MediaCodec           | `AImage` with an acquired `AHardwareBuffer` |
+| Android | NDK MediaCodec           | `AImage`/`AHardwareBuffer`, or direct output surface |
 | Web     | WebCodecs                | browser `VideoFrame`                        |
 
 Cargo only enables the dependency set for the current target.
@@ -71,7 +71,10 @@ embedding application controls filtering and output.
   readback context reuses the staging texture across frames.
 - Android: import `AndroidVideoFrame::hardware_buffer()` with EGL, Vulkan, or a
   renderer that supports `AHardwareBuffer`, or use `with_mapped_planes()` for
-  portable CPU presentation. Keep the frame alive through draw.
+  portable CPU presentation. Keep the frame alive through draw. For a display
+  path that does not need readable pixels, construct `AndroidSurfaceDecoder`
+  with an `ANativeWindow`; MediaCodec then renders directly to that surface and
+  returns lightweight `AndroidPresentedFrame` notifications.
 - Web: borrow `WebVideoFrame::video_frame()` for canvas/WebGPU, or use
   `clone_video_frame()` when transferring ownership to JavaScript.
 
@@ -83,9 +86,12 @@ or render thread selected by the app.
 
 Android requires API 26 or newer. The NDK API chooses the preferred decoder but
 does not expose reliable hardware/software classification at that API level.
-The backend requests a flexible YUV `AImageReader` surface with CPU-read and
-GPU-sampled usage, falling back to CPU-readable usage when necessary, and
-retains the matching hardware buffer.
+`AndroidDecoder` requests a flexible YUV `AImageReader` surface with CPU-read
+and GPU-sampled usage, falling back to CPU-readable usage when necessary, and
+retains the matching hardware buffer. `AndroidSurfaceDecoder` accepts an
+application-owned `ANativeWindow` and bypasses `AImageReader` and plane mapping.
+It is the preferred path for direct display through `SurfaceTexture`,
+`SurfaceView`, or another Android compositor surface.
 
 The web backend requires WebCodecs in a secure context. Call
 `WebDecoder::is_config_supported` once parameter sets are available to check

@@ -13,7 +13,7 @@ from the decoder provided by the current platform.
 | macOS   | `MacOsDecoder`   | VideoToolbox                  | IOSurface-backed `CVPixelBuffer`            |
 | Linux   | `LinuxDecoder`   | `cros-codecs` + VA-API        | GBM/DMA-backed frame                        |
 | Windows | `WindowsDecoder` | Media Foundation + DXVA/D3D11 | `ID3D11Texture2D` subresource               |
-| Android | `AndroidDecoder` | NDK MediaCodec                | `AImage` with an acquired `AHardwareBuffer` |
+| Android | `AndroidDecoder` / `AndroidSurfaceDecoder` | NDK MediaCodec | readable `AImage`, or direct output surface |
 | Web     | `WebDecoder`     | WebCodecs                     | browser `VideoFrame`                        |
 
 `PlatformDecoder` is an alias for the matching row. Target dependencies are
@@ -131,10 +131,11 @@ retained output according to that target's rules.
   its worker; retained Linux outputs are `Send + Sync`.
 - Keep the Media Foundation transform on its creating worker. Retained D3D11
   outputs are `Send + Sync`.
-- Keep Android `AImage` leases on the app's chosen decode/render threads and do
-  not hold more frames than the configured image limit. A frame may move
-  between those threads under exclusive ownership; concurrent access to one
-  frame is not supported.
+- Keep `AndroidDecoder` `AImage` leases on the app's chosen decode/render
+  threads and do not hold more frames than the configured image limit. A frame
+  may move between those threads under exclusive ownership. With
+  `AndroidSurfaceDecoder`, keep MediaCodec on the decode worker and update the
+  SurfaceTexture only from the graphics-context thread.
 - `WebDecoder` and `WebVideoFrame` are local-executor values because browser
   objects are not Rust `Send` types. Let the browser event loop run between
   submissions and output polls.
@@ -194,16 +195,49 @@ texture, so repeated readback does not allocate a D3D11 resource per frame.
 
 ## Android: MediaCodec
 
-The Android backend requires API 26 or newer. It configures NDK MediaCodec with
-H.264 `csd-0`/`csd-1` or an H.265 `csd-0`, and sends decoded output to a
-flexible YUV 4:2:0 `AImageReader` surface with CPU-read and GPU-sampled usage.
-Devices that reject the combined usage fall back to CPU-readable YUV output.
+The Android backends require API 26 or newer. Both configure NDK MediaCodec with
+H.264 `csd-0`/`csd-1` or an H.265 `csd-0` and share parameter-set, keyframe,
+backpressure, and latest-frame behavior.
+
+`AndroidDecoder` sends output to a flexible YUV 4:2:0 `AImageReader` surface
+with CPU-read and GPU-sampled usage. Devices that reject the combined usage
+fall back to CPU-readable YUV output.
 
 `AndroidVideoFrame` owns both the `AImage` lease and an acquired
 `AHardwareBufferRef`. Import `hardware_buffer()` through EGL/OpenGL ES, Vulkan,
 or another compatible renderer. The buffer remains valid until the Rust frame
 is dropped. `timestamp_ns()` carries MediaCodec's presentation timestamp and
 `native_format()` identifies the hardware-buffer format.
+
+`AndroidSurfaceDecoder::new(options, window)` instead gives MediaCodec an
+application-owned `ANativeWindow`. It returns an `AndroidPresentedFrame` when
+an output buffer has been released to the surface, but it never maps decoded
+pixels. This is the lowest-overhead option for `SurfaceTexture`, `SurfaceView`,
+or another renderer-owned Android surface. Nebulus uses a SurfaceTexture-backed
+external OES texture so MediaCodec output is sampled directly by egui's GLES
+paint callback.
+
+```rust,no_run
+# #[cfg(target_os = "android")]
+# fn create(
+#     window: ndk::native_window::NativeWindow,
+# ) -> Result<openipc_video::AndroidSurfaceDecoder, openipc_video::VideoError> {
+use openipc_video::{AndroidSurfaceDecoder, DecoderOptions};
+
+let decoder = AndroidSurfaceDecoder::new(
+    DecoderOptions {
+        low_latency: true,
+        ..DecoderOptions::default()
+    },
+    window,
+)?;
+# Ok(decoder)
+# }
+```
+
+The surface must outlive the decoder. For SurfaceTexture, create the external
+OES texture while the GLES context is current, pass its Java `Surface` to
+`ANativeWindow_fromSurface`, and call `updateTexImage` on that same GLES thread.
 
 Set an Android app's minimum SDK to at least 26 before linking this backend.
 MediaCodec's system-selected decoder may still be software on unusual devices;

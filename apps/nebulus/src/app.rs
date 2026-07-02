@@ -55,6 +55,7 @@ pub struct NebulusApp {
     rate_window_decoded: u64,
     rate_window_rendered: u64,
     last_rate_fec: openipc_core::FecCounters,
+    next_log_sequence: u64,
 }
 
 impl NebulusApp {
@@ -69,6 +70,11 @@ impl NebulusApp {
         } else {
             "Saved gs.key".to_owned()
         };
+        let (video_renderer, video_renderer_error) =
+            match crate::video::PlatformVideoRenderer::new(context) {
+                Ok(renderer) => (Some(renderer), None),
+                Err(error) => (None, Some(error)),
+            };
         let mut app = Self {
             settings,
             state: ReceiverState::Idle,
@@ -88,7 +94,7 @@ impl NebulusApp {
             active_tab: crate::ui::PanelTab::Settings,
             runtime: Runtime::new(context.egui_ctx.clone()),
             texture: None,
-            video_renderer: crate::video::PlatformVideoRenderer::new(context).ok(),
+            video_renderer,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             desktop_tray: None,
             frame_size: None,
@@ -106,6 +112,7 @@ impl NebulusApp {
             rate_window_decoded: 0,
             rate_window_rendered: 0,
             last_rate_fec: openipc_core::FecCounters::default(),
+            next_log_sequence: 1,
         };
         crate::ui::theme::apply(&context.egui_ctx, app.settings.gui_theme);
         app.settings.interface_scale_percent = app.settings.interface_scale_percent.clamp(75, 150);
@@ -118,6 +125,13 @@ impl NebulusApp {
             Err(error) => app.log(LogLevel::Warn, "tray", error),
         }
         app.log(LogLevel::Info, "app", "Nebulus ready");
+        if let Some(error) = video_renderer_error {
+            app.log(
+                LogLevel::Error,
+                "video",
+                format!("Video renderer initialization failed: {error}"),
+            );
+        }
         app.log(
             LogLevel::Debug,
             "app",
@@ -149,6 +163,11 @@ impl NebulusApp {
 
     fn start_request(&self) -> StartRequest {
         StartRequest {
+            #[cfg(target_os = "android")]
+            video_output: self
+                .video_renderer
+                .as_ref()
+                .map(crate::video::PlatformVideoRenderer::output_window),
             device_id: self.settings.device_id.clone(),
             channel: self.settings.channel,
             channel_width_mhz: self.settings.channel_width_mhz,
@@ -710,7 +729,10 @@ impl NebulusApp {
         if self.logs.len() >= 1_000 {
             self.logs.drain(..100);
         }
+        let sequence = self.next_log_sequence;
+        self.next_log_sequence = self.next_log_sequence.wrapping_add(1).max(1);
         self.logs.push(LogEntry {
+            sequence,
             elapsed_seconds: self.started_at.elapsed().as_secs_f64(),
             level,
             target: target.into(),
@@ -784,9 +806,9 @@ fn fec_window_percentages(total: u64, recovered: u64, lost: u64) -> (f64, f64) {
 impl eframe::App for NebulusApp {
     fn logic(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         crate::logging::set_level(self.settings.diagnostic_verbosity.log_level());
-        // Egui may run more than one sizing pass for a frame. Mutating the log
-        // rows between those passes changes widget identity and can trigger a
-        // self-amplifying stream of layout warnings.
+        // Egui may run more than one sizing pass for a frame. All external
+        // state must be applied once so widget identity and geometry remain
+        // stable throughout the remaining passes.
         if context.current_pass_index() == 0 {
             for record in crate::logging::drain() {
                 self.log(
@@ -795,10 +817,10 @@ impl eframe::App for NebulusApp {
                     record.message,
                 );
             }
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            self.process_tray(context);
+            self.process_events(context);
         }
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        self.process_tray(context);
-        self.process_events(context);
         if self.state == ReceiverState::Receiving {
             context.request_repaint_after(std::time::Duration::from_millis(16));
         }

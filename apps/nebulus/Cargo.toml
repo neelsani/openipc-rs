@@ -42,7 +42,7 @@ rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] 
 [target.'cfg(target_os = "linux")'.dependencies]
 eframe = { version = "0.35", default-features = false, features = ["wgpu", "wayland", "x11"] }
 
-[target.'cfg(any(target_os = "macos", target_os = "android"))'.dependencies]
+[target.'cfg(target_os = "macos")'.dependencies]
 eframe = { version = "0.35", default-features = false, features = ["wgpu"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -54,13 +54,17 @@ tray-icon = "0.24.1"
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { version = "0.6", features = ["native-activity"] }
+eframe = { version = "0.35", default-features = false, features = ["glow"] }
+egui_glow = "0.35"
 jni = "0.22.4"
 libc = "0.2"
 log = "0.4"
+ndk = { version = "0.9", default-features = false, features = ["nativewindow", "api-level-26"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 console_error_panic_hook = "0.1"
 eframe = { version = "0.35", default-features = false, features = ["glow"] }
+egui_glow = "0.35"
 futures-util = "0.3"
 js-sys = "0.3"
 rfd = { version = "0.17.2", default-features = false }
@@ -98,6 +102,12 @@ web-sys = { version = "0.3", features = [
 package = "dev.neels.openipc.nebulus"
 apk_name = "Nebulus"
 java_sources = "android/java"
+build_targets = [
+    "aarch64-linux-android",
+    "armv7-linux-androideabi",
+    "x86_64-linux-android",
+    "i686-linux-android",
+]
 
 [package.metadata.android.sdk]
 min_sdk_version = 26

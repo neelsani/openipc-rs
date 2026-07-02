@@ -86,7 +86,7 @@ pub(crate) type NativeVideoSurface = openipc_video::LinuxVideoFrame;
 #[cfg(target_os = "windows")]
 pub(crate) type NativeVideoSurface = openipc_video::WindowsVideoFrame;
 #[cfg(target_os = "android")]
-pub(crate) type NativeVideoSurface = crate::video::AndroidYuvFrame;
+pub(crate) type NativeVideoSurface = openipc_video::AndroidPresentedFrame;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub(crate) type NativeVideoSurface = openipc_video::WebVideoFrame;
 
@@ -102,6 +102,8 @@ pub(crate) struct UsbDeviceInfo {
 /// Configuration sent from the UI to a receive worker.
 #[derive(Debug, Clone)]
 pub(crate) struct StartRequest {
+    #[cfg(target_os = "android")]
+    pub(crate) video_output: Option<ndk::native_window::NativeWindow>,
     pub(crate) device_id: Option<String>,
     pub(crate) channel: u8,
     pub(crate) channel_width_mhz: u16,

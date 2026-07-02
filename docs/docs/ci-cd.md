@@ -22,7 +22,7 @@ pushes to `master`, `v*` tags, and manual dispatch.
 | `Publish Crates.io Packages`     | Publishes the workspace crates on `v*` tags.                                                                                                                           |
 | `Publish WASM SDK To npm`        | Builds `@openipc-rs/web` with Bun and publishes it with npm trusted publishing on `v*` tags.                                                                           |
 | `Nebulus Desktop Release`        | Builds and packages Nebulus for all six desktop targets on `v*` tags.                                                                                                  |
-| `Nebulus Android Release`        | Builds a signed Nebulus arm64 APK with `cargo-apk2` on `v*` tags.                                                                                                      |
+| `Nebulus Android Release`        | Builds one signed, multi-ABI Nebulus APK with `cargo-apk2` on `v*` tags.                                                                                                |
 | `Publish Nebulus GitHub Release` | Collects all platform artifacts and checksums into one GitHub Release.                                                                                                 |
 
 ## Event Behavior
@@ -48,9 +48,9 @@ Pushes to tags like `v0.2.0` run the release publishing jobs after validation:
   `cargo publish --workspace`,
 - `@openipc-rs/web` builds with Bun and publishes to npm with npm trusted
   publishing,
-- Nebulus builds for six desktop targets and one Android target,
+- Nebulus builds for six desktop targets and four Android ABIs,
 - after both package publishers succeed, a final job collects the platform
-  archives, APK, and SHA-256 files into one GitHub Release for the tag.
+  installers, executables, APK, and SHA-256 files into one GitHub Release.
 
 Desktop release targets:
 
@@ -63,16 +63,16 @@ Desktop release targets:
 | `windows-x64`         | `windows-2025`     | `x86_64-pc-windows-msvc`    |
 | `windows-arm64`       | `windows-11-arm`   | `aarch64-pc-windows-msvc`   |
 
-Linux releases are portable `.tar.gz` archives built on Ubuntu. macOS releases
-are ad-hoc-signed `.app.zip` bundles. Windows releases are `.zip` archives that
-include `Nebulus.exe` and the architecture-matched `wintun.dll` needed by the
-optional VPN feature.
+Linux releases are architecture-labelled executables built on Ubuntu. macOS
+releases are ad-hoc-signed `.dmg` disk images. Windows releases are installer
+`.exe` files that install both Nebulus and the architecture-matched
+`wintun.dll` needed by the optional VPN feature.
 
 Android release artifacts:
 
-| Release label   | GitHub runner   | Android/Rust target     | Artifacts       |
-| --------------- | --------------- | ----------------------- | --------------- |
-| `android-arm64` | `ubuntu-latest` | `aarch64-linux-android` | installable APK |
+| Release label       | GitHub runner   | Included Android ABIs                    | Artifact        |
+| ------------------- | --------------- | ---------------------------------------- | --------------- |
+| `android-universal` | `ubuntu-latest` | arm64-v8a, armeabi-v7a, x86_64, and x86 | installable APK |
 
 Required repository secret:
 
@@ -88,13 +88,17 @@ The release jobs use the built-in `GITHUB_TOKEN`. Desktop assets use names such
 as:
 
 ```text
-nebulus-linux-x64-0.2.0.tar.gz
-nebulus-macos-apple-silicon-0.2.0.zip
-nebulus-windows-arm64-0.2.0.zip
+nebulus-linux-x64-0.2.0
+nebulus-macos-apple-silicon-0.2.0.dmg
+nebulus-windows-arm64-0.2.0.exe
+nebulus-android-universal-0.2.0.apk
 ```
 
-macOS bundles are ad-hoc signed and are not notarized. Windows and Linux
-archives are not code-signed.
+The Linux asset has no extension and may need `chmod +x` after download. It is
+not an AppImage: the target system still needs the Linux runtime libraries
+listed in the Nebulus and `openipc-video` documentation. macOS bundles are
+ad-hoc signed and are not notarized. Windows installers and Linux executables
+are not code-signed.
 
 For Android releases, configure both secrets to keep a stable signing identity:
 

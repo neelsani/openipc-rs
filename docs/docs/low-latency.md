@@ -15,11 +15,12 @@ The receiver worker keeps four USB bulk-IN transfers posted. It parses Realtek
 aggregates, advances WFB/FEC state, depacketizes RTP, and submits complete access
 units to `openipc-video`. The UI thread does not wait on USB or codec work.
 
-The decoder accepts at most three access units in flight. Decoded output is a
+The decoder uses a small platform-bounded input queue. Decoded output is a
 single latest-frame slot: a newer native surface replaces an older surface that
-egui has not presented. Native targets upload NV12 or YUV planes to persistent
-GPU textures and perform color conversion in a shader. CPU RGBA conversion is a
-compatibility fallback.
+egui has not presented. Desktop targets upload NV12 or YUV planes to persistent
+GPU textures and perform color conversion in a shader. Android instead renders
+MediaCodec output directly into a SurfaceTexture external GLES texture, avoiding
+decoded-plane mapping and per-frame texture upload.
 
 ## Browser Path
 
@@ -38,7 +39,7 @@ requests are event-driven; Nebulus does not busy-loop while idle.
 - Four USB reads stay in flight.
 - RTP reordering is disabled by default; enable it only for measured
   out-of-order delivery.
-- Decoder input is bounded to three access units.
+- Decoder input is bounded per platform; overload drops input instead of growing latency.
 - Decoded output is latest-only.
 - Runtime metrics and counters are coalesced before the UI consumes them.
 - Audio uses a short scheduling queue to absorb output-device jitter without

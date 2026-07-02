@@ -10,7 +10,7 @@ use std::{
 use android_activity::AndroidApp;
 use jni::{
     jni_sig, jni_str,
-    objects::{Global, JByteArray, JClass, JObject, JString},
+    objects::{Global, JByteArray, JClass, JFloatArray, JObject, JString},
     vm::JavaVM,
     EnvUnowned, JValue,
 };
@@ -46,6 +46,124 @@ pub(crate) struct OpenedUsbDevice {
 pub(crate) struct OpenedVpn {
     pub(crate) fd: i32,
     pub(crate) interface_name: String,
+}
+
+/// Java SurfaceTexture and its native producer window used by MediaCodec.
+pub(crate) struct AndroidVideoSurface {
+    app: AndroidApp,
+    vm: JavaVM,
+    surface: Global<JObject<'static>>,
+    window: ndk::native_window::NativeWindow,
+}
+
+impl AndroidVideoSurface {
+    pub(crate) fn create(texture_id: u32) -> Result<Self, String> {
+        let app = app()?;
+        let vm = java_vm(&app)?;
+        let (surface, window) = vm
+            .attach_current_thread(|env| {
+                let raw_activity = app.activity_as_ptr() as jni::sys::jobject;
+                // SAFETY: android-activity owns this activity global reference.
+                let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&raw_activity)? };
+                let local_surface = env
+                    .call_method(
+                        &activity,
+                        jni_str!("createVideoSurface"),
+                        jni_sig!("(I)Landroid/view/Surface;"),
+                        &[JValue::Int(i32::try_from(texture_id).unwrap_or(i32::MAX))],
+                    )?
+                    .check_null()?
+                    .l()?;
+                // SAFETY: the local object is an android.view.Surface and both
+                // JNI pointers remain valid for this call.
+                let window = unsafe {
+                    ndk::native_window::NativeWindow::from_surface(
+                        env.get_raw().cast(),
+                        local_surface.as_raw().cast(),
+                    )
+                }
+                .ok_or(jni::errors::Error::NullPtr(
+                    "ANativeWindow_fromSurface returned null",
+                ))?;
+                Ok((env.new_global_ref(local_surface)?, window))
+            })
+            .map_err(|error: jni::errors::Error| {
+                format!("create Android video SurfaceTexture failed: {error}")
+            })?;
+        Ok(Self {
+            app,
+            vm,
+            surface,
+            window,
+        })
+    }
+
+    pub(crate) fn native_window(&self) -> ndk::native_window::NativeWindow {
+        self.window.clone()
+    }
+
+    pub(crate) fn set_buffer_size(&self, width: u32, height: u32) -> Result<(), String> {
+        self.with_activity(|env, activity| {
+            env.call_method(
+                activity,
+                jni_str!("setVideoBufferSize"),
+                jni_sig!("(II)V"),
+                &[
+                    JValue::Int(i32::try_from(width).unwrap_or(i32::MAX)),
+                    JValue::Int(i32::try_from(height).unwrap_or(i32::MAX)),
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn update_texture(&self) -> Result<[f32; 16], String> {
+        self.with_activity(|env, activity| {
+            let array = env
+                .call_method(
+                    activity,
+                    jni_str!("updateVideoTexture"),
+                    jni_sig!("()[F"),
+                    &[],
+                )?
+                .check_null()?
+                .l()?;
+            let array = env.cast_local::<JFloatArray>(array)?;
+            let mut transform = [0.0_f32; 16];
+            array.get_region(env, 0, &mut transform)?;
+            Ok(transform)
+        })
+    }
+
+    fn with_activity<T>(
+        &self,
+        callback: impl FnOnce(&mut jni::Env<'_>, &JObject<'_>) -> jni::errors::Result<T>,
+    ) -> Result<T, String> {
+        self.vm
+            .attach_current_thread(|env| {
+                let raw_activity = self.app.activity_as_ptr() as jni::sys::jobject;
+                // SAFETY: self.app retains the NativeActivity global reference.
+                let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&raw_activity)? };
+                callback(env, activity.as_ref())
+            })
+            .map_err(|error| format!("Android video surface call failed: {error}"))
+    }
+}
+
+impl Drop for AndroidVideoSurface {
+    fn drop(&mut self) {
+        let _ = self.with_activity(|env, activity| {
+            env.call_method(
+                activity,
+                jni_str!("releaseVideoSurface"),
+                jni_sig!("()V"),
+                &[],
+            )?;
+            Ok(())
+        });
+        // Keep the Java Surface global alive until after releaseVideoSurface.
+        let _ = &self.surface;
+    }
 }
 
 pub(crate) fn install(app: AndroidApp) {

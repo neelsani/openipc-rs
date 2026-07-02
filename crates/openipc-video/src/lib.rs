@@ -41,7 +41,10 @@ pub use backends::windows::{WindowsDecoder, WindowsNv12Frame, WindowsVideoFrame}
 pub type PlatformDecoder = WindowsDecoder;
 
 #[cfg(target_os = "android")]
-pub use backends::android::{AndroidDecoder, AndroidImagePlane, AndroidVideoFrame};
+pub use backends::android::{
+    AndroidDecoder, AndroidImagePlane, AndroidPresentedFrame, AndroidSurfaceDecoder,
+    AndroidVideoFrame,
+};
 /// Decoder selected for the current native operating system.
 #[cfg(target_os = "android")]
 pub type PlatformDecoder = AndroidDecoder;

@@ -188,7 +188,11 @@ pub(crate) fn codec_available(codec: VideoCodec) -> bool {
     MediaCodec::from_decoder_type(mime_type(codec)).is_some()
 }
 
-fn media_format(config: &CodecConfig, stream: &CodecStreamInfo, low_latency: bool) -> MediaFormat {
+pub(super) fn media_format(
+    config: &CodecConfig,
+    stream: &CodecStreamInfo,
+    low_latency: bool,
+) -> MediaFormat {
     let mut format = MediaFormat::new();
     format.set_str("mime", mime_type(config.codec()));
     format.set_i32("width", stream.visible_dimensions.width as i32);
@@ -222,7 +226,7 @@ fn annex_b_unit(nalu: &[u8]) -> Vec<u8> {
     bytes
 }
 
-const fn mime_type(codec: VideoCodec) -> &'static str {
+pub(super) const fn mime_type(codec: VideoCodec) -> &'static str {
     match codec {
         VideoCodec::H264 => "video/avc",
         VideoCodec::H265 => "video/hevc",
@@ -240,7 +244,7 @@ fn invalid_dimensions(stream: &CodecStreamInfo) -> VideoError {
     }
 }
 
-pub(crate) fn android_error(api: &'static str, error: impl std::fmt::Display) -> VideoError {
+pub(super) fn android_error(api: &'static str, error: impl std::fmt::Display) -> VideoError {
     VideoError::Backend {
         backend: "mediacodec",
         operation: api,

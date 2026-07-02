@@ -57,7 +57,7 @@ the UI does not busy-loop while idle.
 | macOS   | `nusb`                                     | VideoToolbox                   | CPAL/CoreAudio |
 | Linux   | `nusb`                                     | VA-API through `cros-codecs`   | CPAL/ALSA      |
 | Windows | `nusb`                                     | Media Foundation and D3D11     | CPAL/WASAPI    |
-| Android | `UsbManager`, then `nusb::Device::from_fd` | NDK MediaCodec and ImageReader | CPAL/AAudio    |
+| Android | `UsbManager`, then `nusb::Device::from_fd` | MediaCodec to SurfaceTexture   | CPAL/AAudio    |
 | Browser | `nusb-webusb` / WebUSB                     | WebCodecs                      | Web Audio      |
 
 Android's JNI bridge only handles discovery, permission, and opening the USB
@@ -79,10 +79,10 @@ cargo install nebulus
 nebulus-desktop
 ```
 
-Prebuilt archives and app bundles are available from
-[GitHub Releases](https://github.com/neelsani/openipc-rs/releases). Linux and
-Windows archives contain the executable directly; macOS releases contain an
-ad-hoc-signed `.app` bundle. Platform security warnings are expected until
+Prebuilt packages are available from
+[GitHub Releases](https://github.com/neelsani/openipc-rs/releases): Linux
+executables, macOS `.dmg` images, Windows installer `.exe` files, and a
+universal Android APK. Platform security warnings are expected until
 notarization and code signing are configured.
 
 ### System Tray
@@ -203,7 +203,7 @@ Nebulus favors current video over complete playback:
 
 - Four USB reads remain in flight to avoid endpoint starvation.
 - WFB FEC and optional RTP reorder happen before decode.
-- Decoder work is capped at three access units in flight.
+- Decoder work uses a small, platform-bounded in-flight queue.
 - Decoded output is a single-slot latest-frame mailbox.
 - Runtime events coalesce pending video to one frame and merge pending batch
   counters, so a slow UI cannot build a decoded-frame queue.
@@ -226,11 +226,13 @@ failure fallback. Stable wgpu does not currently expose portable IOSurface,
 DMA-BUF, or D3D11 texture import; those imports are the remaining route to a
 fully zero-copy presentation path.
 
-Android also queues retained decoder outputs rather than converted pixels.
-Only the newest MediaCodec `AImage` is mapped. Its Y/U/V planes are packed into
-reused buffers, uploaded to persistent `R8Unorm` textures, and converted in a
-GPU shader. Contiguous planes use row copies; interleaved chroma honors the
-reported pixel stride. CPU RGBA conversion is only the failure fallback.
+Android uses `AndroidSurfaceDecoder` and gives MediaCodec a SurfaceTexture
+producer window. MediaCodec renders decoded output into the external OES
+texture; the egui Glow callback calls `updateTexImage`, applies Android's texture
+transform, and samples that texture directly. There is no `AImageReader`, YUV
+plane mapping, CPU color conversion, or per-frame GPU upload in Nebulus's
+Android display path. The library's separate `AndroidDecoder` remains available
+to applications that need readable `AImage`/`AHardwareBuffer` output.
 
 Browser builds retain the WebCodecs `VideoFrame` through the latest-only
 event queue and use WebGL's native `VideoFrame` texture upload. There is no

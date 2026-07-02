@@ -262,21 +262,18 @@ fn build_badges(ui: &mut egui::Ui) {
         .inner_margin(egui::Margin::symmetric(6, 3))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
+                let release_color = if build.tag.is_some() {
+                    Color32::from_rgb(61, 214, 154)
+                } else {
+                    ui.visuals().weak_text_color()
+                };
                 ui.label(
-                    egui::RichText::new(format!("v{}", build.version))
+                    egui::RichText::new(build.release_label())
                         .monospace()
+                        .strong()
                         .size(9.0)
-                        .color(ui.visuals().weak_text_color()),
+                        .color(release_color),
                 );
-                if let Some(tag) = build.tag {
-                    ui.label(
-                        egui::RichText::new(tag)
-                            .monospace()
-                            .strong()
-                            .size(9.0)
-                            .color(Color32::from_rgb(61, 214, 154)),
-                    );
-                }
                 if let Some(commit) = build.short_commit() {
                     ui.add(
                         egui::Hyperlink::from_label_and_url(
@@ -418,8 +415,11 @@ fn side_panel(app: &mut NebulusApp, ui: &mut egui::Ui) {
         }
     });
     ui.separator();
+    let viewport_height = ui.available_height().max(0.0);
     egui::ScrollArea::vertical()
         .id_salt(("nebulus-control-scroll", app.active_tab))
+        .max_height(viewport_height)
+        .min_scrolled_height(viewport_height)
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
@@ -432,6 +432,7 @@ fn side_panel(app: &mut NebulusApp, ui: &mut egui::Ui) {
                 PanelTab::Diagnostics => diagnostics::show(app, ui),
                 PanelTab::Logs => logs::show(app, ui),
             }
+            ui.add_space(12.0);
         });
 }
 

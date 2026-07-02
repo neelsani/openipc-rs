@@ -223,6 +223,10 @@ fn plot_one<Series>(
         egui::vec2(width, PLOT_SLOT_HEIGHT),
         egui::Layout::top_down(egui::Align::Min),
         move |ui| {
+            // Offscreen plots still occupy their full slot. Without this,
+            // skipping their paint work collapses the scrollable content and
+            // clamps the panel back toward the top while the user scrolls.
+            ui.set_min_height(PLOT_SLOT_HEIGHT);
             if !ui.is_rect_visible(ui.max_rect()) {
                 return;
             }

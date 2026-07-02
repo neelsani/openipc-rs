@@ -3,10 +3,12 @@ package dev.neels.openipc.nebulus;
 import android.app.NativeActivity;
 import android.content.Intent;
 import android.database.Cursor;
+import android.graphics.SurfaceTexture;
 import android.net.Uri;
 import android.net.VpnService;
 import android.os.Bundle;
 import android.provider.OpenableColumns;
+import android.view.Surface;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 
@@ -14,10 +16,48 @@ public final class NebulusActivity extends NativeActivity {
     private static final int OPEN_KEY_REQUEST = 0x4753;
     private static final int OPEN_VPN_REQUEST = 0x5650;
 
+    private SurfaceTexture videoSurfaceTexture;
+    private Surface videoSurface;
+    private final float[] videoTextureTransform = new float[16];
+
     private static native void nativeKeySelected(String name, byte[] bytes);
     private static native void nativeKeyError(String message);
     static native void nativeVpnOpened(int fd, String interfaceName);
     static native void nativeVpnError(String message);
+
+    /** Create the MediaCodec producer surface for a GL_TEXTURE_EXTERNAL_OES name. */
+    public synchronized Surface createVideoSurface(int textureId) {
+        releaseVideoSurface();
+        videoSurfaceTexture = new SurfaceTexture(textureId);
+        videoSurface = new Surface(videoSurfaceTexture);
+        return videoSurface;
+    }
+
+    /** Latch the newest decoder image and return SurfaceTexture's UV transform. */
+    public synchronized float[] updateVideoTexture() {
+        if (videoSurfaceTexture != null) {
+            videoSurfaceTexture.updateTexImage();
+            videoSurfaceTexture.getTransformMatrix(videoTextureTransform);
+        }
+        return videoTextureTransform;
+    }
+
+    public synchronized void setVideoBufferSize(int width, int height) {
+        if (videoSurfaceTexture != null && width > 0 && height > 0) {
+            videoSurfaceTexture.setDefaultBufferSize(width, height);
+        }
+    }
+
+    public synchronized void releaseVideoSurface() {
+        if (videoSurface != null) {
+            videoSurface.release();
+            videoSurface = null;
+        }
+        if (videoSurfaceTexture != null) {
+            videoSurfaceTexture.release();
+            videoSurfaceTexture = null;
+        }
+    }
 
     public void openKeyFile() {
         runOnUiThread(this::openKeyFileOnUiThread);

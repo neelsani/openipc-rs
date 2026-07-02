@@ -10,8 +10,8 @@ UI across desktop, Android, and the browser. Only USB access and video-surface
 presentation are target-specific.
 
 Nebulus is the primary ground station distributed by this repository. Tagged
-releases include Linux x64/arm64 archives, macOS Apple Silicon/Intel app
-bundles, Windows x64/arm64 archives, and an Android arm64 APK. The hosted
+releases include Linux x64/arm64 executables, macOS Apple Silicon/Intel disk
+images, Windows x64/arm64 installers, and one universal Android APK. The hosted
 browser build is available at
 [nebulus.openipc-rs.neels.dev](https://nebulus.openipc-rs.neels.dev).
 The source package is published at
@@ -157,9 +157,10 @@ the newest VA-API DMA surface and Windows reads the newest D3D11 surface only
 after stale frames have been discarded. Direct IOSurface, DMA-BUF, and D3D11
 texture import remain optional future zero-copy optimizations.
 
-Android coalesces retained MediaCodec `AImage` outputs before mapping the
-selected frame. Reused packed Y/U/V buffers feed persistent wgpu textures and
-the GPU performs color conversion. The browser keeps WebCodecs `VideoFrame`
+Android sends MediaCodec output directly to a `SurfaceTexture` backed by an
+external OpenGL ES texture. The egui Glow paint callback latches the newest
+decoder image, so decoded planes are never mapped or copied through Rust. The
+browser keeps WebCodecs `VideoFrame`
 objects inside Rust/WASM and uploads them directly into a persistent WebGL
 texture; decoded pixel arrays never cross the WASM boundary.
 

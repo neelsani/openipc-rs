@@ -1,4 +1,4 @@
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use openipc_video::{FrameDimensions, PixelFormat};
 
 #[cfg(target_os = "macos")]
@@ -64,7 +64,7 @@ pub(crate) struct Plane<'a> {
     pub(crate) stride: usize,
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn convert_planes(
     format: PixelFormat,
     dimensions: FrameDimensions,

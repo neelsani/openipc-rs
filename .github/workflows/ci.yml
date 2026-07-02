@@ -783,13 +783,9 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           NAME="nebulus-${{ matrix.label }}-$VERSION"
-          mkdir -p "release-assets/$NAME"
-          cp "target/${{ matrix.rust_target }}/release/nebulus-desktop" "release-assets/$NAME/nebulus"
-          cp LICENSE "release-assets/$NAME/LICENSE"
-          cp apps/nebulus/README.md "release-assets/$NAME/README.md"
-          tar -C release-assets -czf "release-assets/$NAME.tar.gz" "$NAME"
-          (cd release-assets && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
-          rm -rf "release-assets/$NAME"
+          mkdir -p release-assets
+          install -m 0755 "target/${{ matrix.rust_target }}/release/nebulus-desktop" "release-assets/$NAME"
+          (cd release-assets && sha256sum "$NAME" > "$NAME.sha256")
 
       - name: Package macOS release
         if: runner.os == 'macOS'
@@ -798,7 +794,8 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           MARKETING_VERSION="${VERSION%%-*}"
           NAME="nebulus-${{ matrix.label }}-$VERSION"
-          APP="release-assets/Nebulus.app"
+          ROOT="release-assets/dmg-root"
+          APP="$ROOT/Nebulus.app"
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
           cp "target/${{ matrix.rust_target }}/release/nebulus-desktop" "$APP/Contents/MacOS/Nebulus"
           cp LICENSE "$APP/Contents/Resources/LICENSE"
@@ -818,9 +815,15 @@ jobs:
           </dict></plist>
           PLIST
           codesign --force --deep --sign - "$APP"
-          ditto -c -k --sequesterRsrc --keepParent "$APP" "release-assets/$NAME.zip"
-          (cd release-assets && shasum -a 256 "$NAME.zip" > "$NAME.zip.sha256")
-          rm -rf "$APP"
+          ln -s /Applications "$ROOT/Applications"
+          hdiutil create -volname Nebulus -srcfolder "$ROOT" -ov -format UDZO "release-assets/$NAME.dmg"
+          (cd release-assets && shasum -a 256 "$NAME.dmg" > "$NAME.dmg.sha256")
+          rm -rf "$ROOT"
+
+      - name: Install Inno Setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco upgrade innosetup --version=6.7.1 --yes --no-progress
 
       - name: Package Windows release
         if: runner.os == 'Windows'
@@ -828,16 +831,19 @@ jobs:
         run: |
           $Version = $env:GITHUB_REF_NAME.TrimStart('v')
           $Name = "nebulus-${{ matrix.label }}-$Version"
-          $Stage = "release-assets/$Name"
-          New-Item -ItemType Directory -Force -Path $Stage | Out-Null
-          Copy-Item "target/${{ matrix.rust_target }}/release/nebulus-desktop.exe" "$Stage/Nebulus.exe"
-          Copy-Item "target/${{ matrix.rust_target }}/release/wintun.dll" "$Stage/wintun.dll"
-          Copy-Item "LICENSE" "$Stage/LICENSE"
-          Copy-Item "apps/nebulus/README.md" "$Stage/README.md"
-          Compress-Archive -Path "$Stage/*" -DestinationPath "release-assets/$Name.zip"
-          $Hash = (Get-FileHash "release-assets/$Name.zip" -Algorithm SHA256).Hash.ToLower()
-          "$Hash  $Name.zip" | Set-Content "release-assets/$Name.zip.sha256"
-          Remove-Item -Recurse -Force $Stage
+          $Architecture = if ('${{ matrix.rust_target }}' -eq 'aarch64-pc-windows-msvc') { 'arm64' } else { 'x64os' }
+          $RepoDir = (Get-Location).Path
+          $SourceDir = Join-Path $RepoDir "target/${{ matrix.rust_target }}/release"
+          $OutputDir = Join-Path $RepoDir 'release-assets'
+          $Compiler = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6/ISCC.exe'
+          New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+          if (!(Test-Path $Compiler)) {
+            throw "Inno Setup compiler not found at $Compiler"
+          }
+          & $Compiler /Qp "/DAppVersion=$Version" "/DSourceDir=$SourceDir" "/DRepoDir=$RepoDir" "/DArchitecture=$Architecture" "/DOutputDir=$OutputDir" "/DOutputName=$Name" "apps/nebulus/packaging/windows/Nebulus.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $Hash = (Get-FileHash "release-assets/$Name.exe" -Algorithm SHA256).Hash.ToLower()
+          "$Hash  $Name.exe" | Set-Content "release-assets/$Name.exe.sha256"
 
       - name: Upload desktop release artifact
         uses: actions/upload-artifact@v4
@@ -885,7 +891,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown,aarch64-linux-android
+          targets: wasm32-unknown-unknown,aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
 
       - name: Cache Cargo
         uses: actions/cache@v4
@@ -935,7 +941,7 @@ jobs:
           echo "CARGO_APK_RELEASE_KEYSTORE_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
 
       - name: Build Nebulus Android APK
-        run: cargo apk2 build --release -p nebulus --lib --target aarch64-linux-android
+        run: cargo apk2 build --release -p nebulus --lib
 
       - name: Stage Android release artifacts
         run: |
@@ -948,14 +954,20 @@ jobs:
             find target -type f -name '*.apk' -print >&2 || true
             exit 1
           fi
-          NAME="nebulus-android-arm64-$VERSION.apk"
+          for ABI in arm64-v8a armeabi-v7a x86_64 x86; do
+            unzip -Z1 "$APK" | grep -Eq "^lib/$ABI/.*\\.so$" || {
+              echo "Universal APK is missing native libraries for $ABI." >&2
+              exit 1
+            }
+          done
+          NAME="nebulus-android-universal-$VERSION.apk"
           cp "$APK" "$OUT_DIR/$NAME"
           (cd "$OUT_DIR" && sha256sum "$NAME" > "$NAME.sha256")
 
       - name: Upload Android release artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nebulus-android-arm64
+          name: nebulus-android-universal
           path: release-assets/android/*
           if-no-files-found: error
           retention-days: 7

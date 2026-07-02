@@ -36,18 +36,10 @@ pub fn create_app(context: &eframe::CreationContext<'_>) -> NebulusApp {
 pub fn android_main(app: android_activity::AndroidApp) {
     init_logging();
     android::install(app.clone());
-    let mut wgpu_options = eframe::egui_wgpu::WgpuConfiguration::default();
-    if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut wgpu_options.wgpu_setup {
-        // Android exposes one ANativeWindow. Creating Vulkan and EGL surfaces
-        // for it at the same time can leave the selected backend with an
-        // already-connected, invalid surface. GLES is also the accelerated
-        // backend provided by the standard Android emulator.
-        setup.instance_descriptor.backends = eframe::wgpu::Backends::GL;
-    }
     let options = eframe::NativeOptions {
         android_app: Some(app),
         viewport: eframe::egui::ViewportBuilder::default().with_fullscreen(true),
-        wgpu_options,
+        renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
     let _ = eframe::run_native(

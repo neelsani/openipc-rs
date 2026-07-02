@@ -80,6 +80,10 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
         let mut x = bar.left() + 13.0;
         let y = bar.center().y;
         if rect.width() < 620.0 {
+            let base_widths = [44.0, 34.0, 44.0, 39.0, 35.0, 32.0, 38.0];
+            let base_total = base_widths.iter().sum::<f32>();
+            let spacing =
+                ((bar.width() - 26.0 - base_total) / base_widths.len() as f32).clamp(0.0, 10.0);
             let compact_resolution = app
                 .metrics
                 .resolution
@@ -87,54 +91,61 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
                 .unwrap_or_else(|| "--".to_owned());
             let strongest_rssi = app.metrics.rssi[0].max(app.metrics.rssi[1]);
             let strongest_link = app.metrics.link_score[0].max(app.metrics.link_score[1]);
-            x = hud_item(&painter, x, y, HudIcon::Display, &compact_resolution, 48.0);
-            x = hud_item(
+            x = compact_hud_item(
+                &painter,
+                x,
+                y,
+                HudIcon::Display,
+                &compact_resolution,
+                base_widths[0] + spacing,
+            );
+            x = compact_hud_item(
                 &painter,
                 x,
                 y,
                 HudIcon::Fps,
                 &format!("{:.0}", app.metrics.decode_fps),
-                36.0,
+                base_widths[1] + spacing,
             );
-            x = hud_item(
+            x = compact_hud_item(
                 &painter,
                 x,
                 y,
                 HudIcon::Bitrate,
                 &format_compact_bitrate(app.metrics.bitrate_bps),
-                48.0,
+                base_widths[2] + spacing,
             );
-            x = hud_item(
+            x = compact_hud_item(
                 &painter,
                 x,
                 y,
                 HudIcon::Latency,
                 &format!("{:.0}ms", app.metrics.decode_latency_ms),
-                48.0,
+                base_widths[3] + spacing,
             );
-            x = hud_item(
+            x = compact_hud_item(
                 &painter,
                 x,
                 y,
                 HudIcon::Signal,
                 &strongest_rssi.to_string(),
-                38.0,
+                base_widths[4] + spacing,
             );
-            x = hud_item(
+            x = compact_hud_item(
                 &painter,
                 x,
                 y,
                 HudIcon::Loss,
                 &app.metrics.lost_packets.to_string(),
-                38.0,
+                base_widths[5] + spacing,
             );
-            let _ = hud_item(
+            let _ = compact_hud_item(
                 &painter,
                 x,
                 y,
                 HudIcon::Link,
                 &strongest_link.to_string(),
-                38.0,
+                base_widths[6] + spacing,
             );
         } else {
             x = hud_item(&painter, x, y, HudIcon::Display, &resolution, 82.0);
@@ -206,8 +217,10 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
         );
     }
 
+    let compact_osd =
+        app.settings.show_osd && app.state == ReceiverState::Receiving && rect.width() < 620.0;
     let fullscreen_rect = egui::Rect::from_min_size(
-        rect.right_bottom() - egui::vec2(42.0, 42.0),
+        rect.right_bottom() - egui::vec2(42.0, if compact_osd { 88.0 } else { 42.0 }),
         egui::vec2(36.0, 36.0),
     );
     let fullscreen = ui
@@ -259,6 +272,26 @@ fn hud_item(
     painter.galley(
         egui::pos2(text_x, y - galley.size().y * 0.5),
         galley.clone(),
+        color,
+    );
+    x + slot_width
+}
+
+fn compact_hud_item(
+    painter: &egui::Painter,
+    x: f32,
+    y: f32,
+    icon: HudIcon,
+    value: &str,
+    slot_width: f32,
+) -> f32 {
+    let color = egui::Color32::from_gray(218);
+    let galley = painter.layout_no_wrap(value.to_owned(), egui::FontId::monospace(8.5), color);
+    let icon_rect = egui::Rect::from_center_size(egui::pos2(x + 5.0, y), egui::vec2(10.0, 10.0));
+    draw_hud_icon(painter, icon_rect, icon, egui::Stroke::new(1.15, color));
+    painter.galley(
+        egui::pos2(x + 14.0, y - galley.size().y * 0.5),
+        galley,
         color,
     );
     x + slot_width

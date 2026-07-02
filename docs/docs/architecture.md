@@ -97,9 +97,9 @@ planes to persistent GPU textures, and performs color conversion in a shader.
 CPU RGBA conversion is only a compatibility fallback. Direct IOSurface,
 DMA-BUF, and D3D11 imports could remove the remaining plane copy.
 
-On Android the same latest-only boundary retains MediaCodec `AImage` outputs
-until the UI selects one, then uploads compact Y/U/V planes for shader
-conversion. In the browser, WebCodecs `VideoFrame` is uploaded directly to a
+On Android MediaCodec renders into a SurfaceTexture-backed external GLES
+texture; the UI boundary carries only presentation metadata and the paint
+callback latches the newest image. In the browser, WebCodecs `VideoFrame` is uploaded directly to a
 persistent WebGL texture; decoded pixels do not pass through a WASM byte array.
 
 ## Data Flow

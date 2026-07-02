@@ -2,6 +2,8 @@ use eframe::egui;
 
 use crate::{app::NebulusApp, model::LogLevel};
 
+const MAX_RENDERED_LOG_ROWS: usize = 300;
+
 pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         ui.heading("Logs");
@@ -52,51 +54,59 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
     });
     ui.separator();
     let search = app.log_search.trim().to_ascii_lowercase();
-    for entry in app.logs.iter().rev().filter(|entry| {
-        entry.level.priority() >= app.log_filter.priority()
-            && (search.is_empty()
-                || entry.target.to_ascii_lowercase().contains(&search)
-                || entry.message.to_ascii_lowercase().contains(&search))
-    }) {
-        ui.push_id(
-            (
-                entry.elapsed_seconds.to_bits(),
-                entry.level.priority(),
-                &entry.target,
-                &entry.message,
-            ),
-            |ui| {
-                ui.horizontal_top(|ui| {
-                    ui.add_sized(
-                        [54.0, 18.0],
-                        egui::Label::new(
-                            egui::RichText::new(format!("{:>7.2}", entry.elapsed_seconds))
-                                .monospace(),
-                        ),
-                    );
-                    ui.add_sized(
-                        [42.0, 18.0],
-                        egui::Label::new(
-                            egui::RichText::new(entry.level.label())
-                                .monospace()
-                                .color(level_color(ui, entry.level)),
-                        ),
-                    );
-                    ui.add_sized(
-                        [104.0, 18.0],
-                        egui::Label::new(
-                            egui::RichText::new(&entry.target)
-                                .monospace()
-                                .color(ui.visuals().weak_text_color()),
-                        )
-                        .truncate(),
-                    )
-                    .on_hover_text(&entry.target);
-                    ui.add(egui::Label::new(&entry.message).wrap());
-                });
-                ui.separator();
-            },
+    let matching = app
+        .logs
+        .iter()
+        .rev()
+        .filter(|entry| {
+            entry.level.priority() >= app.log_filter.priority()
+                && (search.is_empty()
+                    || entry.target.to_ascii_lowercase().contains(&search)
+                    || entry.message.to_ascii_lowercase().contains(&search))
+        })
+        .collect::<Vec<_>>();
+    if matching.len() > MAX_RENDERED_LOG_ROWS {
+        ui.label(
+            egui::RichText::new(format!(
+                "Showing newest {MAX_RENDERED_LOG_ROWS} of {} matching records. Narrow the filter to inspect older entries.",
+                matching.len()
+            ))
+            .small()
+            .color(ui.visuals().weak_text_color()),
         );
+        ui.separator();
+    }
+    for entry in matching.into_iter().take(MAX_RENDERED_LOG_ROWS) {
+        ui.push_id(entry.sequence, |ui| {
+            ui.horizontal_top(|ui| {
+                ui.add_sized(
+                    [54.0, 18.0],
+                    egui::Label::new(
+                        egui::RichText::new(format!("{:>7.2}", entry.elapsed_seconds)).monospace(),
+                    ),
+                );
+                ui.add_sized(
+                    [42.0, 18.0],
+                    egui::Label::new(
+                        egui::RichText::new(entry.level.label())
+                            .monospace()
+                            .color(level_color(ui, entry.level)),
+                    ),
+                );
+                ui.add_sized(
+                    [104.0, 18.0],
+                    egui::Label::new(
+                        egui::RichText::new(&entry.target)
+                            .monospace()
+                            .color(ui.visuals().weak_text_color()),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(&entry.target);
+                ui.add(egui::Label::new(&entry.message).wrap());
+            });
+            ui.separator();
+        });
     }
 }
 

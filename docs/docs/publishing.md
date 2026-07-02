@@ -203,12 +203,14 @@ Build targets:
 | `windows-x64`         | `windows-2025`     | `x86_64-pc-windows-msvc`    |
 | `windows-arm64`       | `windows-11-arm`   | `aarch64-pc-windows-msvc`   |
 
-Linux releases are built on Ubuntu runners and packaged as `.tar.gz` archives;
-they are not separate per-distribution builds.
+Linux releases are built on Ubuntu runners and published as architecture-named
+executables; they are not separate per-distribution builds or AppImages. macOS
+releases are `.dmg` disk images, Windows releases are installer `.exe` files,
+and Android is one APK containing arm64-v8a, armeabi-v7a, x86_64, and x86.
 
-macOS Nebulus `.app` bundles are ad-hoc signed. Windows and Linux archives are
-not code-signed. Users may see operating-system warnings until platform signing
-and macOS notarization are configured.
+The `.app` inside each macOS disk image is ad-hoc signed. Windows installers
+and Linux executables are not code-signed. Users may see operating-system
+warnings until platform signing and macOS notarization are configured.
 
 ## Nebulus Web App
 

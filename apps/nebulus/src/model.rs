@@ -72,6 +72,7 @@ impl LogLevel {
 /// Timestamped diagnostic line displayed by the app.
 #[derive(Debug, Clone)]
 pub(crate) struct LogEntry {
+    pub(crate) sequence: u64,
     pub(crate) elapsed_seconds: f64,
     pub(crate) level: LogLevel,
     pub(crate) target: String,

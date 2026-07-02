@@ -221,7 +221,11 @@ mod worker {
         ChannelWidth, ChipFamily, DriverOptions, Jaguar3PowerTrackingState, MonitorOptions,
         RadioConfig, RealtekDevice, RealtekTxDescriptor, RealtekTxOptions,
     };
-    use openipc_video::{DecoderOptions, PlatformDecoder, VideoDecoder};
+    #[cfg(target_os = "android")]
+    use openipc_video::AndroidSurfaceDecoder as AppDecoder;
+    #[cfg(not(target_os = "android"))]
+    use openipc_video::PlatformDecoder as AppDecoder;
+    use openipc_video::{DecoderOptions, VideoDecoder};
 
     use crate::{
         model::LogLevel,
@@ -402,82 +406,11 @@ mod worker {
         }
     }
 
-    #[cfg(target_os = "android")]
-    struct FramePresenter {
-        sender: Option<
-            SyncSender<(
-                openipc_video::DecodedFrame<openipc_video::AndroidVideoFrame>,
-                f64,
-            )>,
-        >,
-        worker: Option<JoinHandle<()>>,
-    }
-
-    #[cfg(target_os = "android")]
-    impl FramePresenter {
-        fn new(events: &super::EventQueue, context: &eframe::egui::Context) -> Self {
-            let (sender, receiver) = mpsc::sync_channel(1);
-            let events = Arc::clone(events);
-            let context = context.clone();
-            let worker = std::thread::Builder::new()
-                .name("nebulus-android-video-presenter".to_owned())
-                .spawn(move || {
-                    while let Ok((frame, decode_latency_ms)) = receiver.recv() {
-                        match crate::video::pack_android_frame(frame) {
-                            Ok(frame) => send(
-                                &events,
-                                &context,
-                                RuntimeEvent::NativeVideo {
-                                    frame,
-                                    decode_latency_ms,
-                                },
-                            ),
-                            Err(error) => log(
-                                &events,
-                                &context,
-                                LogLevel::Warn,
-                                "video",
-                                format!("prepare Android video frame failed: {error}"),
-                            ),
-                        }
-                    }
-                })
-                .ok();
-            Self {
-                sender: Some(sender),
-                worker,
-            }
-        }
-
-        fn submit(
-            &self,
-            frame: openipc_video::DecodedFrame<openipc_video::AndroidVideoFrame>,
-            decode_latency_ms: f64,
-        ) {
-            let Some(sender) = &self.sender else {
-                return;
-            };
-            let _ = sender.try_send((frame, decode_latency_ms));
-        }
-    }
-
-    #[cfg(target_os = "android")]
-    impl Drop for FramePresenter {
-        fn drop(&mut self) {
-            self.sender.take();
-            if let Some(worker) = self.worker.take() {
-                let _ = worker.join();
-            }
-        }
-    }
-
-    #[cfg(not(target_os = "android"))]
     struct FramePresenter {
         events: super::EventQueue,
         context: eframe::egui::Context,
     }
 
-    #[cfg(not(target_os = "android"))]
     impl FramePresenter {
         fn new(events: &super::EventQueue, context: &eframe::egui::Context) -> Self {
             Self {
@@ -489,7 +422,7 @@ mod worker {
         fn submit(
             &self,
             frame: openipc_video::DecodedFrame<
-                <PlatformDecoder as openipc_video::VideoDecoder>::Surface,
+                <AppDecoder as openipc_video::VideoDecoder>::Surface,
             >,
             decode_latency_ms: f64,
         ) {
@@ -501,6 +434,23 @@ mod worker {
                     decode_latency_ms,
                 },
             );
+        }
+    }
+
+    fn create_decoder(_request: &StartRequest) -> Result<AppDecoder, String> {
+        #[cfg(target_os = "android")]
+        {
+            let output = _request.video_output.clone().ok_or_else(|| {
+                "Android SurfaceTexture renderer is unavailable; cannot start video decoder"
+                    .to_owned()
+            })?;
+            AppDecoder::new(decoder_options(), output)
+                .map_err(|error| format!("video decoder unavailable: {error}"))
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            AppDecoder::new(decoder_options())
+                .map_err(|error| format!("video decoder unavailable: {error}"))
         }
     }
 
@@ -662,8 +612,7 @@ mod worker {
         let chip = report.chip.family;
         let receiver_info =
             crate::runtime::ReceiverInfo::initialized(device_label, &device, &report);
-        let mut decoder = PlatformDecoder::new(decoder_options())
-            .map_err(|error| format!("video decoder unavailable: {error}"))?;
+        let mut decoder = create_decoder(&request)?;
         let presenter = FramePresenter::new(events, context);
         let decoder_environment = decoder_environment(decoder.capabilities());
         send(
@@ -950,7 +899,7 @@ mod worker {
             route_runtime::{configure_mock_receiver, RouteProcessor},
         };
 
-        let mut decoder = PlatformDecoder::new(decoder_options())
+        let mut decoder = create_decoder(&request)
             .map_err(|error| format!("native mock decoder unavailable: {error}"))?;
         let presenter = FramePresenter::new(events, context);
         let mut route_processor = RouteProcessor::new(&request)?;

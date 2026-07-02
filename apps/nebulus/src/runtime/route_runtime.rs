@@ -378,6 +378,8 @@ mod tests {
 
     fn request_from_settings(settings: Settings) -> StartRequest {
         StartRequest {
+            #[cfg(target_os = "android")]
+            video_output: None,
             device_id: None,
             channel: settings.channel,
             channel_width_mhz: settings.channel_width_mhz,

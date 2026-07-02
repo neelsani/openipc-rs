@@ -34,7 +34,9 @@ impl TunBridge {
         #[cfg(target_os = "linux")]
         {
             config.tun_name("openipc%d");
-            config.platform_config(|platform| platform.ensure_root_privileges(true));
+            config.platform_config(|platform| {
+                platform.ensure_root_privileges(true);
+            });
         }
         let device = tun::create(&config)
             .map_err(|error| format!("create VPN interface failed: {error}"))?;

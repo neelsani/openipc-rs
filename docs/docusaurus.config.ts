@@ -171,10 +171,6 @@ const config: Config = {
               label: "Nebulus",
               href: "https://nebulus.openipc-rs.neels.dev",
             },
-            {
-              label: "Legacy Station",
-              href: "https://station.openipc-rs.neels.dev",
-            },
           ],
         },
       ],

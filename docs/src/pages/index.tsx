@@ -1,182 +1,201 @@
 import Heading from "@theme/Heading";
 import Layout from "@theme/Layout";
 import Link from "@docusaurus/Link";
+import useBaseUrl from "@docusaurus/useBaseUrl";
 
-const paths = [
+const guides = [
   {
+    number: "01",
     title: "Run Nebulus",
-    body: "Use the hosted WebUSB app, download a native release, or build the shared egui app for desktop, Android, and web.",
+    body: "Connect a supported Realtek adapter from the native app, Android, or a WebUSB browser.",
     to: "/docs/nebulus",
-    action: "Nebulus Guide",
+    action: "Ground station guide",
   },
   {
-    title: "Use the Rust crates",
-    body: "Pull in the packet pipeline, Realtek helpers, WFB/FEC logic, and adaptive-link code.",
+    number: "02",
+    title: "Build an application",
+    body: "Use the shared Rust receiver, routing, RTP, video, and adaptive-link APIs in your own ground station.",
     to: "/docs/rust-library",
-    action: "Rust Examples",
+    action: "Rust library guide",
   },
   {
-    title: "Use the WASM SDK",
-    body: "Request a WebUSB adapter, receive Annex-B frames, and feed WebCodecs from a web app.",
-    to: "/docs/wasm-sdk",
-    action: "WASM Examples",
-  },
-  {
-    title: "Check the driver",
-    body: "See what is implemented, what came from the reference projects, and what still needs hardware testing.",
-    to: "/docs/realtek-driver",
-    action: "Driver Notes",
+    number: "03",
+    title: "Understand the radio path",
+    body: "Follow bytes from USB aggregates through 802.11, WFB recovery, payload routes, and platform decoding.",
+    to: "/docs/architecture",
+    action: "Architecture overview",
   },
 ];
 
 const pipeline = [
-  "USB bulk IN",
-  "Realtek aggregate",
-  "WFB decrypt/FEC",
-  "RTP + payload taps",
-  "Annex-B frames",
-  "Platform decoder",
+  "Realtek USB",
+  "802.11 monitor frames",
+  "WFB decrypt + FEC",
+  "Payload routes",
+  "RTP depacketization",
+  "Native video",
 ];
 
-const references = [
-  ["OpenIPC Docs", "https://docs.openipc.org/"],
-  ["devourer", "https://github.com/OpenIPC/devourer"],
-  ["aviateur", "https://github.com/OpenIPC/aviateur"],
-  ["nusb-webusb", "https://docs.rs/nusb-webusb/latest/nusb/"],
+const crates = [
+  ["openipc-core", "WFB, FEC, RTP, routes, and adaptive link"],
+  ["openipc-rtl88xx", "User-space Realtek USB WiFi driver"],
+  ["openipc-video", "Low-latency platform video decoders"],
+  ["openipc-web", "WASM bindings and WebUSB receiver API"],
 ];
 
-function PipelineGraphic(): JSX.Element {
+function ReceiverPreview({ logo }: { logo: string }): JSX.Element {
   return (
-    <div className="pipelineGraphic" aria-label="OpenIPC receive pipeline">
-      {pipeline.map((step, index) => (
-        <div className="pipelineStep" key={step}>
-          <span className="pipelineIndex">
-            {String(index + 1).padStart(2, "0")}
-          </span>
-          <span>{step}</span>
+    <div className="receiverPreview" aria-label="Nebulus receiver preview">
+      <div className="previewHeader">
+        <span className="previewBrand">
+          <span className="previewLive" /> Nebulus
+        </span>
+        <span>RECEIVING</span>
+      </div>
+      <div className="previewVideo">
+        <img src={logo} alt="" />
+        <div className="previewReticle" aria-hidden="true" />
+        <div className="previewTelemetry">
+          <span>1080p</span>
+          <span>60 fps</span>
+          <span>18.4 Mbps</span>
+          <span>7.2 ms</span>
+          <span>-61 dBm</span>
         </div>
-      ))}
+      </div>
+      <div className="previewFooter">
+        <span>LINK 94</span>
+        <div className="previewBars" aria-hidden="true">
+          <i />
+          <i />
+          <i />
+          <i />
+          <i />
+        </div>
+        <span>LOSS 0.0%</span>
+      </div>
     </div>
   );
 }
 
 export default function Home(): JSX.Element {
+  const logo = useBaseUrl("/img/logo.svg");
+
   return (
     <Layout
-      title="Rust OpenIPC ground-station stack"
-      description="Nebulus ground station and reusable Rust libraries for OpenIPC FPV"
+      title="Nebulus OpenIPC ground station"
+      description="Nebulus is a low-latency OpenIPC ground station built on reusable Rust receiver, driver, routing, and video crates."
     >
       <main className="homePage">
-        <section className="heroShell">
-          <div className="container heroGrid">
-            <div className="heroCopy">
-              <div className="statusLine">
-                <span>Rust core</span>
-                <span>Native desktop</span>
-                <span>WASM + WebUSB</span>
+        <section className="nebHero">
+          <div className="container nebHeroInner">
+            <div className="nebHeroCopy">
+              <div className="nebEyebrow">
+                <img src={logo} alt="" />
+                <span>Built on openipc-rs</span>
               </div>
-              <Heading as="h1" className="homeTitle">
-                openipc-rs
-              </Heading>
-              <p className="homeSubtitle">
-                Rust code for receiving OpenIPC video through Realtek USB WiFi
-                adapters, with the Nebulus native/WebUSB app and reusable crates
-                for custom ground stations.
+              <Heading as="h1">Nebulus</Heading>
+              <p className="nebHeroLead">
+                A low-latency OpenIPC ground station for desktop, Android, and
+                the browser, backed by a reusable Rust receiver stack.
               </p>
-              <div className="heroActions">
-                <Link
-                  className="button button--primary button--lg"
-                  to="/docs/getting-started"
-                >
-                  Get Started
-                </Link>
+              <div className="nebActions">
                 <a
-                  className="button button--secondary button--lg"
+                  className="button button--primary button--lg"
                   href="https://nebulus.openipc-rs.neels.dev"
+                  target="_blank"
+                  rel="noopener noreferrer"
                 >
-                  Open Nebulus
+                  Launch Web App
                 </a>
-                <Link
-                  className="button button--secondary button--lg"
-                  to="/docs/architecture"
+                <a
+                  className="button nebButtonGhost button--lg"
+                  href="https://github.com/neelsani/openipc-rs/releases/latest"
+                  target="_blank"
+                  rel="noopener noreferrer"
                 >
-                  Architecture
+                  Download Nebulus
+                </a>
+                <Link className="nebTextLink" to="/docs/getting-started">
+                  Read the docs <span aria-hidden="true">→</span>
                 </Link>
               </div>
-            </div>
-            <div className="heroPanel">
-              <div className="panelHeader">
-                <span>receiver stack</span>
-                <span>shared logic first</span>
-              </div>
-              <PipelineGraphic />
-              <div className="signalReadout">
-                <div>
-                  <strong>Targets</strong>
-                  <span>Linux, macOS, Windows, Android, browser</span>
-                </div>
-                <div>
-                  <strong>Output</strong>
-                  <span>H.264/H.265 video and raw payload routes</span>
-                </div>
+              <div className="nebTargets" aria-label="Supported targets">
+                <span>macOS</span>
+                <span>Windows</span>
+                <span>Linux</span>
+                <span>Android</span>
+                <span>WebUSB</span>
               </div>
             </div>
+            <ReceiverPreview logo={logo} />
           </div>
         </section>
 
-        <section className="container pathSection">
-          <div className="sectionKicker">Choose A Path</div>
-          <Heading as="h2">
-            Run the app, use the libraries, or inspect the radio path.
-          </Heading>
-          <div className="pathGrid">
-            {paths.map((path) => (
-              <article className="pathCard" key={path.title}>
-                <Heading as="h3">{path.title}</Heading>
-                <p>{path.body}</p>
-                <Link to={path.to}>{path.action}</Link>
-              </article>
+        <section className="container nebStart">
+          <div className="nebSectionHeading">
+            <span>Start here</span>
+            <Heading as="h2">One stack, two ways to use it.</Heading>
+            <p>
+              Run Nebulus as a complete ground station or use the same Rust
+              components to build something purpose-specific.
+            </p>
+          </div>
+          <div className="nebGuideGrid">
+            {guides.map((guide) => (
+              <Link className="nebGuide" to={guide.to} key={guide.title}>
+                <span className="nebGuideNumber">{guide.number}</span>
+                <Heading as="h3">{guide.title}</Heading>
+                <p>{guide.body}</p>
+                <strong>
+                  {guide.action} <span aria-hidden="true">→</span>
+                </strong>
+              </Link>
             ))}
           </div>
         </section>
 
-        <section className="homeBand">
-          <div className="container bandGrid">
-            <div>
-              <div className="sectionKicker">What Is Shared</div>
-              <Heading as="h2">The packet path lives in Rust.</Heading>
+        <section className="nebStack">
+          <div className="container">
+            <div className="nebSectionHeading nebSectionHeading--wide">
+              <span>Receive pipeline</span>
+              <Heading as="h2">The complete packet path stays in Rust.</Heading>
               <p>
-                Native and web builds share Realtek RX parsing, WFB session and
-                data handling, Reed-Solomon recovery, RTP depacketization,
-                generic raw payload taps, adaptive-link feedback generation, and
-                TX packet construction.
+                Native and browser builds share protocol behavior. Only USB
+                access, video decode, presentation, and OS integrations vary by
+                platform.
               </p>
             </div>
-            <pre className="codePreview">
-              {`let packets = parse_rx_aggregate(&transfer)?;
-for packet in packets {
-    let events = pipeline.push_80211_frame(packet.data)?;
-    // Recovered video payloads can be mirrored as RTP,
-    // then fed into RtpDepacketizer for Annex-B frames.
-}`}
-            </pre>
+            <div className="nebPipeline">
+              {pipeline.map((step, index) => (
+                <div className="nebPipelineStep" key={step}>
+                  <span>{String(index + 1).padStart(2, "0")}</span>
+                  <strong>{step}</strong>
+                </div>
+              ))}
+            </div>
           </div>
         </section>
 
-        <section className="container referenceStrip">
-          <div>
-            <div className="sectionKicker">Reference Material</div>
-            <Heading as="h2">
-              Grounded in the projects that already work.
-            </Heading>
+        <section className="container nebLibraries">
+          <div className="nebLibrariesIntro">
+            <span>For developers</span>
+            <Heading as="h2">Use only the layer you need.</Heading>
+            <p>
+              The public crates separate protocol processing, hardware access,
+              platform decoding, and browser bindings without tying applications
+              to the Nebulus UI.
+            </p>
+            <Link to="/docs/crates">Explore all crates →</Link>
           </div>
-          <div className="referenceLinks">
-            {references.map(([label, href]) => (
-              <a href={href} key={href}>
-                {label}
-              </a>
+          <div className="nebCrateList">
+            {crates.map(([name, description]) => (
+              <Link to="/docs/crates" className="nebCrate" key={name}>
+                <code>{name}</code>
+                <span>{description}</span>
+                <b aria-hidden="true">→</b>
+              </Link>
             ))}
-            <Link to="/docs/references">All References</Link>
           </div>
         </section>
       </main>

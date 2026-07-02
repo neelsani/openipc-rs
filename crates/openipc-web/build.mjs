@@ -159,6 +159,7 @@ async function main() {
       expectedVersion,
       "--root",
       join(rootDir, ".cargo-tools"),
+      "--force",
     ]);
   }
 

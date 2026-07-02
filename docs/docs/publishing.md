@@ -60,8 +60,7 @@ Configure npm trusted publishing for `@openipc-rs/web` on npmjs.com:
 | Workflow filename    | `ci.yml`                      |
 | Allowed action       | package publish from `ci.yml` |
 
-The existing Cloudflare secrets are still required for `master` and release-tag
-deploys:
+The existing Cloudflare secrets are required for deployments from `master`:
 
 - `CLOUDFLARE_API_TOKEN`
 - `CLOUDFLARE_ACCOUNT_ID`
@@ -72,10 +71,9 @@ CI deploys the public sites:
 - Legacy Station: [station.openipc-rs.neels.dev](https://station.openipc-rs.neels.dev)
 - Docs: [openipc-rs.neels.dev](https://openipc-rs.neels.dev)
 
-Release commits on `master` run the normal branch CI/deploy jobs. The tag
-workflow for the same commit runs the release path: validation, Nebulus/legacy
-Station/docs deploys, crates.io publish, npm package publish, and Nebulus
-artifact upload.
+Release commits on `master` run the normal branch CI and deploy the sites. The
+tag workflow for the same commit runs validation, crates.io and npm publishing,
+and Nebulus artifact creation. It does not deploy the sites again.
 
 ## Release Checklist
 

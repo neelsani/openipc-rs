@@ -191,7 +191,11 @@ jobs:
           bun-version: 1.3.14
 
       - name: Install Trunk
-        run: cargo install trunk --version 0.21.14 --locked
+        run: |
+          if [ "$(trunk --version 2>/dev/null || true)" != "trunk 0.21.14" ]; then
+            cargo install trunk --version 0.21.14 --locked --force
+          fi
+          trunk --version
 
       - name: Install app dependencies
         working-directory: apps/openipc-station
@@ -226,7 +230,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - wasm-package
-    if: "github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))"
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     permissions:
       contents: read
       deployments: write
@@ -274,7 +278,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - wasm-package
-    if: "github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))"
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     permissions:
       contents: read
       deployments: write
@@ -306,7 +310,11 @@ jobs:
             nebulus-cargo-${{ runner.os }}-
 
       - name: Install Trunk
-        run: cargo install trunk --version 0.21.14 --locked
+        run: |
+          if [ "$(trunk --version 2>/dev/null || true)" != "trunk 0.21.14" ]; then
+            cargo install trunk --version 0.21.14 --locked --force
+          fi
+          trunk --version
 
       - name: Build Nebulus web app
         working-directory: apps/nebulus
@@ -351,7 +359,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - docs
-    if: "github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))"
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     permissions:
       contents: read
       deployments: write
@@ -521,7 +529,12 @@ jobs:
           cargo clippy -p nebulus --target aarch64-linux-android --lib --no-deps -- -D warnings
 
       - name: Install cargo-apk2
-        run: cargo install cargo-apk2 --version 1.3.11 --locked
+        run: |
+          case "$(cargo apk2 --version 2>/dev/null || true)" in
+            *" 1.3.11") ;;
+            *) cargo install cargo-apk2 --version 1.3.11 --locked --force ;;
+          esac
+          cargo apk2 --version
 
       - name: Build Nebulus Android debug APK
         run: cargo apk2 build -p nebulus --lib --target aarch64-linux-android
@@ -889,7 +902,12 @@ jobs:
             release-android-cargo-${{ runner.os }}-
 
       - name: Install cargo-apk2
-        run: cargo install cargo-apk2 --version 1.3.11 --locked
+        run: |
+          case "$(cargo apk2 --version 2>/dev/null || true)" in
+            *" 1.3.11") ;;
+            *) cargo install cargo-apk2 --version 1.3.11 --locked --force ;;
+          esac
+          cargo apk2 --version
 
       - name: Prepare Android release signing
         env:
@@ -948,6 +966,8 @@ jobs:
     needs:
       - desktop-release
       - android-release
+      - publish-crates
+      - publish-wasm-npm
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write

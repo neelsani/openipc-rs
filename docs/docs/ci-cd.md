@@ -17,8 +17,8 @@ pushes to `master`, `v*` tags, and manual dispatch.
 | `Desktop Check`                  | Tests the matching `openipc-video` backend and checks Nebulus for Linux x64/arm64, macOS Apple Silicon/Intel, and Windows x64/arm64.                                   |
 | `Android Check`                  | Clippies the MediaCodec and Nebulus paths for aarch64 Android and builds a Nebulus debug APK with `cargo-apk2`.                                                        |
 | `Deploy Legacy Station Site`     | Builds and deploys `apps/openipc-station/dist` to the existing `openipc-rs-station` Cloudflare Pages project.                                                          |
-| `Deploy Nebulus Web App`         | Builds and deploys `apps/nebulus/dist` to the separate `openipc-rs-nebulus` Cloudflare Pages project.                                                                  |
-| `Deploy Docs Site`               | Deploys `docs/build` to Cloudflare Pages on pushes to `master` and `v*` tags.                                                                                          |
+| `Deploy Nebulus Web App`         | Builds and deploys `apps/nebulus/dist` to the separate `nebulus` Cloudflare Pages project.                                                                             |
+| `Deploy Docs Site`               | Deploys `docs/build` to Cloudflare Pages on pushes to `master`.                                                                                                        |
 | `Publish Crates.io Packages`     | Publishes the workspace crates on `v*` tags.                                                                                                                           |
 | `Publish WASM SDK To npm`        | Builds `@openipc-rs/web` with Bun and publishes it with npm trusted publishing on `v*` tags.                                                                           |
 | `Nebulus Desktop Release`        | Builds and packages Nebulus for all six desktop targets on `v*` tags.                                                                                                  |
@@ -27,16 +27,17 @@ pushes to `master`, `v*` tags, and manual dispatch.
 
 ## Event Behavior
 
-| Event             | Validation      | Deploys                                | Publishes                                                    |
-| ----------------- | --------------- | -------------------------------------- | ------------------------------------------------------------ |
-| Pull request      | yes             | no                                     | no                                                           |
-| Push to `master`  | yes             | legacy station, Nebulus, and docs      | no                                                           |
-| Push tag `v0.2.0` | yes             | legacy station, Nebulus, and docs      | crates.io, npm, GitHub Release desktop and Android artifacts |
-| Manual dispatch   | validation jobs | no deploy unless it is also a push ref | no                                                           |
+| Event             | Validation      | Deploys                                 | Publishes                                                    |
+| ----------------- | --------------- | --------------------------------------- | ------------------------------------------------------------ |
+| Pull request      | yes             | no                                      | no                                                           |
+| Push to `master`  | yes             | legacy station, Nebulus, and docs       | no                                                           |
+| Push tag `v0.2.0` | yes             | no; the release commit already deployed | crates.io, npm, GitHub Release desktop and Android artifacts |
+| Manual dispatch   | validation jobs | no                                      | no                                                           |
 
 `cargo release` creates a release commit on `master` and a `v*` tag. GitHub
-sees those as separate push events. With the current workflow, the release
-commit runs the normal `master` path and the tag runs the release path.
+sees those as separate push events. The release commit runs the normal
+validation and deployment path. The tag runs validation, package publishing,
+and artifact creation without deploying the same sites a second time.
 
 ## Release Publishing
 
@@ -48,8 +49,8 @@ Pushes to tags like `v0.2.0` run the release publishing jobs after validation:
 - `@openipc-rs/web` builds with Bun and publishes to npm with npm trusted
   publishing,
 - Nebulus builds for six desktop targets and one Android target,
-- a final job collects the platform archives, APK, and SHA-256 files into one
-  GitHub Release for the tag.
+- after both package publishers succeed, a final job collects the platform
+  archives, APK, and SHA-256 files into one GitHub Release for the tag.
 
 Desktop release targets:
 

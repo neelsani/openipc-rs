@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 const DEFAULT_RTP_REORDER_WINDOW: usize = 15;
+const DEFAULT_MAX_ACCESS_UNIT_SIZE: usize = 8 * 1024 * 1024;
 
 /// Error returned while parsing or depacketizing RTP video.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -338,6 +339,17 @@ struct FragmentState {
     corrupted: bool,
 }
 
+#[derive(Debug, Default, Clone)]
+struct AccessUnitState {
+    data: Vec<u8>,
+    timestamp: Option<u32>,
+    next_sequence: Option<u16>,
+    corrupted: bool,
+    is_keyframe: bool,
+    has_decoder_config: bool,
+    nal_type: u8,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct FrameMeta {
     timestamp: u32,
@@ -356,6 +368,8 @@ struct FrameMeta {
 pub struct RtpDepacketizer {
     h264: FragmentState,
     h265: FragmentState,
+    h264_access_unit: AccessUnitState,
+    h265_access_unit: AccessUnitState,
     h264_sps: Option<Vec<u8>>,
     h264_pps: Option<Vec<u8>>,
     h265_vps: Option<Vec<u8>>,
@@ -377,12 +391,14 @@ impl RtpDepacketizer {
         Self {
             h264: FragmentState::default(),
             h265: FragmentState::default(),
+            h264_access_unit: AccessUnitState::default(),
+            h265_access_unit: AccessUnitState::default(),
             h264_sps: None,
             h264_pps: None,
             h265_vps: None,
             h265_sps: None,
             h265_pps: None,
-            max_fragment: 1024 * 1024,
+            max_fragment: DEFAULT_MAX_ACCESS_UNIT_SIZE,
             status: RtpDepacketizerStatus::default(),
         }
     }
@@ -431,6 +447,7 @@ impl RtpDepacketizer {
             return Err(RtpError::UnsupportedPayload);
         };
         self.status.last_codec = Some(codec);
+        self.observe_access_unit_packet(codec, header);
         let result = match codec {
             Codec::H264 => self.push_h264(payload, header),
             Codec::H265 => self.push_h265(payload, header),
@@ -463,8 +480,8 @@ impl RtpDepacketizer {
             }
             24 => self.h264_stap_a(payload, header),
             28 => self.h264_fu_a(payload, header),
-            _ if self.has_decoder_config(Codec::H264) && is_h264_vcl_nal(nal_type) => {
-                Ok(Some(self.frame_with_prefix(
+            _ if self.has_decoder_config(Codec::H264) && is_h264_vcl_nal(nal_type) => self
+                .push_complete_nalu(
                     payload,
                     FrameMeta {
                         timestamp: header.timestamp,
@@ -474,8 +491,8 @@ impl RtpDepacketizer {
                         sequence_number: header.sequence_number,
                         nal_type,
                     },
-                )))
-            }
+                    header.marker,
+                ),
             _ if !is_h264_vcl_nal(nal_type) => Ok(None),
             _ => {
                 self.status.config_wait_drops = self.status.config_wait_drops.saturating_add(1);
@@ -509,8 +526,8 @@ impl RtpDepacketizer {
             }
             48 => self.h265_ap(payload, header),
             49 => self.h265_fu(payload, header),
-            _ if self.has_decoder_config(Codec::H265) && is_h265_vcl_nal(nal_type) => {
-                Ok(Some(self.frame_with_prefix(
+            _ if self.has_decoder_config(Codec::H265) && is_h265_vcl_nal(nal_type) => self
+                .push_complete_nalu(
                     payload,
                     FrameMeta {
                         timestamp: header.timestamp,
@@ -520,8 +537,8 @@ impl RtpDepacketizer {
                         sequence_number: header.sequence_number,
                         nal_type,
                     },
-                )))
-            }
+                    header.marker,
+                ),
             _ if !is_h265_vcl_nal(nal_type) => Ok(None),
             _ => {
                 self.status.config_wait_drops = self.status.config_wait_drops.saturating_add(1);
@@ -568,19 +585,16 @@ impl RtpDepacketizer {
                 return Ok(None);
             }
             let data = std::mem::take(&mut self.h264.data);
-            let frame = self.frame_with_owned_nalu(
-                data,
-                FrameMeta {
-                    timestamp: self.h264.timestamp,
-                    is_keyframe: nal_type == 5,
-                    codec: Codec::H264,
-                    payload_type: header.payload_type,
-                    sequence_number: header.sequence_number,
-                    nal_type,
-                },
-            );
+            let meta = FrameMeta {
+                timestamp: self.h264.timestamp,
+                is_keyframe: nal_type == 5,
+                codec: Codec::H264,
+                payload_type: header.payload_type,
+                sequence_number: header.sequence_number,
+                nal_type,
+            };
             self.reset_fragment(Codec::H264);
-            Ok(Some(frame))
+            self.push_complete_owned_nalu(data, meta, header.marker)
         } else {
             Ok(None)
         }
@@ -624,19 +638,16 @@ impl RtpDepacketizer {
                 return Ok(None);
             }
             let data = std::mem::take(&mut self.h265.data);
-            let frame = self.frame_with_owned_nalu(
-                data,
-                FrameMeta {
-                    timestamp: self.h265.timestamp,
-                    is_keyframe: (16..=23).contains(&nal_type),
-                    codec: Codec::H265,
-                    payload_type: header.payload_type,
-                    sequence_number: header.sequence_number,
-                    nal_type,
-                },
-            );
+            let meta = FrameMeta {
+                timestamp: self.h265.timestamp,
+                is_keyframe: (16..=23).contains(&nal_type),
+                codec: Codec::H265,
+                payload_type: header.payload_type,
+                sequence_number: header.sequence_number,
+                nal_type,
+            };
             self.reset_fragment(Codec::H265);
-            Ok(Some(frame))
+            self.push_complete_owned_nalu(data, meta, header.marker)
         } else {
             Ok(None)
         }
@@ -682,11 +693,12 @@ impl RtpDepacketizer {
         let mut has_slice = false;
         let mut has_sps = false;
         let mut has_pps = false;
+        let mut last_slice_type = 0;
         while offset + 2 <= payload.len() {
             let len = u16::from_be_bytes([payload[offset], payload[offset + 1]]) as usize;
             offset += 2;
-            if offset + len > payload.len() {
-                break;
+            if len == 0 || offset.saturating_add(len) > payload.len() {
+                return Err(RtpError::UnsupportedPayload);
             }
             let nalu = &payload[offset..offset + len];
             let nal_type = nalu.first().map(|b| b & 0x1f).unwrap_or(0);
@@ -702,10 +714,16 @@ impl RtpDepacketizer {
                 }
                 _ => {}
             }
-            has_slice |= (1..=5).contains(&nal_type);
-            keyframe |= nal_type == 5;
+            if is_h264_vcl_nal(nal_type) {
+                has_slice = true;
+                keyframe |= nal_type == 5;
+                last_slice_type = nal_type;
+            }
             append_annex_b(&mut out, nalu);
             offset += len;
+        }
+        if offset != payload.len() {
+            return Err(RtpError::UnsupportedPayload);
         }
         if !has_slice || !self.has_decoder_config(Codec::H264) {
             if has_slice {
@@ -713,24 +731,19 @@ impl RtpDepacketizer {
             }
             return Ok(None);
         }
-        let data = if keyframe && !(has_sps && has_pps) {
-            let mut data = Vec::new();
-            self.prepend_cached_config(&mut data, Codec::H264);
-            data.extend_from_slice(&out);
-            data
-        } else {
-            out
-        };
-        Ok(Some(DepacketizedFrame {
-            data,
-            timestamp: header.timestamp,
-            is_keyframe: keyframe,
-            codec: Codec::H264,
-            payload_type: header.payload_type,
-            sequence_number: header.sequence_number,
-            nal_type: self.status.last_nal_type.unwrap_or(0),
-            codec_config: self.codec_config(),
-        }))
+        self.push_complete_owned_annex_b(
+            out,
+            FrameMeta {
+                timestamp: header.timestamp,
+                is_keyframe: keyframe,
+                codec: Codec::H264,
+                payload_type: header.payload_type,
+                sequence_number: header.sequence_number,
+                nal_type: last_slice_type,
+            },
+            header.marker,
+            has_sps && has_pps,
+        )
     }
 
     fn h265_ap(
@@ -745,11 +758,12 @@ impl RtpDepacketizer {
         let mut has_vps = false;
         let mut has_sps = false;
         let mut has_pps = false;
+        let mut last_slice_type = 0;
         while offset + 2 <= payload.len() {
             let len = u16::from_be_bytes([payload[offset], payload[offset + 1]]) as usize;
             offset += 2;
-            if offset + len > payload.len() {
-                break;
+            if len == 0 || offset.saturating_add(len) > payload.len() {
+                return Err(RtpError::UnsupportedPayload);
             }
             let nalu = &payload[offset..offset + len];
             let nal_type = nalu.first().map(|b| (b >> 1) & 0x3f).unwrap_or(0);
@@ -769,10 +783,16 @@ impl RtpDepacketizer {
                 }
                 _ => {}
             }
-            has_slice |= !nalu.is_empty() && nal_type <= 31;
-            keyframe |= (16..=23).contains(&nal_type);
+            if is_h265_vcl_nal(nal_type) {
+                has_slice = true;
+                keyframe |= (16..=23).contains(&nal_type);
+                last_slice_type = nal_type;
+            }
             append_annex_b(&mut out, nalu);
             offset += len;
+        }
+        if offset != payload.len() {
+            return Err(RtpError::UnsupportedPayload);
         }
         if !has_slice || !self.has_decoder_config(Codec::H265) {
             if has_slice {
@@ -780,24 +800,19 @@ impl RtpDepacketizer {
             }
             return Ok(None);
         }
-        let data = if keyframe && !(has_vps && has_sps && has_pps) {
-            let mut data = Vec::new();
-            self.prepend_cached_config(&mut data, Codec::H265);
-            data.extend_from_slice(&out);
-            data
-        } else {
-            out
-        };
-        Ok(Some(DepacketizedFrame {
-            data,
-            timestamp: header.timestamp,
-            is_keyframe: keyframe,
-            codec: Codec::H265,
-            payload_type: header.payload_type,
-            sequence_number: header.sequence_number,
-            nal_type: self.status.last_nal_type.unwrap_or(0),
-            codec_config: self.codec_config(),
-        }))
+        self.push_complete_owned_annex_b(
+            out,
+            FrameMeta {
+                timestamp: header.timestamp,
+                is_keyframe: keyframe,
+                codec: Codec::H265,
+                payload_type: header.payload_type,
+                sequence_number: header.sequence_number,
+                nal_type: last_slice_type,
+            },
+            header.marker,
+            has_vps && has_sps && has_pps,
+        )
     }
 
     fn append_fragment(&mut self, codec: Codec, bytes: &[u8]) -> Result<(), RtpError> {
@@ -813,47 +828,112 @@ impl RtpDepacketizer {
         Ok(())
     }
 
-    fn frame_with_prefix(&mut self, nalu: &[u8], meta: FrameMeta) -> DepacketizedFrame {
-        let mut data = Vec::new();
-        if meta.is_keyframe {
-            self.prepend_cached_config(&mut data, meta.codec);
-        }
-        append_annex_b(&mut data, nalu);
-        DepacketizedFrame {
-            data,
-            timestamp: meta.timestamp,
-            is_keyframe: meta.is_keyframe,
-            codec: meta.codec,
-            payload_type: meta.payload_type,
-            sequence_number: meta.sequence_number,
-            nal_type: meta.nal_type,
-            codec_config: self.codec_config(),
-        }
+    fn push_complete_nalu(
+        &mut self,
+        nalu: &[u8],
+        meta: FrameMeta,
+        marker: bool,
+    ) -> Result<Option<DepacketizedFrame>, RtpError> {
+        let mut owned = Vec::with_capacity(nalu.len());
+        owned.extend_from_slice(nalu);
+        self.push_complete_owned_nalu(owned, meta, marker)
     }
 
-    fn frame_with_owned_nalu(&mut self, mut nalu: Vec<u8>, meta: FrameMeta) -> DepacketizedFrame {
-        let data = if meta.is_keyframe {
-            let mut data = Vec::with_capacity(nalu.len() + 4 + self.cached_config_len(meta.codec));
-            self.prepend_cached_config(&mut data, meta.codec);
-            append_annex_b(&mut data, &nalu);
-            data
-        } else {
-            let len = nalu.len();
-            nalu.resize(len + 4, 0);
-            nalu.copy_within(0..len, 4);
-            nalu[..4].copy_from_slice(&[0, 0, 0, 1]);
-            nalu
+    fn push_complete_owned_nalu(
+        &mut self,
+        nalu: Vec<u8>,
+        meta: FrameMeta,
+        marker: bool,
+    ) -> Result<Option<DepacketizedFrame>, RtpError> {
+        let mut data = Vec::with_capacity(nalu.len().saturating_add(4));
+        append_annex_b(&mut data, &nalu);
+        self.push_complete_owned_annex_b(data, meta, marker, false)
+    }
+
+    fn push_complete_owned_annex_b(
+        &mut self,
+        annex_b: Vec<u8>,
+        meta: FrameMeta,
+        marker: bool,
+        has_decoder_config: bool,
+    ) -> Result<Option<DepacketizedFrame>, RtpError> {
+        let max_fragment = self.max_fragment;
+        let state = match meta.codec {
+            Codec::H264 => &mut self.h264_access_unit,
+            Codec::H265 => &mut self.h265_access_unit,
         };
-        DepacketizedFrame {
+        debug_assert_eq!(state.timestamp, Some(meta.timestamp));
+        if state.corrupted {
+            if marker {
+                reset_access_unit_state(state);
+            }
+            return Ok(None);
+        }
+        if state.data.len().saturating_add(annex_b.len()) > max_fragment {
+            reset_access_unit_state(state);
+            self.status.fragment_overflows = self.status.fragment_overflows.saturating_add(1);
+            return Err(RtpError::FragmentOverflow);
+        }
+        state.data.extend_from_slice(&annex_b);
+        state.is_keyframe |= meta.is_keyframe;
+        state.has_decoder_config |= has_decoder_config;
+        state.nal_type = meta.nal_type;
+        if !marker {
+            return Ok(None);
+        }
+
+        let mut data = std::mem::take(&mut state.data);
+        let is_keyframe = state.is_keyframe;
+        let has_decoder_config = state.has_decoder_config;
+        let nal_type = state.nal_type;
+        reset_access_unit_state(state);
+        if is_keyframe && !has_decoder_config {
+            let mut prefixed = Vec::with_capacity(data.len() + self.cached_config_len(meta.codec));
+            self.prepend_cached_config(&mut prefixed, meta.codec);
+            prefixed.append(&mut data);
+            data = prefixed;
+        }
+        Ok(Some(DepacketizedFrame {
             data,
             timestamp: meta.timestamp,
-            is_keyframe: meta.is_keyframe,
+            is_keyframe,
             codec: meta.codec,
             payload_type: meta.payload_type,
             sequence_number: meta.sequence_number,
-            nal_type: meta.nal_type,
+            nal_type,
             codec_config: self.codec_config(),
+        }))
+    }
+
+    fn observe_access_unit_packet(&mut self, codec: Codec, header: RtpHeader) {
+        let state = match codec {
+            Codec::H264 => &mut self.h264_access_unit,
+            Codec::H265 => &mut self.h265_access_unit,
+        };
+        if state
+            .timestamp
+            .is_some_and(|timestamp| timestamp != header.timestamp)
+        {
+            if !state.data.is_empty() {
+                self.status.fragment_sequence_gaps =
+                    self.status.fragment_sequence_gaps.saturating_add(1);
+            }
+            reset_access_unit_state(state);
         }
+        if state.timestamp.is_none() {
+            state.timestamp = Some(header.timestamp);
+        } else if state
+            .next_sequence
+            .is_some_and(|expected| expected != header.sequence_number)
+        {
+            if !state.corrupted {
+                self.status.fragment_sequence_gaps =
+                    self.status.fragment_sequence_gaps.saturating_add(1);
+            }
+            state.corrupted = true;
+            state.data.clear();
+        }
+        state.next_sequence = Some(header.sequence_number.wrapping_add(1));
     }
 
     fn cached_config_len(&self, codec: Codec) -> usize {
@@ -933,6 +1013,16 @@ impl RtpDepacketizer {
             }
         }
     }
+}
+
+fn reset_access_unit_state(state: &mut AccessUnitState) {
+    state.data.clear();
+    state.timestamp = None;
+    state.next_sequence = None;
+    state.corrupted = false;
+    state.is_keyframe = false;
+    state.has_decoder_config = false;
+    state.nal_type = 0;
 }
 
 fn codec_from_payload_type(payload_type: u8) -> Option<Codec> {
@@ -1077,6 +1167,51 @@ mod tests {
             ]
             .concat()
         );
+    }
+
+    #[test]
+    fn combines_same_timestamp_h264_slices_until_marker() {
+        let mut depay = RtpDepacketizer::new();
+        prime_h264(&mut depay);
+        assert!(depay
+            .push(&rtp(&[0x41, 0x80, 0xaa], false, 3, 42))
+            .unwrap()
+            .is_none());
+        let frame = depay
+            .push(&rtp(&[0x41, 0x40, 0xbb], true, 4, 42))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            frame.data,
+            [
+                &[0, 0, 0, 1, 0x41, 0x80, 0xaa][..],
+                &[0, 0, 0, 1, 0x41, 0x40, 0xbb][..],
+            ]
+            .concat()
+        );
+        assert_eq!(frame.timestamp, 42);
+        assert!(!frame.is_keyframe);
+    }
+
+    #[test]
+    fn drops_access_unit_after_sequence_gap() {
+        let mut depay = RtpDepacketizer::new();
+        prime_h264(&mut depay);
+        assert!(depay
+            .push(&rtp(&[0x41, 0x80, 0xaa], false, 3, 42))
+            .unwrap()
+            .is_none());
+        assert!(depay
+            .push(&rtp(&[0x41, 0x40, 0xbb], true, 5, 42))
+            .unwrap()
+            .is_none());
+
+        assert_eq!(depay.status().fragment_sequence_gaps, 1);
+        assert!(depay
+            .push(&rtp(&[0x41, 0xcc], true, 6, 43))
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -1245,6 +1380,45 @@ mod tests {
         let status = depay.status();
         assert_eq!(status.keyframes_with_prepended_config, 0);
         assert_eq!(status.parameter_sets_prepended, 0);
+    }
+
+    #[test]
+    fn h264_stap_a_waits_for_the_access_unit_marker() {
+        let mut depay = RtpDepacketizer::new();
+        let sps = &[0x67, 0x64, 0x00, 0x1f][..];
+        let pps = &[0x68, 0xee][..];
+        assert!(depay
+            .push(&rtp(&stap_a(&[sps, pps, &[0x61, 0xaa]]), false, 1, 20,))
+            .unwrap()
+            .is_none());
+
+        let frame = depay
+            .push(&rtp(&[0x61, 0xbb], true, 2, 20))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            frame.data,
+            [
+                &[0, 0, 0, 1][..],
+                sps,
+                &[0, 0, 0, 1][..],
+                pps,
+                &[0, 0, 0, 1, 0x61, 0xaa][..],
+                &[0, 0, 0, 1, 0x61, 0xbb][..],
+            ]
+            .concat()
+        );
+    }
+
+    #[test]
+    fn malformed_stap_a_length_is_rejected() {
+        let mut depay = RtpDepacketizer::new();
+        let malformed = [24, 0, 8, 0x67, 0x64];
+        assert_eq!(
+            depay.push(&rtp(&malformed, true, 1, 20)),
+            Err(RtpError::UnsupportedPayload)
+        );
+        assert_eq!(depay.status().unsupported_payloads, 1);
     }
 
     #[test]

@@ -549,7 +549,9 @@ mod tests {
             payload.extend_from_slice(&(nalu.len() as u16).to_be_bytes());
             payload.extend_from_slice(nalu);
         }
-        rtp(crate::rtp::RTP_PAYLOAD_TYPE_H264, &payload)
+        let mut packet = rtp(crate::rtp::RTP_PAYLOAD_TYPE_H264, &payload);
+        packet[1] |= 0x80;
+        packet
     }
 
     #[test]

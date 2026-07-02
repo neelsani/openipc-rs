@@ -13,15 +13,19 @@ flowchart LR
     subgraph Shared["Shared Rust crates"]
         Core["openipc-core<br/>WFB, FEC, RTP, Annex-B, raw payloads"]
         Rtl["openipc-rtl88xx<br/>Realtek USB HAL"]
+        Video["openipc-video<br/>platform H.264/H.265 decode"]
     end
 
     Native["Native CLI app<br/>openipc-cli"] --> Rtl
     Desktop["Tauri backend<br/>OpenIPC Station"] --> Rtl
+    Nebulus["Nebulus<br/>egui native, Android, or WASM"] --> Rtl
     Browser["Browser UI<br/>React + WebUSB permission"] --> Wasm["openipc-web<br/>wasm-bindgen"]
     Wasm --> Rtl
     Rtl --> Core
     Core --> Output["Annex-B frames<br/>raw payload bytes<br/>metrics<br/>adaptive feedback"]
-    Output --> Players["WebCodecs<br/>UDP/file output<br/>recording"]
+    Output --> Video
+    Output --> Players["UDP/file output<br/>recording"]
+    Video --> NativeSurface["CVPixelBuffer, DMA/GBM, D3D11<br/>AHardwareBuffer, browser VideoFrame"]
 ```
 
 ## Shared Rust Responsibilities
@@ -30,6 +34,9 @@ flowchart LR
 - OpenIPC/WFB 802.11 frame filtering.
 - WFB session-key handling, data decryption, FEC recovery, and counters.
 - RTP parsing and H.264/H.265 depacketization into Annex-B frames.
+- Decoder configuration, bounded frame queues, and decoder statistics in
+  `openipc-video`; the actual decoder and retained output surface remain
+  platform-specific across desktop, Android, and WebAssembly.
 - Generic recovered-payload taps for non-video WFB radio ports. The core crate
   returns bytes and packet sequence metadata; application crates decide whether
   those bytes are MAVLink, MSP, CRSF, IP, or something else.
@@ -59,7 +66,11 @@ protocol details, then let each target own the APIs that make sense there.
   imported as `nusb`.
 - Rust/WASM initializes the Realtek adapter, performs bulk IN/OUT, and returns
   typed video frames and metrics to React.
-- React uses WebCodecs for playback and canvas capture for recording.
+- React uses WebCodecs for playback and canvas capture for recording. Rust/WASM
+  applications may instead drive `openipc_video::WebDecoder` and receive the
+  same browser `VideoFrame` handles in Rust.
+- Nebulus drives `openipc_video::WebDecoder` directly and keeps WebUSB,
+  protocol reconstruction, and WebCodecs orchestration in Rust/WASM.
 
 ### Desktop
 
@@ -68,12 +79,27 @@ the receive loop runs in native Rust. Encoded Annex-B frames and metrics are
 sent to the UI. WebCodecs still performs video decode inside the WebView, so the
 desktop path avoids copying decoded video surfaces through Rust.
 
+Nebulus follows a different desktop boundary. Its native worker submits
+Annex-B access units to `openipc-video`, receives a retained platform decoder
+surface, and hands the newest presentable frame to egui. That path avoids the
+WebView entirely.
+
 ## Copy Boundaries
 
-The largest regular boundary is the encoded video frame returned from Rust/WASM
-to JavaScript. Raw USB transfers enter Rust one transfer at a time, and decoded
-pixels stay inside the browser/WebView decoder path. That is the main reason the
-app does not decode video inside Rust today.
+OpenIPC Station's largest regular boundary is the encoded video frame returned
+from Rust/WASM or native Tauri Rust to JavaScript. Decoded pixels then stay in
+WebCodecs and the browser/WebView canvas.
+
+Nebulus has no JavaScript frame callback. It keeps encoded video and decoder
+control in Rust, coalesces retained native decoder surfaces, uploads NV12
+planes to persistent GPU textures, and performs color conversion in a shader.
+CPU RGBA conversion is only a compatibility fallback. Direct IOSurface,
+DMA-BUF, and D3D11 imports could remove the remaining plane copy.
+
+On Android the same latest-only boundary retains MediaCodec `AImage` outputs
+until the UI selects one, then uploads compact Y/U/V planes for shader
+conversion. In the browser, WebCodecs `VideoFrame` is uploaded directly to a
+persistent WebGL texture; decoded pixels do not pass through a WASM byte array.
 
 ## Data Flow
 

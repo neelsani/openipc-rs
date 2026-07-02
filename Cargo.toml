@@ -1,10 +1,12 @@
 [workspace]
 resolver = "2"
 members = [
+    "apps/nebulus",
     "apps/openipc-cli",
     "apps/wfb-rs",
     "crates/openipc-core",
     "crates/openipc-rtl88xx",
+    "crates/openipc-video",
     "crates/openipc-web",
     "apps/openipc-station/src-tauri",
     "plugins/tauri-plugin-openipc-usb",
@@ -23,3 +25,8 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+
+# Codec mocks are debug-only, but a 1080p decoder/readback/texture pipeline is
+# not a meaningful real-time test when any of its crates run at opt-level 0.
+[profile.dev]
+opt-level = 2

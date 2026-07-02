@@ -12,9 +12,11 @@ const sidebars: SidebarsConfig = {
         "crates",
         "rust-library",
         "native",
+        "native-video",
         "web-wasm",
         "wasm-sdk",
         "desktop-tauri",
+        "nebulus",
       ],
     },
     {

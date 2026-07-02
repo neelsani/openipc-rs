@@ -9,19 +9,19 @@ pushes to `master`, `v*` tags, and manual dispatch.
 
 ## What Runs
 
-| Job                          | Purpose                                                                                                                                                                          |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Rust Workspace`             | Installs Linux desktop dependencies, runs `cargo fmt`, workspace clippy, workspace tests, shared version checks, changelog presence checks, and `openipc-web` WASM target check. |
-| `WASM SDK Package`           | Installs app dependencies, builds the station web app, and dry-runs the generated `@openipc-rs/web` package.                                                                     |
-| `Docs Site`                  | Builds the Docusaurus site.                                                                                                                                                      |
-| `Desktop Check`              | Runs `bun run desktop:check` for Linux x64/arm64, macOS Apple Silicon/Intel, and Windows x64/arm64.                                                                              |
-| `Android Check`              | Initializes the generated Tauri Android project and builds an aarch64 debug APK, including the local Android USB plugin Kotlin/Gradle project.                                   |
-| `Deploy Station Site`        | Deploys `apps/openipc-station/dist` to Cloudflare Pages on pushes to `master` and `v*` tags.                                                                                     |
-| `Deploy Docs Site`           | Deploys `docs/build` to Cloudflare Pages on pushes to `master` and `v*` tags.                                                                                                    |
-| `Publish Crates.io Packages` | Publishes the workspace crates on `v*` tags.                                                                                                                                     |
-| `Publish WASM SDK To npm`    | Builds `@openipc-rs/web` with Bun and publishes it with npm trusted publishing on `v*` tags.                                                                                     |
-| `Desktop Release`            | Uses `tauri-apps/tauri-action` to build and upload desktop bundles to the GitHub Release on `v*` tags.                                                                           |
-| `Android Release`            | Builds unsigned universal Android APK/AAB artifacts with the Tauri CLI and uploads them to the GitHub Release on `v*` tags.                                                      |
+| Job                          | Purpose                                                                                                                                                                    |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Rust Workspace`             | Installs Linux desktop dependencies, runs format/workspace clippy/tests/version checks, checks `openipc-web`, and clippies the `openipc-video` and Nebulus WASM paths.     |
+| `WASM SDK Package`           | Builds Station and Nebulus for the browser, verifies Nebulus emitted a real WASM module, and dry-runs the generated `@openipc-rs/web` package.                              |
+| `Docs Site`                  | Builds the Docusaurus site.                                                                                                                                                |
+| `Desktop Check`              | Tests the matching `openipc-video` backend, checks Nebulus, and checks Tauri for Linux x64/arm64, macOS Apple Silicon/Intel, and Windows x64/arm64.                        |
+| `Android Check`              | Clippies the MediaCodec and Nebulus paths for aarch64 Android, initializes the generated Tauri project, and builds a debug APK including the USB plugin.                  |
+| `Deploy Station Site`        | Deploys `apps/openipc-station/dist` to Cloudflare Pages on pushes to `master` and `v*` tags.                                                                               |
+| `Deploy Docs Site`           | Deploys `docs/build` to Cloudflare Pages on pushes to `master` and `v*` tags.                                                                                              |
+| `Publish Crates.io Packages` | Publishes the workspace crates on `v*` tags.                                                                                                                               |
+| `Publish WASM SDK To npm`    | Builds `@openipc-rs/web` with Bun and publishes it with npm trusted publishing on `v*` tags.                                                                               |
+| `Desktop Release`            | Uses `tauri-apps/tauri-action` to build and upload desktop bundles to the GitHub Release on `v*` tags.                                                                     |
+| `Android Release`            | Builds unsigned universal Android APK/AAB artifacts with the Tauri CLI and uploads them to the GitHub Release on `v*` tags.                                                |
 
 ## Event Behavior
 
@@ -40,8 +40,8 @@ commit runs the normal `master` path and the tag runs the release path.
 
 Pushes to tags like `v0.2.0` run the release publishing jobs after validation:
 
-- publishable Rust crates (`openipc-core`, `openipc-rtl88xx`, `openipc-web`,
-  and `wfb-rs`) publish to crates.io with
+- publishable Rust crates (`openipc-core`, `openipc-rtl88xx`, `openipc-video`,
+  `openipc-web`, and `wfb-rs`) publish to crates.io with
   `cargo publish --workspace`,
 - `@openipc-rs/web` builds with Bun and publishes to npm with npm trusted
   publishing,

@@ -3,18 +3,20 @@
 Rust libraries and apps for OpenIPC FPV ground stations.
 
 The repo contains the shared Rust packet pipeline, Realtek USB WiFi driver code,
-adaptive-link feedback, a WASM/WebUSB SDK, and OpenIPC Station for browser and
-desktop.
+adaptive-link feedback, a WASM/WebUSB SDK, OpenIPC Station, and the pure-Rust
+Nebulus egui app.
 
 ## Repository
 
 ```text
 crates/openipc-core       WFB, RTP, FEC, crypto, video and raw payload pipeline
 crates/openipc-rtl88xx    Realtek rtl88xx USB WiFi driver
+crates/openipc-video      Cross-platform low-latency H.264/H.265 decoding
 crates/openipc-web        wasm-bindgen package for browser/WebUSB apps
 apps/openipc-cli          Native command-line utilities
 apps/wfb-rs               WFB-style Rust command-line tools
 apps/openipc-station      React/Vite browser app and Tauri desktop app
+apps/nebulus              Pure-Rust egui desktop, Android, and WebUSB app
 plugins/tauri-plugin-openipc-usb
                           Android USB and VPN permission bridge used by Station
 docs                      Docusaurus documentation site
@@ -27,6 +29,7 @@ scripts                   cleanup helpers
 | ----------------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `openipc-core`    | [crates.io](https://crates.io/crates/openipc-core)    | Shared protocol code: WFB, FEC, RTP, crypto, video frame extraction, generic raw payload taps, adaptive-link packet logic. |
 | `openipc-rtl88xx` | [crates.io](https://crates.io/crates/openipc-rtl88xx) | Realtek rtl88xx USB WiFi driver/HAL for monitor receive and adaptive-link transmit.                                        |
+| `openipc-video`   | [crates.io](https://crates.io/crates/openipc-video)   | Hardware H.264/H.265 decoding for macOS, Linux, Windows, Android, and WebAssembly/WebCodecs.                               |
 | `openipc-web`     | [crates.io](https://crates.io/crates/openipc-web)     | Rust/WASM bindings for browser WebUSB applications.                                                                        |
 | `wfb-rs`          | [crates.io](https://crates.io/crates/wfb-rs)          | WFB-style command-line tools backed by the Rust userland Realtek driver.                                                   |
 | `@openipc-rs/web` | [npm](https://www.npmjs.com/package/@openipc-rs/web)  | Generated npm package from `openipc-web`, with WASM, JS glue, and TypeScript definitions.                                  |
@@ -58,6 +61,19 @@ Run the desktop station:
 cd apps/openipc-station
 bun install
 bun run desktop:dev
+```
+
+Run the pure-Rust egui station:
+
+```sh
+cargo run -p nebulus --bin nebulus-desktop --release
+```
+
+Run Nebulus in the browser:
+
+```sh
+cd apps/nebulus
+trunk serve --release --open
 ```
 
 Start the Tauri Android shell setup:
@@ -141,6 +157,7 @@ bun run start
 - [Web And WASM](docs/docs/web-wasm.md)
 - [WASM SDK Usage](docs/docs/wasm-sdk.md)
 - [Desktop Tauri](docs/docs/desktop-tauri.md)
+- [Nebulus](docs/docs/nebulus.md)
 - [Adaptive Link](docs/docs/adaptive-link.md)
 - [CI/CD](docs/docs/ci-cd.md)
 - [Publishing](docs/docs/publishing.md)

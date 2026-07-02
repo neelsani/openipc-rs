@@ -1,0 +1,128 @@
+[package]
+name = "nebulus"
+version = "0.1.25"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Low-latency native OpenIPC FPV ground station built with egui"
+publish = false
+readme = "README.md"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "nebulus-desktop"
+path = "src/main.rs"
+
+[dependencies]
+catppuccin-egui = { version = "5.7.0", default-features = false, features = ["egui33"] }
+eframe = { version = "0.35", default-features = false, features = ["default_fonts", "persistence"] }
+egui_plot = "0.36"
+nusb.workspace = true
+openipc-core = { version = "0.1.25", path = "../../crates/openipc-core" }
+openipc-rtl88xx = { version = "0.1.25", path = "../../crates/openipc-rtl88xx" }
+openipc-video = { version = "0.1.25", path = "../../crates/openipc-video" }
+ropus = "0.12.18"
+serde = { version = "1", features = ["derive"] }
+web-time = "1.1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+cpal = "0.18.1"
+env_logger = "0.11"
+tun = { version = "0.8", features = ["async"] }
+
+[target.'cfg(all(unix, not(target_arch = "wasm32")))'.dependencies]
+libc = "0.2"
+
+[target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))'.dependencies]
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "0.35", default-features = false, features = ["wgpu", "wayland", "x11"] }
+
+[target.'cfg(any(target_os = "macos", target_os = "android"))'.dependencies]
+eframe = { version = "0.35", default-features = false, features = ["wgpu"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+eframe = { version = "0.35", default-features = false, features = ["wgpu"] }
+tokio = { version = "1", features = ["rt", "time"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6", features = ["native-activity"] }
+android_logger = "0.15.1"
+jni = "0.22.4"
+libc = "0.2"
+log = "0.4"
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+console_error_panic_hook = "0.1"
+eframe = { version = "0.35", default-features = false, features = ["glow"] }
+futures-util = "0.3"
+js-sys = "0.3"
+rfd = { version = "0.17.2", default-features = false }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "AudioBuffer",
+    "AudioBufferSourceNode",
+    "AudioContext",
+    "AudioContextState",
+    "AudioDestinationNode",
+    "AudioNode",
+    "AudioParam",
+    "AudioScheduledSourceNode",
+    "BaseAudioContext",
+    "Blob",
+    "Document",
+    "Element",
+    "GainNode",
+    "HtmlAnchorElement",
+    "HtmlCanvasElement",
+    "Navigator",
+    "Usb",
+    "UsbDevice",
+    "UsbDeviceFilter",
+    "UsbDeviceRequestOptions",
+    "Url",
+    "VideoFrame",
+    "Window",
+] }
+
+[package.metadata.android]
+package = "dev.neels.openipc.nebulus"
+apk_name = "Nebulus"
+java_sources = "android/java"
+
+[package.metadata.android.sdk]
+min_sdk_version = 26
+target_sdk_version = 36
+
+[package.metadata.android.application]
+theme = "@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
+label = "Nebulus"
+
+[[package.metadata.android.application.activity]]
+name = "dev.neels.openipc.nebulus.NebulusActivity"
+exported = true
+
+[[package.metadata.android.application.activity.meta_data]]
+name = "android.app.lib_name"
+value = "nebulus"
+
+[[package.metadata.android.application.activity.intent_filter]]
+actions = ["android.intent.action.MAIN"]
+categories = ["android.intent.category.LAUNCHER"]
+
+[[package.metadata.android.application.service]]
+name = "dev.neels.openipc.nebulus.NebulusVpnService"
+enabled = true
+exported = false
+permission = "android.permission.BIND_VPN_SERVICE"
+
+[[package.metadata.android.application.service.intent_filter]]
+actions = ["android.net.VpnService"]
+
+[[package.metadata.android.uses_feature]]
+name = "android.hardware.usb.host"
+required = true

@@ -11,6 +11,7 @@ apps/openipc-station/node_modules
 apps/openipc-station/package-lock.json
 apps/openipc-station/dist
 apps/openipc-station/.wrangler
+apps/nebulus/dist
 apps/openipc-station/src-tauri/gen
 apps/openipc-station/src-tauri/target
 docs/node_modules

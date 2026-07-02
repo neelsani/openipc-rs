@@ -1,0 +1,65 @@
+[package]
+name = "openipc-video"
+version = "0.1.25"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Low-latency platform video decoding for OpenIPC applications"
+readme = "README.md"
+homepage = "https://github.com/neelsani/openipc-rs"
+documentation = "https://docs.rs/openipc-video"
+categories = ["multimedia::video", "hardware-support"]
+keywords = ["openipc", "fpv", "h264", "h265", "hardware-decoding"]
+
+[package.metadata.docs.rs]
+default-target = "aarch64-apple-darwin"
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "aarch64-linux-android",
+    "wasm32-unknown-unknown",
+]
+
+[lib]
+name = "openipc_video"
+path = "src/lib.rs"
+
+[dependencies]
+bytes = "1"
+cros-codecs = { version = "0.0.6", default-features = false }
+openipc-core = { path = "../openipc-core", version = "0.1.25" }
+thiserror = "2"
+
+[target.'cfg(target_os = "android")'.dependencies]
+ndk = { version = "0.9", default-features = false, features = ["media", "nativewindow", "api-level-26"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFDictionary", "CFNumber", "CFString"] }
+objc2-core-media = { version = "0.3.2", default-features = false, features = ["std", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMTime"] }
+objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
+objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "VTBase", "VTDecompressionProperties", "VTDecompressionSession", "VTErrors", "VTSession", "objc2-core-media", "objc2-core-video"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+cros-codecs = { version = "0.0.6", default-features = false, features = ["vaapi"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D10",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+futures-util = "0.3"
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+web-codecs = "0.3.10"
+web-time = "1.1"
+web-sys = { version = "0.3", features = ["VideoFrame", "VideoPixelFormat"] }

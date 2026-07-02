@@ -16,6 +16,7 @@ From crates.io:
 [dependencies]
 openipc-core = "0.1"
 openipc-rtl88xx = "0.1"
+openipc-video = "0.1"
 ```
 
 From git:
@@ -24,6 +25,7 @@ From git:
 [dependencies]
 openipc-core = { git = "https://github.com/neelsani/openipc-rs", package = "openipc-core" }
 openipc-rtl88xx = { git = "https://github.com/neelsani/openipc-rs", package = "openipc-rtl88xx" }
+openipc-video = { git = "https://github.com/neelsani/openipc-rs", package = "openipc-video" }
 ```
 
 The hardware and WASM crates use the published WebUSB-capable `nusb-webusb`
@@ -38,6 +40,8 @@ nusb = { package = "nusb-webusb", version = "0.2.3" }
 - `openipc-core` is pure protocol logic. It can process bytes from files, USB,
   tests, or another transport.
 - `openipc-rtl88xx` owns Realtek USB device access and monitor-mode setup.
+- `openipc-video` consumes Annex-B access units and owns platform decode, frame
+  backpressure, and retained decoded surfaces on desktop, Android, and web.
 - `openipc-web` is for building the WASM/npm package. Browser apps normally use
   `@openipc-rs/web` from npm instead.
 - `apps/openipc-cli` is a command-line app, not a library dependency.
@@ -105,9 +109,41 @@ fn push_transfer(
 }
 ```
 
-The returned frame bytes are encoded Annex-B H.264/H.265. Your application can
-write them to a file, feed a native decoder, or forward RTP/Annex-B to another
-player.
+## Decode Video
+
+`ReceiverRuntime` emits encoded frames. Move those frames directly into the
+target decoder without converting them to base64:
+
+```rust,no_run
+use openipc_video::{PlatformDecoder, VideoDecoder};
+
+# #[cfg(any(
+#     target_os = "macos",
+#     target_os = "linux",
+#     target_os = "windows",
+#     target_os = "android",
+#     all(target_arch = "wasm32", target_os = "unknown"),
+# ))]
+fn decode(
+    decoder: &mut PlatformDecoder,
+    frame: openipc_core::DepacketizedFrame,
+) -> Result<(), Box<dyn std::error::Error>> {
+    decoder.submit(frame.into())?;
+    if let Some(frame) = decoder.latest_frame() {
+        let size = frame.dimensions();
+        println!("decoded {}x{}", size.width, size.height);
+    }
+    Ok(())
+}
+```
+
+The decoder automatically tracks H.264 SPS/PPS and H.265 VPS/SPS/PPS. See
+[Platform Video Decoding](./native-video.md) for backpressure behavior and
+surface rendering on each target.
+
+The `DepacketizedFrame` values returned by `ReceiverRuntime` contain encoded
+Annex-B H.264/H.265. Your application can write those encoded bytes to a file,
+submit them to `openipc-video`, or use its raw RTP route for forwarding.
 
 Treat a malformed Realtek aggregate as a transfer-level error. Treat a failed
 WFB frame inside a valid aggregate as a packet drop and keep scanning, which is

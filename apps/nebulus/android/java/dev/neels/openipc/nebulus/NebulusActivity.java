@@ -1,0 +1,113 @@
+package dev.neels.openipc.nebulus;
+
+import android.app.NativeActivity;
+import android.content.Intent;
+import android.database.Cursor;
+import android.net.Uri;
+import android.net.VpnService;
+import android.os.Bundle;
+import android.provider.OpenableColumns;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+
+public final class NebulusActivity extends NativeActivity {
+    private static final int OPEN_KEY_REQUEST = 0x4753;
+    private static final int OPEN_VPN_REQUEST = 0x5650;
+
+    private static native void nativeKeySelected(String name, byte[] bytes);
+    private static native void nativeKeyError(String message);
+    static native void nativeVpnOpened(int fd, String interfaceName);
+    static native void nativeVpnError(String message);
+
+    public void openKeyFile() {
+        runOnUiThread(this::openKeyFileOnUiThread);
+    }
+
+    private void openKeyFileOnUiThread() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("application/octet-stream");
+        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[] {
+            "application/octet-stream",
+            "text/plain",
+            "*/*"
+        });
+        startActivityForResult(intent, OPEN_KEY_REQUEST);
+    }
+
+    public void openVpn() {
+        runOnUiThread(() -> {
+            Intent permission = VpnService.prepare(this);
+            if (permission == null) {
+                startVpnService();
+            } else {
+                startActivityForResult(permission, OPEN_VPN_REQUEST);
+            }
+        });
+    }
+
+    public void closeVpn(int fd) {
+        if (NebulusVpnService.close(fd)) {
+            stopService(new Intent(this, NebulusVpnService.class));
+        }
+    }
+
+    private void startVpnService() {
+        try {
+            startService(new Intent(this, NebulusVpnService.class)
+                .setAction(NebulusVpnService.ACTION_OPEN));
+        } catch (Exception error) {
+            nativeVpnError("Could not start Android VPN service: " + error.getMessage());
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == OPEN_VPN_REQUEST) {
+            if (resultCode == RESULT_OK) {
+                startVpnService();
+            } else {
+                nativeVpnError("Android VPN permission was not granted");
+            }
+            return;
+        }
+        if (requestCode != OPEN_KEY_REQUEST || resultCode != RESULT_OK || data == null) {
+            return;
+        }
+        Uri uri = data.getData();
+        if (uri == null) {
+            nativeKeyError("Android file picker returned no document");
+            return;
+        }
+        try (InputStream input = getContentResolver().openInputStream(uri);
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            if (input == null) {
+                nativeKeyError("Android could not open the selected key");
+                return;
+            }
+            byte[] buffer = new byte[4096];
+            int count;
+            while ((count = input.read(buffer)) != -1) {
+                output.write(buffer, 0, count);
+            }
+            nativeKeySelected(displayName(uri), output.toByteArray());
+        } catch (Exception error) {
+            nativeKeyError("Could not read selected key: " + error.getMessage());
+        }
+    }
+
+    private String displayName(Uri uri) {
+        try (Cursor cursor = getContentResolver().query(
+                uri, new String[] {OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int column = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (column >= 0) {
+                    return cursor.getString(column);
+                }
+            }
+        }
+        String segment = uri.getLastPathSegment();
+        return segment == null ? "gs.key" : segment;
+    }
+}

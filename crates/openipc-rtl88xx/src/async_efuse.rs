@@ -4,6 +4,7 @@ use crate::rtl_data::{
     TxPowerBand, TxPowerLimitBandwidth, TxPowerLimitRateSection, TxPowerRegulation,
     RTL8812A_PHY_REG_PG, RTL8812A_TX_POWER_LIMITS,
 };
+use crate::tx_power_defaults;
 use crate::types::{ChannelWidth, ChipFamily, ChipInfo, DriverError};
 
 const EFUSE_ACCESS_ON_JAGUAR: u8 = 0x69;
@@ -687,9 +688,10 @@ fn tx_power_info_from_efuse_map(chip: ChipInfo, map: &[u8; EFUSE_MAP_LEN_JAGUAR]
     let paths = chip.total_rf_paths().min(MAX_RF_PATHS);
     let bytes_needed = TX_POWER_PG_OFFSET + paths * (18 + 24);
     if bytes_needed > map.len()
-        || map[TX_POWER_PG_OFFSET..bytes_needed]
-            .iter()
-            .all(|b| *b == 0xff)
+        || (chip.family.is_jaguar3()
+            && map[TX_POWER_PG_OFFSET..bytes_needed]
+                .iter()
+                .all(|b| *b == 0xff))
     {
         return TxPowerInfo::default();
     }
@@ -705,11 +707,11 @@ fn tx_power_info_from_efuse_map(chip: ChipInfo, map: &[u8; EFUSE_MAP_LEN_JAGUAR]
 
     for path in 0..paths {
         for value in cck_base_2g[path].iter_mut() {
-            *value = map[off];
+            *value = tx_power_base_byte(chip.family, map, off);
             off += 1;
         }
         for value in bw40_base_2g[path].iter_mut().take(5) {
-            *value = map[off];
+            *value = tx_power_base_byte(chip.family, map, off);
             off += 1;
         }
         let v = map[off];
@@ -728,7 +730,7 @@ fn tx_power_info_from_efuse_map(chip: ChipInfo, map: &[u8; EFUSE_MAP_LEN_JAGUAR]
         }
 
         for value in bw40_base_5g[path].iter_mut() {
-            *value = map[off];
+            *value = tx_power_base_byte(chip.family, map, off);
             off += 1;
         }
         let v = map[off];
@@ -1154,11 +1156,11 @@ fn classify_2g_channel(channel: u8) -> Option<(usize, usize)> {
 
 fn classify_5g_channel(channel: u8) -> Option<usize> {
     Some(match channel {
-        15..=42 => 0,
+        16..=42 => 0,
         44..=48 => 1,
         50..=58 => 2,
-        60..=80 => 3,
-        82..=106 => 4,
+        60..=98 => 3,
+        100..=106 => 4,
         108..=114 => 5,
         116..=122 => 6,
         124..=130 => 7,
@@ -1167,9 +1169,36 @@ fn classify_5g_channel(channel: u8) -> Option<usize> {
         149..=155 => 10,
         157..=161 => 11,
         165..=171 => 12,
-        173..=177 => 13,
+        173..=253 => 13,
         _ => return None,
     })
+}
+
+fn tx_power_base_byte(family: ChipFamily, map: &[u8; EFUSE_MAP_LEN_JAGUAR], offset: usize) -> u8 {
+    let programmed = map[offset];
+    if programmed <= 63 {
+        return programmed;
+    }
+    let Some(defaults) = (match family {
+        ChipFamily::Rtl8812 => Some(tx_power_defaults::RTL8812A),
+        ChipFamily::Rtl8814 => Some(tx_power_defaults::RTL8814A),
+        ChipFamily::Rtl8821 => Some(tx_power_defaults::RTL8821A),
+        ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => None,
+    }) else {
+        return programmed;
+    };
+    let index = offset.saturating_sub(TX_POWER_PG_OFFSET);
+    defaults
+        .get(index)
+        .copied()
+        .filter(|value| *value <= 63)
+        .or_else(|| {
+            tx_power_defaults::GENERIC
+                .get(index)
+                .copied()
+                .filter(|value| *value <= 63)
+        })
+        .unwrap_or(programmed)
 }
 
 fn pg_msb_diff(value: u8) -> i8 {
@@ -1371,6 +1400,57 @@ mod tests {
             tx_power_index_base(&info, 0, 0x02, 0, crate::types::ChannelWidth::Mhz20, 6,),
             Some(14)
         );
+    }
+
+    #[test]
+    fn jaguar1_channel_groups_match_vendor_boundaries() {
+        for (channel, expected) in [
+            (16, Some(0)),
+            (42, Some(0)),
+            (60, Some(3)),
+            (84, Some(3)),
+            (98, Some(3)),
+            (100, Some(4)),
+            (106, Some(4)),
+            (173, Some(13)),
+            (253, Some(13)),
+        ] {
+            assert_eq!(classify_5g_channel(channel), expected, "channel {channel}");
+        }
+        assert_eq!(classify_5g_channel(15), None);
+        assert_eq!(classify_5g_channel(99), None);
+    }
+
+    #[test]
+    fn tx_power_bases_use_programmed_chip_and_generic_fallbacks() {
+        let mut map = [0xff; EFUSE_MAP_LEN_JAGUAR];
+        assert_eq!(
+            tx_power_base_byte(ChipFamily::Rtl8812, &map, TX_POWER_PG_OFFSET),
+            0x2d
+        );
+        assert_eq!(
+            tx_power_base_byte(ChipFamily::Rtl8821, &map, TX_POWER_PG_OFFSET + 42),
+            0x2d
+        );
+        map[TX_POWER_PG_OFFSET] = 0x17;
+        assert_eq!(
+            tx_power_base_byte(ChipFamily::Rtl8814, &map, TX_POWER_PG_OFFSET),
+            0x17
+        );
+        assert_eq!(
+            tx_power_base_byte(ChipFamily::Rtl8822c, &map, TX_POWER_PG_OFFSET + 1),
+            0xff
+        );
+    }
+
+    #[test]
+    fn unprogrammed_jaguar1_pg_map_still_loads_safe_vendor_bases() {
+        let map = [0xff; EFUSE_MAP_LEN_JAGUAR];
+        let info = tx_power_info_from_efuse_map(chip(ChipFamily::Rtl8812), &map);
+        assert!(info.loaded);
+        assert_eq!(info.index24g_cck_base[0][0], 0x2d);
+        assert_eq!(info.index24g_bw40_base[0][0], 0x2d);
+        assert_eq!(info.index5g_bw40_base[0][8], 0x2a);
     }
 
     #[test]

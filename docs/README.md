@@ -1,8 +1,12 @@
 # openipc-rs Docs
 
-This directory contains the Docusaurus site for `openipc-rs`.
+This directory contains the Docusaurus site for Nebulus and the reusable
+`openipc-rs` crates. Nebulus is the primary ground station; OpenIPC Station
+pages are retained as legacy React/Tauri integration references.
 
 Hosted docs: [openipc-rs.neels.dev](https://openipc-rs.neels.dev)
+
+Hosted Nebulus: [nebulus.openipc-rs.neels.dev](https://nebulus.openipc-rs.neels.dev)
 
 ## Develop
 

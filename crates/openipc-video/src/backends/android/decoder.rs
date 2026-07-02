@@ -1,4 +1,7 @@
-use std::{collections::HashMap, time::Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use crate::{
     runtime::{LatestFrameMailbox, StatsHandle},
@@ -11,6 +14,8 @@ use super::{
     session::{codec_available, MediaCodecSession, SessionSubmit},
     AndroidVideoFrame,
 };
+
+const STALL_RECOVERY_AFTER: Duration = Duration::from_secs(2);
 
 struct PendingFrame {
     timestamp: VideoTimestamp,
@@ -31,6 +36,7 @@ pub struct AndroidDecoder {
     stats: StatsHandle,
     pending: HashMap<u64, PendingFrame>,
     next_token: u64,
+    backpressure_warning_emitted: bool,
     capabilities: DecoderCapabilities,
 }
 
@@ -52,6 +58,7 @@ impl AndroidDecoder {
             stats: StatsHandle::default(),
             pending: HashMap::new(),
             next_token: 1,
+            backpressure_warning_emitted: false,
             capabilities: Self::probe_capabilities(),
         })
     }
@@ -104,6 +111,7 @@ impl AndroidDecoder {
     }
 
     fn replace_session(&mut self, config: CodecConfig) -> Result<(), VideoError> {
+        log::info!(target: "openipc_video::mediacodec", "configuring decoder codec={}", config.codec());
         self.ensure_supported(config.codec())?;
         let stream = config.stream_info()?;
         self.session = None;
@@ -118,6 +126,7 @@ impl AndroidDecoder {
         self.session = Some(session);
         self.active_config = Some(config);
         self.waiting_for_keyframe = true;
+        self.backpressure_warning_emitted = false;
         self.stats.update(|stats| {
             stats.reconfigurations += 1;
             stats.frames_in_flight = 0;
@@ -175,12 +184,42 @@ impl AndroidDecoder {
         Ok(())
     }
 
-    fn recover_from_backpressure(&mut self) {
-        self.session = None;
-        self.pending.clear();
-        self.waiting_for_keyframe = true;
+    fn record_backpressure_drop(&mut self) {
+        if !self.backpressure_warning_emitted {
+            log::warn!(
+                target: "openipc_video::mediacodec",
+                "decoder backpressure; dropping access units until MediaCodec catches up"
+            );
+            self.backpressure_warning_emitted = true;
+        }
+        let frames_in_flight = self.pending.len();
         self.stats.update(|stats| {
             stats.backpressure_drops += 1;
+            stats.frames_in_flight = frames_in_flight;
+        });
+    }
+
+    fn recover_stalled_session(&mut self) {
+        let stalled = self
+            .pending
+            .values()
+            .map(|pending| pending.submitted_at)
+            .min()
+            .is_some_and(|oldest| oldest.elapsed() >= STALL_RECOVERY_AFTER);
+        if !stalled {
+            return;
+        }
+        log::warn!(
+            target: "openipc_video::mediacodec",
+            "MediaCodec made no output progress for two seconds; resetting decoder session"
+        );
+        self.session = None;
+        self.frames.clear();
+        self.pending.clear();
+        self.waiting_for_keyframe = true;
+        self.backpressure_warning_emitted = false;
+        self.stats.update(|stats| {
+            stats.decode_errors += 1;
             stats.frames_in_flight = 0;
         });
     }
@@ -200,6 +239,7 @@ impl VideoDecoder for AndroidDecoder {
     fn submit(&mut self, mut frame: EncodedAccessUnit) -> Result<SubmitOutcome, VideoError> {
         self.stats.update(|stats| stats.access_units_received += 1);
         self.poll_output()?;
+        self.recover_stalled_session();
         frame.keyframe |= CodecConfigTracker::is_keyframe(frame.codec, &frame.data)?;
         let update = self.tracker.observe(frame.codec, &frame.data)?;
         let mut reconfigured = false;
@@ -234,7 +274,7 @@ impl VideoDecoder for AndroidDecoder {
             return Ok(SubmitOutcome::WaitingForKeyframe);
         }
         if self.pending.len() >= self.options.max_frames_in_flight {
-            self.recover_from_backpressure();
+            self.record_backpressure_drop();
             return Ok(SubmitOutcome::DroppedForBackpressure);
         }
         let token = self.next_token;
@@ -262,10 +302,14 @@ impl VideoDecoder for AndroidDecoder {
                 }
             }
             Ok(SessionSubmit::Backpressure(ready)) => {
+                // This access unit was not accepted by MediaCodec. Remove its
+                // token before matching any output that became ready while the
+                // input queue was checked.
+                self.pending.remove(&token);
                 if let Some(ready) = ready {
                     self.accept_ready_frame(ready);
                 }
-                self.recover_from_backpressure();
+                self.record_backpressure_drop();
                 return Ok(SubmitOutcome::DroppedForBackpressure);
             }
             Err(error) => {

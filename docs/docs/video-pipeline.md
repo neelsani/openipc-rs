@@ -87,13 +87,12 @@ should not stop the receive loop.
 Non-video WFB channels use the same payload recovery machinery and stop at
 recovered bytes. Add another route for MAVLink, MSP, CRSF, data ports, or custom
 radio ports. Audio can either be a separate wfb-ng audio route or a filtered RTP
-tap on the main video route. The station route manager can inspect bytes, log a
-throttled summary, forward them over UDP in native/Tauri mode, or decode audio
-RTP in the browser frontend. The currently implemented audio decoder is Opus;
+tap on the main video route. Nebulus can inspect bytes, log a throttled summary,
+forward unchanged payloads over UDP on native targets, or decode Opus audio.
 Auto mode recognizes the documented OpenIPC Opus payload type 98 stream. It does
 not parse MAVLink messages.
 
-The OpenIPC tunnel/data channel is handled by Station's separate VPN tab rather
+The OpenIPC tunnel/data channel is handled by Nebulus's separate VPN tab rather
 than the custom route builder. That keeps the fixed tunnel RX/TX pair
 (`0x20`/`0xa0`) out of user-defined payload routing while still using the same
 core route machinery internally.
@@ -112,27 +111,33 @@ after packet loss or decoder reset.
 
 ## Decode And Render
 
-The station app decodes with WebCodecs where the browser or WebView supports
-the codec string returned by Rust. H.264 is broadly available; H.265 depends on
-browser and operating-system support.
+Nebulus passes complete access units to `openipc-video`. The selected backend is
+VideoToolbox on macOS, VA-API on Linux, Media Foundation/D3D11 on Windows,
+MediaCodec on Android, or WebCodecs in the browser. H.265 profile support still
+depends on the operating system, browser, and decoder hardware.
 
-The render path is:
+The primary render path is:
 
 ```mermaid
 flowchart LR
-    Rust["Rust/WASM or native backend"] --> Frame["Annex-B frame + metadata"]
-    Frame --> Chunk["EncodedVideoChunk"]
-    Chunk --> Decoder["WebCodecs VideoDecoder"]
-    Decoder --> Surface["VideoFrame"]
-    Surface --> Canvas["Canvas render"]
-    Canvas --> Record["MediaRecorder video track"]
-    Audio["Optional Opus AudioDecoder"] --> Record
+    Core["openipc-core"] --> Frame["Annex-B access unit + metadata"]
+    Frame --> Decoder["openipc-video platform decoder"]
+    Decoder --> Surface["retained native or browser surface"]
+    Surface --> Latest["latest-frame slot"]
+    Latest --> GPU["egui GPU presentation"]
+    Frame --> Record["keyframe-aligned MP4 muxer"]
 ```
 
 ## Recording
 
-The station records rendered video from the canvas. When an audio route or
-filtered mixed-audio tap is enabled and the browser/WebView can decode it, the
-audio mix is attached to the same `MediaRecorder` stream. That means recording
-captures what the frontend actually played, not the raw RF stream. For protocol
-debugging, use the native CLI to write Annex-B output or save USB captures.
+Nebulus records encoded H.264/H.265 access units before decode. It waits for a
+random-access frame, reads codec configuration and dimensions from its parameter
+sets, and uses RTP timestamps to mux MP4 without re-encoding. Each
+access unit remains one MP4 sample, including streams with multi-slice pictures.
+The first enabled Opus audio route is stripped of RTP framing and muxed as a
+second track using its own RTP clock. See
+[Nebulus Recording](./nebulus.md#recording) for timing and size limits.
+
+The legacy React Station instead records its rendered canvas with
+`MediaRecorder` and can attach decoded audio. That is a separate implementation
+tradeoff, not the primary Nebulus path.

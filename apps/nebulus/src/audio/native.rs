@@ -153,7 +153,6 @@ where
     T: SizedSample + FromSample<f32>,
 {
     let queue = Arc::clone(queue);
-    let errors_for_callback = Arc::clone(errors);
     let errors_for_stream = Arc::clone(errors);
     device
         .build_output_stream(
@@ -165,7 +164,6 @@ where
                     }
                 } else {
                     output.fill_with(|| T::from_sample(0.0));
-                    errors_for_callback.fetch_add(1, Ordering::Relaxed);
                 }
             },
             move |_| {

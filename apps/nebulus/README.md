@@ -9,15 +9,47 @@ It shares the same Rust application, protocol pipeline, settings, metrics, and
 UI across desktop, Android, and the browser. Only USB access and video-surface
 presentation are target-specific.
 
+Nebulus is the primary ground station distributed by this repository. Tagged
+releases include Linux x64/arm64 archives, macOS Apple Silicon/Intel app
+bundles, Windows x64/arm64 archives, and an Android arm64 APK. The hosted
+browser build is available at
+[nebulus.openipc-rs.neels.dev](https://nebulus.openipc-rs.neels.dev).
+The source package is published at
+[crates.io/crates/nebulus](https://crates.io/crates/nebulus).
+
 ## Run On Desktop
 
 ```sh
 cargo run -p nebulus --bin nebulus-desktop --release
 ```
 
+Or install the published package from crates.io:
+
+```sh
+cargo install nebulus
+nebulus-desktop
+```
+
 On Linux, install the VA-API build dependencies listed in the
 [`openipc-video` README](../../crates/openipc-video/README.md). The app uses
 `nusb` directly; it does not need the Tauri backend or the devourer library.
+
+macOS and Windows builds add a Nebulus system-tray icon. Its menu can show or
+hide the window, start or stop RX, enable VPN for the next receiver start, open
+the full VPN panel, and quit. macOS displays it in the menu bar; Windows uses
+the notification area and may place it under the overflow arrow.
+
+After monitor initialization succeeds, Settings shows a connected-receiver
+summary with the actual USB VID:PID, probed Realtek family, RF path layout, cut
+revision, USB speed, selected bulk endpoints, initialization result, firmware
+download status, and active RF/Link ID configuration. The summary is cleared
+when the receiver disconnects.
+
+The GUI tab contains presentation-only settings. It offers Catppuccin Latte,
+Frappé, Macchiato, and Mocha themes, a persistent 75–150% interface scale,
+video telemetry-overlay visibility, control-panel visibility, and a one-click
+GUI reset. Theme and scale changes apply immediately on desktop, Android, and
+the browser.
 
 ## Run In A Browser
 
@@ -49,8 +81,18 @@ Git.
 ## Build For Android
 
 Nebulus uses `NativeActivity`; it does not need a Kotlin application shell.
-Install the Android SDK, NDK, and a Rust APK packager, then build the library
-target:
+After installing the Android SDK, NDK, and `cargo-apk2`, run from the repository
+root:
+
+```sh
+./scripts/android-nebulus-dev.sh
+```
+
+This starts or reuses an emulator, waits for boot completion, selects the Rust
+target matching the AVD ABI, builds and installs Nebulus, and follows Logcat.
+Use `--help` for AVD, release, cold-boot, and no-Logcat options.
+
+To only build the library target:
 
 ```sh
 rustup target add aarch64-linux-android
@@ -64,7 +106,8 @@ adapter, duplicates its file descriptor, and hands that descriptor to
 `nusb::Device::from_fd`. All later USB control and bulk transfers still run
 through `nusb` and `openipc-rtl88xx`.
 
-Rust `log` output is registered with Android logcat under the `Nebulus` tag.
+Rust `log` output is mirrored to standard Android application output and the
+in-app Logs tab.
 
 That command creates an installable APK with the normal Android debug key. Add
 `[package.metadata.android.signing.release]` keystore settings outside source
@@ -128,9 +171,10 @@ texture; decoded pixel arrays never cross the WASM boundary.
 - Optional RTP reorder buffer
 - Adaptive-link quality tracking, uplink feedback, and TX power override
 - H.264/H.265 playback, video-only fullscreen, and link OSD
-- Keyframe-aligned H.264/H.265 Annex-B recording without re-encoding
+- Keyframe-aligned H.264/H.265 MP4 recording without re-encoding
 - Live bitrate, receive/decode/render FPS, RSSI, loss, and latency plots
 - Pipeline-health, RTP, per-stage latency, and environment diagnostics
+- Level-controlled library logging with target/text filtering and trace capture
 - Configurable inspect, rate-limited log, audio, and UDP payload routes
 - Opus playback with volume, queue depth, and decoder/error metrics
 - Native OpenIPC VPN/TUN bridging on macOS, Linux, Windows, and Android
@@ -140,12 +184,12 @@ UDP forwarding and VPN/TUN are native-only. Their controls are unavailable in
 browser builds. Android requests `VpnService` consent and passes the resulting
 TUN file descriptor into the same Rust bridge used by desktop targets.
 
-Recording writes the original encoded access units instead of re-encoding
-decoded pictures. It waits for an H.264/H.265 keyframe before writing, so the
-result begins at a valid random-access point. Desktop builds stream to the
-selected `.annexb`, `.h264`, or `.h265` file. Browser builds retain up to 512
-MiB and download the matching elementary stream when recording stops. Audio is
-not muxed into this elementary-stream format.
+Recording writes the original encoded access units and the first enabled Opus
+audio route into MP4 without re-encoding. It waits for an H.264/H.265 keyframe,
+so the result begins at a valid random-access point. Video and audio timing come
+from their RTP clocks. Native muxing runs on a bounded recorder worker; browser
+recordings download when stopped. Both targets cap retained encoded media at
+512 MiB.
 
 The VPN tab bridges recovered IP packets from radio port `0x20` into a native
 L3 interface at `10.5.0.3/24`. Packets read from that interface are encrypted,

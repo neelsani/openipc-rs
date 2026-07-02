@@ -285,6 +285,7 @@ mod worker {
         cell::{Cell, RefCell},
         collections::VecDeque,
         rc::Rc,
+        time::Duration,
     };
 
     use futures_util::future::{select, Either};
@@ -317,30 +318,68 @@ mod worker {
 
     struct BrowserRecorder {
         codec: openipc_core::Codec,
-        chunks: js_sys::Array,
+        config: crate::recording::Mp4TrackConfig,
+        audio_config: Option<crate::recording::AudioTrackConfig>,
+        frames: Vec<crate::recording::RecordedAccessUnit>,
+        audio_packets: Vec<crate::recording::RecordedAudioPacket>,
         bytes: usize,
     }
 
     impl BrowserRecorder {
-        fn new(codec: openipc_core::Codec) -> Self {
-            Self {
-                codec,
-                chunks: js_sys::Array::new(),
+        fn new(
+            frame: &openipc_core::DepacketizedFrame,
+            audio_config: Option<crate::recording::AudioTrackConfig>,
+        ) -> Result<Self, String> {
+            let config = crate::recording::Mp4TrackConfig::from_keyframe(frame)?;
+            let mut recorder = Self {
+                codec: frame.codec,
+                config,
+                audio_config,
+                frames: Vec::new(),
+                audio_packets: Vec::new(),
                 bytes: 0,
+            };
+            if recorder.append(frame) {
+                Ok(recorder)
+            } else {
+                Err("The first encoded frame exceeds the browser recording limit".to_owned())
             }
         }
 
-        fn append(&mut self, bytes: &[u8]) -> bool {
-            let Some(total) = self.bytes.checked_add(bytes.len()) else {
+        fn append(&mut self, frame: &openipc_core::DepacketizedFrame) -> bool {
+            let Some(total) = self.bytes.checked_add(frame.data.len()) else {
                 return false;
             };
             if total > MAX_BROWSER_RECORDING_BYTES {
                 return false;
             }
-            let chunk = js_sys::Uint8Array::from(bytes);
-            self.chunks.push(&chunk.buffer());
+            self.frames.push(frame.into());
             self.bytes = total;
             true
+        }
+
+        fn append_audio(&mut self, packet: crate::recording::RecordedAudioPacket) -> bool {
+            let Some(total) = self.bytes.checked_add(packet.data.len()) else {
+                return false;
+            };
+            if total > MAX_BROWSER_RECORDING_BYTES {
+                return false;
+            }
+            self.audio_packets.push(packet);
+            self.bytes = total;
+            true
+        }
+
+        fn finish(self) -> Result<Vec<u8>, String> {
+            let mut output = std::io::Cursor::new(Vec::new());
+            crate::recording::mux_mp4(
+                &mut output,
+                &self.config,
+                &self.frames,
+                self.audio_config,
+                &self.audio_packets,
+            )?;
+            Ok(output.into_inner())
         }
     }
 
@@ -400,6 +439,7 @@ mod worker {
         let recording_control = &handles.recording;
         let events = &handles.events;
         let context = &handles.context;
+        let recording_audio_config = route_processor.recording_audio_config();
         let web_device = JsFuture::from(permission).await.map_err(super::js_error)?;
         let label = web_device.product_name().unwrap_or_else(|| {
             format!(
@@ -423,14 +463,14 @@ mod worker {
             .await
             .map_err(|error| error.to_string())?;
         let chip = report.chip.family;
+        let receiver_info = crate::runtime::ReceiverInfo::initialized(label, &device, &report);
         let mut decoder = PlatformDecoder::new(DecoderOptions::default())
             .map_err(|error| format!("WebCodecs decoder unavailable: {error}"))?;
         super::emit(
             events,
             context,
             RuntimeEvent::Connected {
-                label,
-                chip: chip.name().to_owned(),
+                receiver: receiver_info,
                 decoder: decoder_environment(decoder.capabilities()),
             },
         );
@@ -495,6 +535,7 @@ mod worker {
                     recording_control,
                     &mut recording_armed,
                     &mut recorder,
+                    recording_audio_config,
                     events,
                     context,
                 );
@@ -555,12 +596,15 @@ mod worker {
                 recording_control,
                 &mut recording_armed,
                 &mut recorder,
+                recording_audio_config,
                 events,
                 context,
             );
             route_processor.set_audio_volume(audio_volume.get());
             let route_start = Instant::now();
-            let (route_updates, route_logs) = route_processor.process(&batch.raw_payloads);
+            let (route_updates, route_logs, recorded_audio) =
+                route_processor.process(&batch.raw_payloads, recorder.is_some());
+            append_recorded_audio(&mut recorder, recorded_audio, events, context);
             let route_latency_ms = route_start.elapsed().as_secs_f64() * 1_000.0;
             for entry in route_logs {
                 log(
@@ -676,6 +720,7 @@ mod worker {
         let recording_control = &handles.recording;
         let events = &handles.events;
         let context = &handles.context;
+        let recording_audio_config = route_processor.recording_audio_config();
         use crate::runtime::{codec_mock::MockAvStream, route_runtime::configure_mock_receiver};
         use openipc_video::{DecoderOptions, PlatformDecoder, VideoDecoder as _};
 
@@ -698,8 +743,7 @@ mod worker {
             events,
             context,
             RuntimeEvent::Connected {
-                label: "Pre-recorded 1080p H.264 + Opus".to_owned(),
-                chip: "Synthetic A/V RTP".to_owned(),
+                receiver: crate::runtime::ReceiverInfo::codec_mock(),
                 decoder: decoder_environment(decoder.capabilities()),
             },
         );
@@ -719,6 +763,7 @@ mod worker {
         let options = configure_mock_receiver(&mut receiver, &request);
         let runtime = receiver.video_runtime();
         let mut source = MockAvStream::new()?;
+        let mock_started = Instant::now();
         let mut payload_sequence = 1u64;
         let mut recorder: Option<BrowserRecorder> = None;
         let mut recording_armed = false;
@@ -747,11 +792,14 @@ mod worker {
                     recording_control,
                     &mut recording_armed,
                     &mut recorder,
+                    recording_audio_config,
                     events,
                     context,
                 );
                 route_processor.set_audio_volume(audio_volume.get());
-                let (route_updates, route_logs) = route_processor.process(&batch.raw_payloads);
+                let (route_updates, route_logs, recorded_audio) =
+                    route_processor.process(&batch.raw_payloads, recorder.is_some());
+                append_recorded_audio(&mut recorder, recorded_audio, events, context);
                 metrics.merge(BatchMetrics {
                     routes: route_updates,
                     counters: batch.counters,
@@ -801,8 +849,12 @@ mod worker {
             metrics.decoder_errors = stats.decode_errors;
             metrics.audio = route_processor.audio_stats();
             super::emit(events, context, RuntimeEvent::Batch(Box::new(metrics)));
-            let elapsed = loop_started.elapsed().as_secs_f64() * 1_000.0;
-            sleep_ms((event.delay_micros as f64 / 1_000.0 - elapsed).max(0.0) as i32).await;
+            let remaining_ms = Duration::from_micros(event.next_due_micros)
+                .checked_sub(mock_started.elapsed())
+                .map_or(0, |remaining| {
+                    remaining.as_millis().min(i32::MAX as u128) as i32
+                });
+            sleep_ms(remaining_ms).await;
         }
         let _ = decoder.flush();
         finish_recording(&mut recorder, events, context);
@@ -821,6 +873,7 @@ mod worker {
         control: &Rc<RefCell<super::RecordingControl>>,
         armed: &mut bool,
         recorder: &mut Option<BrowserRecorder>,
+        audio_config: Option<crate::recording::AudioTrackConfig>,
         events: &Rc<RefCell<VecDeque<RuntimeEvent>>>,
         context: &eframe::egui::Context,
     ) {
@@ -842,19 +895,14 @@ mod worker {
 
         for frame in frames {
             if recorder.is_none() && *armed && frame.is_keyframe {
-                let mut started = BrowserRecorder::new(frame.codec);
-                if !started.append(&frame.data) {
-                    *armed = false;
-                    super::emit(
-                        events,
-                        context,
-                        RuntimeEvent::RecordingFailed(
-                            "The first encoded frame exceeds the browser recording limit"
-                                .to_owned(),
-                        ),
-                    );
-                    continue;
-                }
+                let started = match BrowserRecorder::new(frame, audio_config) {
+                    Ok(started) => started,
+                    Err(error) => {
+                        *armed = false;
+                        super::emit(events, context, RuntimeEvent::RecordingFailed(error));
+                        continue;
+                    }
+                };
                 *armed = false;
                 super::emit(
                     events,
@@ -870,7 +918,31 @@ mod worker {
             let Some(active) = recorder.as_mut() else {
                 continue;
             };
-            if frame.codec == active.codec && !active.append(&frame.data) {
+            if frame.codec == active.codec && !active.append(frame) {
+                log(
+                    events,
+                    context,
+                    LogLevel::Warn,
+                    "record",
+                    "Browser recording reached 512 MiB and was finalized",
+                );
+                finish_recording(recorder, events, context);
+                break;
+            }
+        }
+    }
+
+    fn append_recorded_audio(
+        recorder: &mut Option<BrowserRecorder>,
+        packets: Vec<crate::recording::RecordedAudioPacket>,
+        events: &Rc<RefCell<VecDeque<RuntimeEvent>>>,
+        context: &eframe::egui::Context,
+    ) {
+        for packet in packets {
+            let Some(active) = recorder.as_mut() else {
+                break;
+            };
+            if !active.append_audio(packet) {
                 log(
                     events,
                     context,
@@ -892,13 +964,12 @@ mod worker {
         let Some(active) = recorder.take() else {
             return;
         };
-        let extension = match active.codec {
-            openipc_core::Codec::H264 => "h264",
-            openipc_core::Codec::H265 => "h265",
-        };
-        let filename = format!("openipc-recording.{extension}");
+        let filename = "openipc-recording.mp4".to_owned();
         let byte_count = active.bytes as u64;
-        match download_recording(&filename, &active.chunks) {
+        let result = active
+            .finish()
+            .and_then(|bytes| download_recording(&filename, &bytes));
+        match result {
             Ok(()) => super::emit(
                 events,
                 context,
@@ -911,11 +982,16 @@ mod worker {
         }
     }
 
-    fn download_recording(filename: &str, chunks: &js_sys::Array) -> Result<(), String> {
+    fn download_recording(filename: &str, bytes: &[u8]) -> Result<(), String> {
         use wasm_bindgen::JsCast as _;
 
-        let blob =
-            web_sys::Blob::new_with_buffer_source_sequence(chunks).map_err(super::js_error)?;
+        let parts = js_sys::Array::new();
+        let bytes = js_sys::Uint8Array::from(bytes);
+        parts.push(&bytes.buffer());
+        let options = web_sys::BlobPropertyBag::new();
+        options.set_type("video/mp4");
+        let blob = web_sys::Blob::new_with_buffer_source_sequence_and_options(&parts, &options)
+            .map_err(super::js_error)?;
         let url = web_sys::Url::create_object_url_with_blob(&blob).map_err(super::js_error)?;
         let document = web_sys::window()
             .and_then(|window| window.document())

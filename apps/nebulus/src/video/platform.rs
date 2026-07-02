@@ -1,6 +1,5 @@
-use openipc_video::FrameDimensions;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows", test))]
-use openipc_video::PixelFormat;
+use openipc_video::{FrameDimensions, PixelFormat};
 
 #[cfg(target_os = "macos")]
 pub(crate) fn macos_rgba(frame: &openipc_video::MacOsVideoFrame) -> Result<Vec<u8>, String> {
@@ -57,28 +56,6 @@ pub(crate) fn windows_rgba(frame: &openipc_video::WindowsNv12Frame) -> Result<Ve
             },
         ],
     )
-}
-
-#[cfg(target_os = "android")]
-pub(crate) fn android_rgba(
-    frame: &openipc_video::AndroidVideoFrame,
-    dimensions: FrameDimensions,
-) -> Result<Vec<u8>, String> {
-    frame
-        .with_mapped_planes(|planes| {
-            let [y, u, v, ..] = planes else {
-                return Err("Android decoder output did not expose Y/U/V planes".to_owned());
-            };
-            yuv420_to_rgba(
-                dimensions.width as usize,
-                dimensions.height as usize,
-                frame.crop_origin(),
-                y,
-                u,
-                v,
-            )
-        })
-        .map_err(|error| error.to_string())?
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows", test))]
@@ -202,72 +179,6 @@ fn plane_len(rows: usize, stride: usize, row_bytes: usize) -> Option<usize> {
     rows.checked_sub(1)?
         .checked_mul(stride)?
         .checked_add(row_bytes)
-}
-
-#[cfg(target_os = "android")]
-fn yuv420_to_rgba(
-    width: usize,
-    height: usize,
-    crop: [usize; 2],
-    y_plane: &openipc_video::AndroidImagePlane<'_>,
-    u_plane: &openipc_video::AndroidImagePlane<'_>,
-    v_plane: &openipc_video::AndroidImagePlane<'_>,
-) -> Result<Vec<u8>, String> {
-    let output_len = width
-        .checked_mul(height)
-        .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or_else(|| "decoded frame dimensions overflowed".to_owned())?;
-    let mut rgba = vec![0; output_len];
-    for row in 0..height {
-        let source_y = crop[1] + row;
-        let chroma_y = source_y / 2;
-        for column in 0..width {
-            let source_x = crop[0] + column;
-            let chroma_x = source_x / 2;
-            let y_index = source_y
-                .saturating_mul(y_plane.row_stride())
-                .saturating_add(source_x.saturating_mul(y_plane.pixel_stride()));
-            let u_index = chroma_y
-                .saturating_mul(u_plane.row_stride())
-                .saturating_add(chroma_x.saturating_mul(u_plane.pixel_stride()));
-            let v_index = chroma_y
-                .saturating_mul(v_plane.row_stride())
-                .saturating_add(chroma_x.saturating_mul(v_plane.pixel_stride()));
-            let y = i32::from(
-                *y_plane
-                    .data()
-                    .get(y_index)
-                    .ok_or_else(|| "Android Y plane is shorter than its layout".to_owned())?,
-            );
-            let u = i32::from(
-                *u_plane
-                    .data()
-                    .get(u_index)
-                    .ok_or_else(|| "Android U plane is shorter than its layout".to_owned())?,
-            ) - 128;
-            let v = i32::from(
-                *v_plane
-                    .data()
-                    .get(v_index)
-                    .ok_or_else(|| "Android V plane is shorter than its layout".to_owned())?,
-            ) - 128;
-            write_video_range_rgba(&mut rgba, row * width + column, y, u, v);
-        }
-    }
-    Ok(rgba)
-}
-
-#[cfg(target_os = "android")]
-fn write_video_range_rgba(rgba: &mut [u8], pixel: usize, y: i32, u: i32, v: i32) {
-    let c = (y - 16).max(0);
-    let red = (298 * c + 409 * v + 128) >> 8;
-    let green = (298 * c - 100 * u - 208 * v + 128) >> 8;
-    let blue = (298 * c + 516 * u + 128) >> 8;
-    let offset = pixel * 4;
-    rgba[offset] = red.clamp(0, 255) as u8;
-    rgba[offset + 1] = green.clamp(0, 255) as u8;
-    rgba[offset + 2] = blue.clamp(0, 255) as u8;
-    rgba[offset + 3] = 255;
 }
 
 #[cfg(test)]

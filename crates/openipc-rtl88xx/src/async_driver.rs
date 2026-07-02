@@ -113,7 +113,16 @@ impl RealtekDevice {
         radio: RadioConfig,
         options: MonitorOptions,
     ) -> Result<InitReport, DriverError> {
+        log::info!(
+            target: "openipc_rtl88xx::init",
+            "starting Realtek monitor initialization vid={:04x} pid={:04x} channel={} width={:?}",
+            self.vendor_id,
+            self.product_id,
+            radio.channel,
+            radio.channel_width
+        );
         let chip = self.probe_chip_async().await?;
+        log::debug!(target: "openipc_rtl88xx::init", "probed Realtek adapter: {chip:?}");
         let mut firmware_downloaded = false;
         let mut status = InitStatus::Initialized;
         let early_efuse_info = match chip.family {
@@ -129,6 +138,10 @@ impl RealtekDevice {
             ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => (fw_state & 0xffff) == 0xc078,
             _ => (fw_state & WINTINI_RDY) != 0,
         };
+        log::debug!(
+            target: "openipc_rtl88xx::firmware",
+            "read firmware state register=0x{fw_state:08x} running={fw_already_running}"
+        );
 
         if chip.family.is_jaguar3() {
             return self
@@ -199,13 +212,24 @@ impl RealtekDevice {
         if options.should_run_iqk(chip.family) {
             let _ = self.run_iqk_async(chip, radio.channel).await?;
         }
+        if let Some(mask) = options.rx_path_mask {
+            self.set_rx_path_mask_for_chip_async(chip, mask).await?;
+        }
         self.set_monitor_mode_async(options.accept_bad_fcs).await?;
 
-        Ok(InitReport {
+        let report = InitReport {
             chip,
             status,
             firmware_downloaded,
-        })
+        };
+        log::info!(
+            target: "openipc_rtl88xx::init",
+            "Realtek monitor initialization complete chip={:?} status={:?} firmware_downloaded={}",
+            report.chip.family,
+            report.status,
+            report.firmware_downloaded
+        );
+        Ok(report)
     }
 
     /// Best-effort monitor-mode shutdown.
@@ -217,6 +241,26 @@ impl RealtekDevice {
     pub async fn shutdown_monitor_async(&self) -> Result<(), DriverError> {
         let chip = self.probe_chip_async().await?;
         self.shutdown_monitor_for_chip_async(chip).await
+    }
+
+    /// Select the active Jaguar1 receive chains.
+    ///
+    /// This is primarily a diversity/combining diagnostic. Channel changes and
+    /// IQK may restore register `0x808`, so call it after those operations.
+    pub async fn set_rx_path_mask_async(&self, mask: u8) -> Result<(), DriverError> {
+        let chip = self.probe_chip_async().await?;
+        self.set_rx_path_mask_for_chip_async(chip, mask).await
+    }
+
+    async fn set_rx_path_mask_for_chip_async(
+        &self,
+        chip: ChipInfo,
+        mask: u8,
+    ) -> Result<(), DriverError> {
+        if chip.family.is_jaguar3() {
+            return Err(DriverError::UnsupportedRxPathMask(chip.family));
+        }
+        self.write_u8_async(0x0808, mask).await
     }
 
     pub(crate) async fn shutdown_monitor_for_chip_async(
@@ -247,7 +291,10 @@ impl RealtekDevice {
             endpoint.submit(buffer);
             let completion = endpoint.next_complete().await;
             match completion.status {
-                Ok(()) => return Ok(completion.buffer[..completion.actual_len].to_vec()),
+                Ok(()) => {
+                    log::trace!(target: "openipc_rtl88xx::usb", "bulk IN complete endpoint=0x{:02x} bytes={}", self.bulk_in_ep, completion.actual_len);
+                    return Ok(completion.buffer[..completion.actual_len].to_vec());
+                }
                 Err(err) if should_retry_transfer_error(err, attempt, BULK_RETRY_ATTEMPTS) => {
                     if err == TransferError::Stall {
                         let _ = endpoint.clear_halt().await;
@@ -288,6 +335,7 @@ impl RealtekDevice {
                 .map_err(|err| DriverError::Nusb(format!("bulk IN transfer failed: {err}")))?;
             transfers.push(completion.buffer[..completion.actual_len].to_vec());
         }
+        log::trace!(target: "openipc_rtl88xx::usb", "bulk IN batch complete endpoint=0x{:02x} transfers={} bytes={}", self.bulk_in_ep, transfers.len(), transfers.iter().map(Vec::len).sum::<usize>());
         Ok(transfers)
     }
 
@@ -305,7 +353,10 @@ impl RealtekDevice {
         for attempt in 0..BULK_RETRY_ATTEMPTS {
             let completion = endpoint.transfer_blocking(endpoint.allocate(length), USB_TIMEOUT);
             match completion.status {
-                Ok(()) => return Ok(completion.buffer[..completion.actual_len].to_vec()),
+                Ok(()) => {
+                    log::trace!(target: "openipc_rtl88xx::usb", "bulk IN complete endpoint=0x{:02x} bytes={}", self.bulk_in_ep, completion.actual_len);
+                    return Ok(completion.buffer[..completion.actual_len].to_vec());
+                }
                 Err(err) if should_retry_transfer_error(err, attempt, BULK_RETRY_ATTEMPTS) => {
                     if err == TransferError::Stall {
                         let _ = endpoint.clear_halt().wait();
@@ -369,6 +420,7 @@ impl RealtekDevice {
                 crate::time::sleep_ms(retry_delay_ms(attempt)).await;
                 continue;
             }
+            log::trace!(target: "openipc_rtl88xx::usb", "bulk IN batch complete endpoint=0x{:02x} transfers={} bytes={}", self.bulk_in_ep, transfers.len(), transfers.iter().map(Vec::len).sum::<usize>());
             return Ok(transfers);
         }
         unreachable!("retry loop either returns or reports the final USB error")
@@ -389,7 +441,10 @@ impl RealtekDevice {
             endpoint.submit(Buffer::from(transfer));
             let completion = endpoint.next_complete().await;
             match completion.status {
-                Ok(()) => return Ok(completion.actual_len),
+                Ok(()) => {
+                    log::trace!(target: "openipc_rtl88xx::usb", "bulk OUT complete endpoint=0x{:02x} bytes={}", self.bulk_out_ep, completion.actual_len);
+                    return Ok(completion.actual_len);
+                }
                 Err(err) if should_retry_transfer_error(err, attempt, BULK_RETRY_ATTEMPTS) => {
                     if err == TransferError::Stall {
                         let _ = endpoint.clear_halt().await;
@@ -415,7 +470,10 @@ impl RealtekDevice {
             endpoint.submit(Buffer::from(transfer));
             let completion = endpoint.next_complete().await;
             match completion.status {
-                Ok(()) => return Ok(completion.actual_len),
+                Ok(()) => {
+                    log::trace!(target: "openipc_rtl88xx::usb", "raw bulk OUT complete endpoint=0x{:02x} bytes={}", self.bulk_out_ep, completion.actual_len);
+                    return Ok(completion.actual_len);
+                }
                 Err(err)
                     if should_retry_transfer_error(err, attempt, FIRMWARE_BULK_RETRY_ATTEMPTS) =>
                 {
@@ -444,7 +502,10 @@ impl RealtekDevice {
         for attempt in 0..BULK_RETRY_ATTEMPTS {
             let completion = endpoint.transfer_blocking(Buffer::from(transfer), USB_TIMEOUT);
             match completion.status {
-                Ok(()) => return Ok(completion.actual_len),
+                Ok(()) => {
+                    log::trace!(target: "openipc_rtl88xx::usb", "bulk OUT complete endpoint=0x{:02x} bytes={}", self.bulk_out_ep, completion.actual_len);
+                    return Ok(completion.actual_len);
+                }
                 Err(err) if should_retry_transfer_error(err, attempt, BULK_RETRY_ATTEMPTS) => {
                     if err == TransferError::Stall {
                         let _ = endpoint.clear_halt().wait();
@@ -470,7 +531,10 @@ impl RealtekDevice {
             let completion =
                 endpoint.transfer_blocking(Buffer::from(transfer), USB_FIRMWARE_TIMEOUT);
             match completion.status {
-                Ok(()) => return Ok(completion.actual_len),
+                Ok(()) => {
+                    log::trace!(target: "openipc_rtl88xx::usb", "raw bulk OUT complete endpoint=0x{:02x} bytes={}", self.bulk_out_ep, completion.actual_len);
+                    return Ok(completion.actual_len);
+                }
                 Err(err)
                     if should_retry_transfer_error(err, attempt, FIRMWARE_BULK_RETRY_ATTEMPTS) =>
                 {

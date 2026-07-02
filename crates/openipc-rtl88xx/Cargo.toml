@@ -8,6 +8,7 @@ description = "Rust Realtek rtl88xx USB WiFi receiver driver for OpenIPC"
 readme = "README.md"
 
 [dependencies]
+log.workspace = true
 openipc-core = { version = "0.1.25", path = "../openipc-core" }
 nusb.workspace = true
 

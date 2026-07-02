@@ -18,6 +18,7 @@ license = "MIT"
 repository = "https://github.com/neelsani/openipc-rs"
 
 [workspace.dependencies]
+log = "0.4"
 nusb = { package = "nusb-webusb", version = "0.2.3" }
 
 [profile.release]

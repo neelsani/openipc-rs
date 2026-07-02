@@ -4,86 +4,121 @@ sidebar_position: 10
 
 # Debugging And Metrics
 
-The station app tracks client-side metrics so receiver performance can be
-debugged without guessing. The goal is to answer one question quickly: where did
-the frame stop moving?
+Nebulus exposes the receive path as counters, health states, logs, RTP details,
+and stage timings. Debug from left to right through the pipeline; the first stage
+that stops advancing is normally the useful boundary.
 
-## Useful Signals
+## Pipeline Health
 
-- USB transfer count, bytes, and errors.
-- Realtek aggregate parse count and rejected packets.
-- WFB session updates, decrypted packets, recovered fragments, and lost
-  fragments.
-- RTP packets and extracted Annex-B frames.
-- Raw payload count and recovered route bytes for configured telemetry, data,
-  RTP mirror, or audio routes.
-- Audio packets, decoded audio frames, queue depth, and decoder errors when an
-  audio route is enabled. The current decoder implementation is Opus.
-- WebCodecs decoder name, codec string, resolution, decode errors, and render
-  FPS.
-- WebCodecs capability probe: `VideoDecoder`, `EncodedVideoChunk`, H.264, H.265,
-  secure context, and WebView user agent.
-- Bitrate and frame-rate estimates.
-- Adaptive-link RSSI, SNR, score, FEC changes, and IDR request state.
+The health view follows this order:
+
+1. USB adapter initialized.
+2. USB transfers arriving.
+3. Realtek RX descriptors and 802.11 frames parsed.
+4. Frames accepted for the configured WFB channel.
+5. WFB session established and payload recovered.
+6. RTP packets arriving on the video route.
+7. Codec parameter sets complete.
+8. Encoded access units extracted.
+9. Platform decoder active.
+10. Optional audio and VPN routes healthy.
+
+A pending marker means that stage has not been observed in the current receiver
+session. It is not automatically an error: audio and VPN remain pending when
+those features are disabled.
+
+## Metrics
+
+The rolling graphs intentionally focus on six operational signals:
+
+| Signal             | What it answers                                                   |
+| ------------------ | ----------------------------------------------------------------- |
+| Link score         | Is the best receive path healthy enough for the selected profile? |
+| Post-FEC loss      | How much data remained unrecoverable after FEC?                   |
+| FEC repair         | How much damaged primary traffic was reconstructed?               |
+| Encoded bitrate    | Is video data arriving at the expected rate?                      |
+| Delivered FPS      | Are complete access units reaching the decoder?                   |
+| Processing latency | Is local receive, protocol, or decode work falling behind?        |
+
+RSSI and SNR remain in the video OSD because they are useful while flying.
+Audio packet rate and queue depth live with route diagnostics rather than the
+main graph grid.
+
+## RTP Diagnostics
+
+The RTP view reports sequence number, timestamp, payload type, codec/NAL type,
+fragment gaps, malformed packets, unsupported packets, parameter-set state,
+keyframe waits, and optional reorder-buffer counters.
+
+For H.264, a decoder needs SPS, PPS, and an IDR. H.265 normally needs VPS, SPS,
+PPS, and a BLA/IDR/CRA access unit. “Packets arriving, waiting for IDR” therefore
+means the radio and WFB stages have succeeded; inspect whether parameter sets
+were seen, whether fragmented NAL units have gaps, and whether the transmitter
+is emitting periodic random-access frames.
+
+RTP reorder is off by default. Turn it on only when diagnostics show sequence
+reordering rather than simple packet loss. Reordering adds a bounded wait and
+cannot recover packets that never arrived.
 
 ## Stage Timings
 
-The station records timing around the main boundaries:
+| Stage           | Meaning                                                                            |
+| --------------- | ---------------------------------------------------------------------------------- |
+| USB wait        | Time until a bulk transfer completes; high idle values may simply mean no traffic. |
+| Realtek parse   | Splitting the USB aggregate and interpreting RX descriptors.                       |
+| WFB/RTP         | Filtering, session crypto, FEC, route fanout, and video depacketization.           |
+| Routes          | Inspect/log/UDP/audio processing for recovered payload routes.                     |
+| Decoder submit  | Preparing and handing an access unit to the platform decoder.                      |
+| Hardware decode | Submit-to-output latency reported by `openipc-video`.                              |
+| Receive batch   | Total local work for a completed USB batch.                                        |
 
-| Stage            | Meaning                                                                  |
-| ---------------- | ------------------------------------------------------------------------ |
-| USB read         | Time spent waiting for the next bulk transfer.                           |
-| Realtek parse    | Time to split a USB aggregate into packet descriptors and 802.11 frames. |
-| OpenIPC pipeline | WFB filtering, decrypt, FEC, RTP, and Annex-B extraction.                |
-| Decode enqueue   | Time spent preparing and submitting `EncodedVideoChunk` objects.         |
-| Decode to render | Time from encoded input to WebCodecs output.                             |
-| Canvas render    | Time to draw the decoded `VideoFrame`.                                   |
-| Adaptive TX      | Time spent building and sending feedback packets.                        |
+The view keeps last, average, p95, maximum, and sample count. Compare latency
+with queue and drop counters: a low average can hide periodic stalls, while a
+high USB wait with no incoming traffic is normal.
 
-Use these numbers together with counters. A long USB read may simply mean there
-is no traffic. A growing decoder queue usually means WebCodecs cannot keep up.
-Increasing FEC loss means the RF stream is arriving damaged before the decoder
-ever sees it.
+## Common Failure Patterns
 
-## Bottleneck Strategy
+| Symptom                               | Check next                                                                                                        |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| No adapter listed                     | USB permission, cable/OTG support, device VID/PID, and OS driver binding.                                         |
+| Adapter opens but no USB bytes        | RF channel/width, monitor initialization log, antenna/VTX power, and endpoint errors.                             |
+| USB bytes but no accepted frames      | Descriptor family, CRC/ICV counters, Link ID, and configured channel ID.                                          |
+| Accepted frames but no WFB payload    | Key mismatch, missing session packet, wrong radio port, or FEC/session errors.                                    |
+| WFB payload but no RTP                | Video radio port or transmitter destination is wrong.                                                             |
+| RTP but no access units               | Fragment gaps, unsupported packetization, malformed RTP, or reorder requirement.                                  |
+| Access units but waiting for keyframe | Missing SPS/PPS or VPS/SPS/PPS, long GOP, or lost random-access frame.                                            |
+| Decoder errors                        | Codec preference, unsupported H.265 profile/bit depth, invalid configuration, or platform backend failure.        |
+| Good decode FPS but poor presentation | GPU upload/render path, window load, or output-surface conversion fallback.                                       |
+| Audio packets but silence             | Wrong audio payload type, Opus settings, muted volume, suspended browser audio context, or output-device failure. |
 
-When video is not smooth, compare the stage counters in order:
+## Logs And Environment
 
-1. USB bytes arriving.
-2. Realtek packets parsed.
-3. WFB packets decrypted.
-4. Raw payload counts increasing if telemetry, data, mirrored RTP, or audio
-   traffic is expected.
-5. Video-channel payloads counted as RTP packets.
-6. Annex-B frames extracted by `RtpDepacketizer`.
-7. Decoder capability probe reports the needed WebCodecs API and codec support.
-8. WebCodecs frames decoded.
-9. Canvas frames rendered.
+The Logs tab's **Capture** selector controls verbosity. Nebulus installs a
+process-wide Rust `log` subscriber. Records emitted by
+`openipc-core`, `openipc-rtl88xx`, `openipc-video`, Nebulus, and dependencies are
+written to stderr/Logcat or the browser console and copied into the bounded Logs
+tab. The tab can filter by minimum severity and search both target and message.
 
-The first stage that stops increasing usually identifies the bottleneck or
-failure boundary.
+| Verbosity     | Captured levels                  | Intended use                                      |
+| ------------- | -------------------------------- | ------------------------------------------------- |
+| Low           | Warn, Error                      | Flight use when only actionable failures matter  |
+| Normal        | Info, Warn, Error                | Everyday startup and session state                |
+| High          | Debug and above                  | Adapter, WFB, FEC, RTP, and decoder investigation |
+| Very verbose  | Trace, Debug, Info, Warn, Error  | Register, USB transfer, and per-packet tracing    |
 
-## Common Patterns
+**Very verbose** can generate thousands of records per second. The capture
+queue keeps at most 4,000 pending records and the visible app history trims
+itself at 1,000 entries. Use the target search to isolate
+`openipc_rtl88xx::register`, `openipc_rtl88xx::usb`, `openipc_core::wfb`,
+`openipc_core::fec`, `openipc_core::rtp`, or `openipc_video`.
 
-| Symptom                              | Likely Boundary                                                                                                                                                |
-| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| No USB bytes                         | Device permission, driver claim, endpoint discovery, channel setup, or no RF traffic.                                                                          |
-| USB bytes but no accepted packets    | Realtek descriptor parsing, CRC/ICV drops, wrong channel, or unsupported descriptor variant.                                                                   |
-| Accepted packets but no WFB payloads | Wrong channel id, wrong radio port, or frame layout mismatch.                                                                                                  |
-| Video works but no raw payloads      | Air unit is not sending on the expected route channel, that channel's session packet has not arrived, or the link id/key does not match.                       |
-| WFB payloads but no video frames     | RTP packetization issue, unsupported payload type, codec fragmentation issue, or waiting for a keyframe/access unit.                                           |
-| Video frames but black output        | WebCodecs unsupported codec/config, decoder reset, or no keyframe yet.                                                                                         |
-| Raw audio packets but no audio       | Wrong RTP payload type or codec setting, WebCodecs `AudioDecoder` lacks Opus support, muted/suspended AudioContext, or unsupported channel/sample-rate config. |
-| Good decode FPS but low render FPS   | Canvas/rendering path or recording overhead.                                                                                                                   |
+A useful startup trace contains device open, chip probe, firmware/EFUSE
+initialization, monitor channel setup, WFB session acceptance, codec
+configuration, keyframe acceptance, and decoder activation. Do not leave Very
+verbose enabled while measuring latency: formatting and displaying per-packet
+records is deliberately expensive.
 
-## Logs
-
-Keep logs enabled when validating a new adapter. The useful sequence is:
-
-1. WASM or desktop runtime ready.
-2. Device opened and interface claimed.
-3. Realtek monitor initialization report.
-4. RX transfer counters increasing.
-5. WFB session accepted.
-6. Annex-B frames emitted.
-7. Decoder configured and rendering.
+The Environment view identifies target OS/architecture, renderer, USB API,
+decoder backend, codec support, acceleration status where the platform exposes
+it, logical processor count, browser user agent, and the largest resolution/FPS
+observed in the current session. An observed maximum is not a hardware limit.

@@ -11,28 +11,98 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
             }
         });
     });
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Capture");
+        egui::ComboBox::from_id_salt("diagnostic-verbosity")
+            .selected_text(app.settings.diagnostic_verbosity.label())
+            .show_ui(ui, |ui| {
+                for verbosity in [
+                    crate::settings::DiagnosticVerbosity::Low,
+                    crate::settings::DiagnosticVerbosity::Normal,
+                    crate::settings::DiagnosticVerbosity::High,
+                    crate::settings::DiagnosticVerbosity::VeryHigh,
+                ] {
+                    ui.selectable_value(
+                        &mut app.settings.diagnostic_verbosity,
+                        verbosity,
+                        verbosity.label(),
+                    );
+                }
+            });
+        ui.label("Minimum level");
+        egui::ComboBox::from_id_salt("log-minimum-level")
+            .selected_text(app.log_filter.label())
+            .show_ui(ui, |ui| {
+                for level in [
+                    LogLevel::Trace,
+                    LogLevel::Debug,
+                    LogLevel::Info,
+                    LogLevel::Warn,
+                    LogLevel::Error,
+                ] {
+                    ui.selectable_value(&mut app.log_filter, level, level.label());
+                }
+            });
+        ui.label("Target or text");
+        ui.add(
+            egui::TextEdit::singleline(&mut app.log_search)
+                .desired_width(180.0)
+                .hint_text("usb, wfb, decoder..."),
+        );
+    });
     ui.separator();
-    for entry in app.logs.iter().rev() {
-        ui.horizontal_top(|ui| {
-            ui.monospace(format!("{:>8.2}", entry.elapsed_seconds));
-            ui.label(
-                egui::RichText::new(entry.level.label())
-                    .monospace()
-                    .color(level_color(ui, entry.level)),
-            );
-            ui.label(
-                egui::RichText::new(entry.target)
-                    .monospace()
-                    .color(ui.visuals().weak_text_color()),
-            );
-            ui.label(&entry.message);
-        });
-        ui.separator();
+    let search = app.log_search.trim().to_ascii_lowercase();
+    for entry in app.logs.iter().rev().filter(|entry| {
+        entry.level.priority() >= app.log_filter.priority()
+            && (search.is_empty()
+                || entry.target.to_ascii_lowercase().contains(&search)
+                || entry.message.to_ascii_lowercase().contains(&search))
+    }) {
+        ui.push_id(
+            (
+                entry.elapsed_seconds.to_bits(),
+                entry.level.priority(),
+                &entry.target,
+                &entry.message,
+            ),
+            |ui| {
+                ui.horizontal_top(|ui| {
+                    ui.add_sized(
+                        [54.0, 18.0],
+                        egui::Label::new(
+                            egui::RichText::new(format!("{:>7.2}", entry.elapsed_seconds))
+                                .monospace(),
+                        ),
+                    );
+                    ui.add_sized(
+                        [42.0, 18.0],
+                        egui::Label::new(
+                            egui::RichText::new(entry.level.label())
+                                .monospace()
+                                .color(level_color(ui, entry.level)),
+                        ),
+                    );
+                    ui.add_sized(
+                        [104.0, 18.0],
+                        egui::Label::new(
+                            egui::RichText::new(&entry.target)
+                                .monospace()
+                                .color(ui.visuals().weak_text_color()),
+                        )
+                        .truncate(),
+                    )
+                    .on_hover_text(&entry.target);
+                    ui.add(egui::Label::new(&entry.message).wrap());
+                });
+                ui.separator();
+            },
+        );
     }
 }
 
 fn level_color(ui: &egui::Ui, level: LogLevel) -> egui::Color32 {
     match level {
+        LogLevel::Trace => ui.visuals().weak_text_color(),
         LogLevel::Debug => ui.visuals().weak_text_color(),
         LogLevel::Info => egui::Color32::from_rgb(78, 202, 157),
         LogLevel::Warn => egui::Color32::from_rgb(236, 181, 70),

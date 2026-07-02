@@ -199,12 +199,14 @@ impl Drop for Runtime {
 mod worker {
     use std::{
         fs::File,
-        io::{BufWriter, Write as _},
+        io::BufWriter,
         path::PathBuf,
         sync::{
             atomic::{AtomicBool, AtomicU8, Ordering},
+            mpsc::{self, SyncSender, TrySendError},
             Arc, Mutex,
         },
+        thread::JoinHandle,
         time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
 
@@ -229,24 +231,109 @@ mod worker {
         },
     };
 
+    enum RecorderMessage {
+        Video(crate::recording::RecordedAccessUnit),
+        Audio(crate::recording::RecordedAudioPacket),
+        Finish,
+    }
+
     struct EncodedRecorder {
         path: PathBuf,
-        writer: BufWriter<File>,
         codec: openipc_core::Codec,
-        bytes: u64,
+        bytes: usize,
+        sender: SyncSender<RecorderMessage>,
+        worker: JoinHandle<Result<u64, String>>,
     }
 
     impl EncodedRecorder {
-        fn start(path: PathBuf, frame: &openipc_core::DepacketizedFrame) -> Result<Self, String> {
+        const MAX_BYTES: usize = 512 * 1024 * 1024;
+
+        fn start(
+            path: PathBuf,
+            frame: &openipc_core::DepacketizedFrame,
+            audio_config: Option<crate::recording::AudioTrackConfig>,
+        ) -> Result<Self, String> {
             let file = File::create(&path)
                 .map_err(|error| format!("create recording {} failed: {error}", path.display()))?;
-            let mut recorder = Self {
+            let config = crate::recording::Mp4TrackConfig::from_keyframe(frame)?;
+            let codec = frame.codec;
+            let first = crate::recording::RecordedAccessUnit::from(frame);
+            let (sender, receiver) = mpsc::sync_channel(64);
+            let output_path = path.clone();
+            let worker = std::thread::Builder::new()
+                .name("nebulus-mp4-recorder".to_owned())
+                .spawn(move || {
+                    let writer = BufWriter::with_capacity(256 * 1024, file);
+                    let mut muxer = config.muxer(writer, audio_config)?;
+                    muxer
+                        .write_video(0.0, &first.data, first.is_keyframe)
+                        .map_err(|error| format!("mux first video frame failed: {error}"))?;
+                    let mut video_timestamp = first.timestamp;
+                    let mut video_pts = 0u64;
+                    let mut video_delta = 3_000;
+                    let mut audio_timestamp = None;
+                    let mut audio_pts = 0u64;
+                    let mut audio_delta = audio_config
+                        .map(|config| (config.sample_rate / 50).max(1))
+                        .unwrap_or(960);
+                    while let Ok(message) = receiver.recv() {
+                        match message {
+                            RecorderMessage::Video(frame) => {
+                                video_delta = crate::recording::frame_delta_ticks(
+                                    video_timestamp,
+                                    frame.timestamp,
+                                    video_delta,
+                                );
+                                video_pts = video_pts.saturating_add(u64::from(video_delta));
+                                video_timestamp = frame.timestamp;
+                                muxer
+                                    .write_video(
+                                        video_pts as f64 / 90_000.0,
+                                        &frame.data,
+                                        frame.is_keyframe,
+                                    )
+                                    .map_err(|error| format!("mux video frame failed: {error}"))?;
+                            }
+                            RecorderMessage::Audio(packet) => {
+                                let Some(config) = audio_config else {
+                                    continue;
+                                };
+                                if let Some(previous) = audio_timestamp {
+                                    audio_delta = crate::recording::timestamp_delta(
+                                        previous,
+                                        packet.timestamp,
+                                        audio_delta,
+                                        config.sample_rate.saturating_mul(2),
+                                    );
+                                    audio_pts = audio_pts.saturating_add(u64::from(audio_delta));
+                                }
+                                audio_timestamp = Some(packet.timestamp);
+                                muxer
+                                    .write_audio(
+                                        audio_pts as f64 / config.sample_rate as f64,
+                                        &packet.data,
+                                    )
+                                    .map_err(|error| format!("mux Opus packet failed: {error}"))?;
+                            }
+                            RecorderMessage::Finish => break,
+                        }
+                    }
+                    muxer
+                        .finish_in_place()
+                        .map_err(|error| format!("finalize MP4 recording failed: {error}"))?;
+                    drop(muxer);
+                    std::fs::metadata(&output_path)
+                        .map(|metadata| metadata.len())
+                        .map_err(|error| format!("read MP4 recording size failed: {error}"))
+                })
+                .map_err(|error| format!("start MP4 recorder worker failed: {error}"))?;
+            let recorder = Self {
                 path,
-                writer: BufWriter::with_capacity(256 * 1024, file),
-                codec: frame.codec,
-                bytes: 0,
+                codec,
+                bytes: frame.data.len(),
+                sender,
+                worker,
             };
-            recorder.write(frame)?;
             Ok(recorder)
         }
 
@@ -254,23 +341,168 @@ mod worker {
             if frame.codec != self.codec {
                 return Ok(());
             }
-            self.writer
-                .write_all(&frame.data)
-                .map_err(|error| format!("write recording failed: {error}"))?;
-            self.bytes = self.bytes.saturating_add(frame.data.len() as u64);
-            Ok(())
+            self.send(frame.data.len(), RecorderMessage::Video(frame.into()))
         }
 
-        fn finish(mut self) -> Result<(String, u64), String> {
-            self.writer
-                .flush()
-                .map_err(|error| format!("flush recording failed: {error}"))?;
-            Ok((self.path.display().to_string(), self.bytes))
+        fn write_audio(
+            &mut self,
+            packet: crate::recording::RecordedAudioPacket,
+        ) -> Result<(), String> {
+            self.send(packet.data.len(), RecorderMessage::Audio(packet))
+        }
+
+        fn send(&mut self, bytes: usize, message: RecorderMessage) -> Result<(), String> {
+            let Some(total) = self.bytes.checked_add(bytes) else {
+                return Err("MP4 recording exceeded its encoded-data limit".to_owned());
+            };
+            if total > Self::MAX_BYTES {
+                return Err("MP4 recording reached 512 MiB and was finalized".to_owned());
+            }
+            match self.sender.try_send(message) {
+                Ok(()) => {
+                    self.bytes = total;
+                    Ok(())
+                }
+                Err(TrySendError::Full(_)) => Err(
+                    "MP4 recorder could not keep up; recording stopped before affecting RX latency"
+                        .to_owned(),
+                ),
+                Err(TrySendError::Disconnected(_)) => {
+                    Err("MP4 recorder worker stopped unexpectedly".to_owned())
+                }
+            }
+        }
+
+        fn finish(self) -> Result<(String, u64), String> {
+            let _ = self.sender.send(RecorderMessage::Finish);
+            let bytes = self
+                .worker
+                .join()
+                .map_err(|_| "MP4 recorder worker panicked".to_owned())??;
+            Ok((self.path.display().to_string(), bytes))
         }
     }
 
     const VIDEO_ROUTE: PayloadRouteId = PayloadRouteId::new(1);
     const RX_TRANSFERS_IN_FLIGHT: usize = 4;
+
+    fn decoder_options() -> DecoderOptions {
+        #[cfg(target_os = "android")]
+        {
+            // Goldfish advertises an eight-frame output delay. Keep enough
+            // encoded frames queued for that pipeline to produce output.
+            DecoderOptions {
+                max_frames_in_flight: 12,
+                ..DecoderOptions::default()
+            }
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            DecoderOptions::default()
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    struct FramePresenter {
+        sender: Option<
+            SyncSender<(
+                openipc_video::DecodedFrame<openipc_video::AndroidVideoFrame>,
+                f64,
+            )>,
+        >,
+        worker: Option<JoinHandle<()>>,
+    }
+
+    #[cfg(target_os = "android")]
+    impl FramePresenter {
+        fn new(events: &super::EventQueue, context: &eframe::egui::Context) -> Self {
+            let (sender, receiver) = mpsc::sync_channel(1);
+            let events = Arc::clone(events);
+            let context = context.clone();
+            let worker = std::thread::Builder::new()
+                .name("nebulus-android-video-presenter".to_owned())
+                .spawn(move || {
+                    while let Ok((frame, decode_latency_ms)) = receiver.recv() {
+                        match crate::video::pack_android_frame(frame) {
+                            Ok(frame) => send(
+                                &events,
+                                &context,
+                                RuntimeEvent::NativeVideo {
+                                    frame,
+                                    decode_latency_ms,
+                                },
+                            ),
+                            Err(error) => log(
+                                &events,
+                                &context,
+                                LogLevel::Warn,
+                                "video",
+                                format!("prepare Android video frame failed: {error}"),
+                            ),
+                        }
+                    }
+                })
+                .ok();
+            Self {
+                sender: Some(sender),
+                worker,
+            }
+        }
+
+        fn submit(
+            &self,
+            frame: openipc_video::DecodedFrame<openipc_video::AndroidVideoFrame>,
+            decode_latency_ms: f64,
+        ) {
+            let Some(sender) = &self.sender else {
+                return;
+            };
+            let _ = sender.try_send((frame, decode_latency_ms));
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    impl Drop for FramePresenter {
+        fn drop(&mut self) {
+            self.sender.take();
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    struct FramePresenter {
+        events: super::EventQueue,
+        context: eframe::egui::Context,
+    }
+
+    #[cfg(not(target_os = "android"))]
+    impl FramePresenter {
+        fn new(events: &super::EventQueue, context: &eframe::egui::Context) -> Self {
+            Self {
+                events: Arc::clone(events),
+                context: context.clone(),
+            }
+        }
+
+        fn submit(
+            &self,
+            frame: openipc_video::DecodedFrame<
+                <PlatformDecoder as openipc_video::VideoDecoder>::Surface,
+            >,
+            decode_latency_ms: f64,
+        ) {
+            send(
+                &self.events,
+                &self.context,
+                RuntimeEvent::NativeVideo {
+                    frame,
+                    decode_latency_ms,
+                },
+            );
+        }
+    }
 
     struct LinkRuntime {
         quality: AdaptiveLink,
@@ -403,7 +635,11 @@ mod worker {
             Arc::new(RealtekDevice::open_first(driver).map_err(|error| error.to_string())?),
             request
                 .device_id
-                .clone()
+                .as_deref()
+                .and_then(parse_device_id)
+                .and_then(|(vendor, product)| openipc_rtl88xx::supported_device(vendor, product))
+                .map(|supported| supported.label.to_owned())
+                .or_else(|| request.device_id.clone())
                 .unwrap_or_else(|| "Realtek USB adapter".to_owned()),
         );
         #[cfg(target_os = "android")]
@@ -424,15 +660,17 @@ mod worker {
             .initialize_monitor_with_options(radio, MonitorOptions::from_env())
             .map_err(|error| error.to_string())?;
         let chip = report.chip.family;
-        let mut decoder = PlatformDecoder::new(DecoderOptions::default())
+        let receiver_info =
+            crate::runtime::ReceiverInfo::initialized(device_label, &device, &report);
+        let mut decoder = PlatformDecoder::new(decoder_options())
             .map_err(|error| format!("video decoder unavailable: {error}"))?;
+        let presenter = FramePresenter::new(events, context);
         let decoder_environment = decoder_environment(decoder.capabilities());
         send(
             events,
             context,
             RuntimeEvent::Connected {
-                label: device_label,
-                chip: chip.name().to_owned(),
+                receiver: receiver_info,
                 decoder: decoder_environment,
             },
         );
@@ -451,6 +689,7 @@ mod worker {
         receiver.set_rtp_reorder_enabled(request.rtp_reorder);
         let options = configure_receiver(&mut receiver, &request)?;
         let mut route_processor = RouteProcessor::new(&request)?;
+        let recording_audio_config = route_processor.recording_audio_config();
         for entry in route_processor.take_startup_logs() {
             log(
                 events,
@@ -513,6 +752,7 @@ mod worker {
                     recording_control,
                     &mut armed_path,
                     &mut recorder,
+                    recording_audio_config,
                     events,
                     context,
                 );
@@ -582,12 +822,15 @@ mod worker {
                 recording_control,
                 &mut armed_path,
                 &mut recorder,
+                recording_audio_config,
                 events,
                 context,
             );
             route_processor.set_audio_volume(audio_volume.load(Ordering::Relaxed));
             let route_start = Instant::now();
-            let (route_updates, route_logs) = route_processor.process(&batch.raw_payloads);
+            let (route_updates, route_logs, recorded_audio) =
+                route_processor.process(&batch.raw_payloads, recorder.is_some());
+            record_audio_packets(&mut recorder, recorded_audio, events, context);
             let route_latency_ms = route_start.elapsed().as_secs_f64() * 1000.0;
             for entry in route_logs {
                 log(
@@ -623,7 +866,10 @@ mod worker {
             }
             let decode_submit_latency_ms = decode_submit_start.elapsed().as_secs_f64() * 1000.0;
             if let Some(decoded) = decoder.latest_frame() {
-                send_decoded(events, context, decoded, &decoder);
+                presenter.submit(
+                    decoded,
+                    decoder.stats().last_decode_latency_us as f64 / 1_000.0,
+                );
             }
             let stats = decoder.stats();
             send(
@@ -682,6 +928,7 @@ mod worker {
         drop(ep_out);
         finish_recording(&mut recorder, events, context);
         let _ = decoder.flush();
+        drop(presenter);
         device
             .shutdown_monitor()
             .map_err(|error| format!("monitor shutdown failed: {error}"))?;
@@ -703,9 +950,11 @@ mod worker {
             route_runtime::{configure_mock_receiver, RouteProcessor},
         };
 
-        let mut decoder = PlatformDecoder::new(DecoderOptions::default())
+        let mut decoder = PlatformDecoder::new(decoder_options())
             .map_err(|error| format!("native mock decoder unavailable: {error}"))?;
+        let presenter = FramePresenter::new(events, context);
         let mut route_processor = RouteProcessor::new(&request)?;
+        let recording_audio_config = route_processor.recording_audio_config();
         for entry in route_processor.take_startup_logs() {
             log(
                 events,
@@ -723,8 +972,7 @@ mod worker {
             events,
             context,
             RuntimeEvent::Connected {
-                label: "Pre-recorded 1080p H.264 + Opus".to_owned(),
-                chip: "Synthetic A/V RTP".to_owned(),
+                receiver: crate::runtime::ReceiverInfo::codec_mock(),
                 decoder: decoder_environment(decoder.capabilities()),
             },
         );
@@ -747,6 +995,7 @@ mod worker {
         let options = configure_mock_receiver(&mut receiver, &request);
         let runtime = receiver.video_runtime();
         let mut source = MockAvStream::new()?;
+        let mock_started = Instant::now();
         let mut payload_sequence = 1u64;
         let mut recorder: Option<EncodedRecorder> = None;
         let mut armed_path: Option<PathBuf> = None;
@@ -775,11 +1024,14 @@ mod worker {
                     recording_control,
                     &mut armed_path,
                     &mut recorder,
+                    recording_audio_config,
                     events,
                     context,
                 );
                 route_processor.set_audio_volume(audio_volume.load(Ordering::Relaxed));
-                let (route_updates, route_logs) = route_processor.process(&batch.raw_payloads);
+                let (route_updates, route_logs, recorded_audio) =
+                    route_processor.process(&batch.raw_payloads, recorder.is_some());
+                record_audio_packets(&mut recorder, recorded_audio, events, context);
                 metrics.merge(BatchMetrics {
                     routes: route_updates,
                     counters: batch.counters,
@@ -811,7 +1063,10 @@ mod worker {
                 }
             }
             if let Some(decoded) = decoder.latest_frame() {
-                send_decoded(events, context, decoded, &decoder);
+                presenter.submit(
+                    decoded,
+                    decoder.stats().last_decode_latency_us as f64 / 1_000.0,
+                );
             }
             let stats = decoder.stats();
             metrics.pipeline_latency_ms = loop_started.elapsed().as_secs_f64() * 1_000.0;
@@ -822,13 +1077,14 @@ mod worker {
             metrics.audio = route_processor.audio_stats();
             send(events, context, RuntimeEvent::Batch(Box::new(metrics)));
             if let Some(remaining) =
-                Duration::from_micros(event.delay_micros).checked_sub(loop_started.elapsed())
+                Duration::from_micros(event.next_due_micros).checked_sub(mock_started.elapsed())
             {
                 std::thread::sleep(remaining);
             }
         }
 
         let _ = decoder.flush();
+        drop(presenter);
         finish_recording(&mut recorder, events, context);
         log(
             events,
@@ -846,6 +1102,7 @@ mod worker {
         control: &Mutex<super::RecordingControl>,
         armed_path: &mut Option<PathBuf>,
         recorder: &mut Option<EncodedRecorder>,
+        audio_config: Option<crate::recording::AudioTrackConfig>,
         events: &super::EventQueue,
         context: &eframe::egui::Context,
     ) {
@@ -867,7 +1124,7 @@ mod worker {
                 let Some(path) = armed_path.take() else {
                     continue;
                 };
-                match EncodedRecorder::start(path, frame) {
+                match EncodedRecorder::start(path, frame, audio_config) {
                     Ok(started) => {
                         send(
                             events,
@@ -888,6 +1145,24 @@ mod worker {
                     send(events, context, RuntimeEvent::RecordingFailed(error));
                     *recorder = None;
                 }
+            }
+        }
+    }
+
+    fn record_audio_packets(
+        recorder: &mut Option<EncodedRecorder>,
+        packets: Vec<crate::recording::RecordedAudioPacket>,
+        events: &super::EventQueue,
+        context: &eframe::egui::Context,
+    ) {
+        for packet in packets {
+            let Some(active) = recorder.as_mut() else {
+                break;
+            };
+            if let Err(error) = active.write_audio(packet) {
+                send(events, context, RuntimeEvent::RecordingFailed(error));
+                finish_recording(recorder, events, context);
+                break;
             }
         }
     }
@@ -1075,22 +1350,6 @@ mod worker {
     fn send(events: &super::EventQueue, context: &eframe::egui::Context, event: RuntimeEvent) {
         super::queue(events, event);
         context.request_repaint();
-    }
-
-    fn send_decoded(
-        events: &super::EventQueue,
-        context: &eframe::egui::Context,
-        frame: openipc_video::DecodedFrame<<PlatformDecoder as VideoDecoder>::Surface>,
-        decoder: &PlatformDecoder,
-    ) {
-        send(
-            events,
-            context,
-            RuntimeEvent::NativeVideo {
-                frame,
-                decode_latency_ms: decoder.stats().last_decode_latency_us as f64 / 1_000.0,
-            },
-        );
     }
 
     fn log(

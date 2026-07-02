@@ -14,6 +14,9 @@ The reference commits used for this pass were:
 ```text
 OpenIPC/devourer f542b06 Add RTL8812EU / RTL8822EU (rtl8822e) support (#124)
 OpenIPC/devourer 55f0649 Split Jaguar1 + compile-time per-chip selection (#125)
+OpenIPC/devourer 94d2fa9 Fix rtl8822c 2.4 GHz RX deafness (#138)
+OpenIPC/devourer e926b47 Jaguar1 TX-power parity (#139)
+OpenIPC/devourer 7cd094a Current audited master
 ```
 
 ## Audit Plan
@@ -87,6 +90,11 @@ The current Rust driver includes the new devourer Jaguar3 work:
   devourer for monitor inject/adaptive-link experiments.
 - Clean shutdown now mirrors devourer `Stop()`: halt TRX through `CR`, close
   `RCR`, then run the 8822C card-disable power sequence.
+- RTL8822C channel changes now include the vendor 3-wire reset bracket, gated
+  RXBB write, RF18 read-modify-write, per-band CCK/OFDM AGC tables, CCK RX-IQ
+  control, and force-anapar writes. Devourer validated this sequence as the fix
+  for zero CCA and no receive on 2.4 GHz. These writes are gated away from the
+  separate RTL8822E channel path.
 
 The RTL8822E-specific path additionally includes:
 
@@ -126,9 +134,18 @@ The Rust code tracks the devourer behavior that matters for OpenIPC use:
 - RTL8812 power tracking,
 - PHYDM false-alarm/DIG watchdog hooks,
 - C2H and RTL8814 TX-status report surfacing.
+- vendor-correct 5 GHz TX-power groups (`60..98` and `100..106`) and
+  `EFUSE -> chip default -> generic default` fallback for unprogrammed base
+  cells,
+- optional RX-chain masking through `MonitorOptions::rx_path_mask`,
+  `RealtekDevice::set_rx_path_mask[_async]`, and the WASM `setRxPathMask`
+  binding.
 
 The Rust crate keeps these as explicit APIs. The app decides whether they run
 in a native worker thread, a Tauri command, a browser loop, or a Web Worker.
+Devourer's timed `DEVOURER_RX_PATHS=mask:mask@milliseconds` mode is a
+measurement harness, not hidden HAL state: Rust apps can schedule the explicit
+mask setter on their existing worker or browser timer.
 
 ## Why App-Owned Polling
 
@@ -162,6 +179,10 @@ drift early:
   rate/PHY flags, 5 GHz CCK clamping, and payload-size rejection,
 - radio-channel tests for the 40/80 MHz center-channel mappings used by
   devourer and aviateur,
+- RTL8822C RF18 and AGC-selection fixtures from the hardware-validated 2.4 GHz
+  fix,
+- Jaguar1 PG-default and 5 GHz group-boundary tests for blank and partially
+  programmed EFUSE maps,
 - fake USB control-transport tests for retrying native register reads/writes
   after stalls or cancelled transfers while failing fast on disconnect,
 - recovery-classifier tests for transient stalls/timeouts versus fatal USB

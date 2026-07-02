@@ -1,4 +1,5 @@
 mod diagnostics;
+mod gui;
 mod logs;
 mod metrics;
 mod routes;
@@ -17,6 +18,7 @@ pub(crate) enum PanelTab {
     Metrics,
     Routes,
     Vpn,
+    Gui,
     Diagnostics,
     Logs,
 }
@@ -46,9 +48,9 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
                 .frame(panel_frame(ui))
                 .show(ui, |ui| side_panel(app, ui));
         } else {
-            egui::Panel::right("nebulus-control-panel-v2")
-                .default_size(390.0)
-                .min_size(310.0)
+            egui::Panel::right("nebulus-control-panel-v3")
+                .default_size(420.0)
+                .min_size(360.0)
                 .max_size(520.0)
                 .resizable(true)
                 .frame(panel_frame(ui))
@@ -59,11 +61,16 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE.fill(ui.visuals().extreme_bg_color))
         .show(ui, |ui| video::show(app, ui));
+
+    about_dialog(app, ui.ctx());
 }
 
 fn header(app: &mut NebulusApp, ui: &mut egui::Ui, compact: bool) {
     let state = app.state;
-    let connected_label = app.connected_label.clone();
+    let connected_label = app
+        .receiver_info
+        .as_ref()
+        .map(|receiver| receiver.label.clone());
     if compact {
         egui::containers::Sides::new()
             .height(28.0)
@@ -82,6 +89,7 @@ fn header(app: &mut NebulusApp, ui: &mut egui::Ui, compact: bool) {
             );
         ui.add_space(5.0);
         ui.horizontal_centered(|ui| {
+            about_button(app, ui);
             receiver_buttons(app, ui);
             if let Some(label) = &connected_label {
                 ui.label(
@@ -110,6 +118,7 @@ fn header(app: &mut NebulusApp, ui: &mut egui::Ui, compact: bool) {
                 }
             },
             |ui| {
+                about_button(app, ui);
                 panel_button(app, ui);
                 ui.separator();
                 receiver_buttons(app, ui);
@@ -117,8 +126,110 @@ fn header(app: &mut NebulusApp, ui: &mut egui::Ui, compact: bool) {
         );
 }
 
+fn about_button(app: &mut NebulusApp, ui: &mut egui::Ui) {
+    if ui
+        .add(
+            egui::Button::new("About")
+                .corner_radius(4)
+                .min_size(egui::vec2(56.0, 27.0)),
+        )
+        .on_hover_text("About Nebulus")
+        .clicked()
+    {
+        app.show_about = true;
+    }
+}
+
+fn about_dialog(app: &mut NebulusApp, context: &egui::Context) {
+    if !app.show_about {
+        return;
+    }
+    let width = (context.content_rect().width() - 32.0).clamp(280.0, 410.0);
+    let build = crate::build_info::current();
+    let response = egui::Modal::new(egui::Id::new("nebulus-about-dialog")).show(context, |ui| {
+        ui.set_width(width);
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.label(
+                    egui::RichText::new("Nebulus")
+                        .strong()
+                        .size(22.0)
+                        .color(ui.visuals().strong_text_color()),
+                );
+                ui.label(
+                    egui::RichText::new(format!("OpenIPC ground station v{}", build.version))
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                );
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                if ui.small_button("Close").clicked() {
+                    ui.close();
+                }
+            });
+        });
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(8.0);
+        ui.label("A low-latency OpenIPC FPV receiver built in Rust for desktop, Android, and the browser.");
+        ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                egui::RichText::new("Contact for inquiries:")
+                    .color(ui.visuals().weak_text_color()),
+            );
+            ui.hyperlink_to("neel@neels.dev", "mailto:neel@neels.dev");
+        });
+        ui.add_space(12.0);
+        if cfg!(target_arch = "wasm32") {
+            ui.label(
+                egui::RichText::new("For the lowest latency")
+                    .strong()
+                    .color(Color32::from_rgb(61, 214, 154)),
+            );
+            ui.label("Download the native desktop or Android app for direct USB access, platform hardware decoding, and less browser overhead.");
+        } else {
+            ui.label(
+                egui::RichText::new("Try it in your browser")
+                    .strong()
+                    .color(Color32::from_rgb(61, 214, 154)),
+            );
+            ui.label("Open the hosted WebUSB version without installing another application.");
+        }
+        ui.add_space(12.0);
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add(
+                    egui::Button::new(if cfg!(target_arch = "wasm32") {
+                        "Download app"
+                    } else {
+                        "Try web version"
+                    })
+                        .fill(Color32::from_rgb(36, 132, 99))
+                        .min_size(egui::vec2(116.0, 30.0)),
+                )
+                .clicked()
+            {
+                context.open_url(egui::OpenUrl::new_tab(if cfg!(target_arch = "wasm32") {
+                    crate::build_info::RELEASES_URL
+                } else {
+                    crate::build_info::WEB_APP_URL
+                }));
+            }
+            ui.hyperlink_to("Docs", crate::build_info::DOCS_URL);
+            ui.hyperlink_to("GitHub", crate::build_info::REPOSITORY_URL);
+            if let Some(commit) = build.short_commit() {
+                ui.hyperlink_to(format!("Commit {commit}"), build.commit_url());
+            }
+        });
+    });
+    if response.should_close() {
+        app.show_about = false;
+    }
+}
+
 fn brand(ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(3.0, 19.0), egui::Sense::hover());
         ui.painter().rect_filled(
             rect,
@@ -291,12 +402,13 @@ fn action_button(ui: &mut egui::Ui, label: &str, tone: ActionTone) -> egui::Resp
 }
 
 fn side_panel(app: &mut NebulusApp, ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         for (tab, label) in [
             (PanelTab::Settings, "Settings"),
             (PanelTab::Metrics, "Metrics"),
             (PanelTab::Routes, "Routes"),
             (PanelTab::Vpn, "VPN"),
+            (PanelTab::Gui, "GUI"),
             (PanelTab::Diagnostics, "Diagnostics"),
             (PanelTab::Logs, "Logs"),
         ] {
@@ -316,6 +428,7 @@ fn side_panel(app: &mut NebulusApp, ui: &mut egui::Ui) {
                 PanelTab::Metrics => metrics::show(app, ui),
                 PanelTab::Routes => routes::show(app, ui),
                 PanelTab::Vpn => vpn(app, ui),
+                PanelTab::Gui => gui::show(app, ui),
                 PanelTab::Diagnostics => diagnostics::show(app, ui),
                 PanelTab::Logs => logs::show(app, ui),
             }

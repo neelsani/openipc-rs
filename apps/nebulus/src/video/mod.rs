@@ -7,7 +7,9 @@ pub(crate) use native_gpu::NativeNv12Renderer as PlatformVideoRenderer;
 #[cfg(target_os = "android")]
 mod android_gpu;
 #[cfg(target_os = "android")]
-pub(crate) use android_gpu::AndroidYuvRenderer as PlatformVideoRenderer;
+pub(crate) use android_gpu::{
+    pack_android_frame, AndroidYuvFrame, AndroidYuvRenderer as PlatformVideoRenderer,
+};
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 mod web_glow;
 #[cfg(not(target_arch = "wasm32"))]
@@ -70,10 +72,8 @@ pub(crate) fn fallback_rgba(
 }
 
 #[cfg(target_os = "android")]
-pub(crate) fn fallback_rgba(
-    frame: &DecodedFrame<openipc_video::AndroidVideoFrame>,
-) -> Result<Vec<u8>, String> {
-    platform::android_rgba(&frame.surface, frame.dimensions())
+pub(crate) fn fallback_rgba(_frame: &DecodedFrame<AndroidYuvFrame>) -> Result<Vec<u8>, String> {
+    Err("Android GPU video upload failed".to_owned())
 }
 
 #[cfg(not(target_arch = "wasm32"))]

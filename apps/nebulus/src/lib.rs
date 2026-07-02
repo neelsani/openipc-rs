@@ -5,7 +5,11 @@ mod android;
 mod app;
 mod audio;
 mod build_info;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod desktop_tray;
+mod logging;
 mod model;
+mod recording;
 mod runtime;
 mod settings;
 #[cfg(not(target_arch = "wasm32"))]
@@ -15,8 +19,14 @@ mod video;
 
 pub use app::NebulusApp;
 
+/// Install Nebulus's process-wide logger and UI log capture sink.
+pub fn init_logging() {
+    logging::init();
+}
+
 /// Build Nebulus from an eframe creation context.
 pub fn create_app(context: &eframe::CreationContext<'_>) -> NebulusApp {
+    init_logging();
     NebulusApp::new(context)
 }
 
@@ -24,15 +34,7 @@ pub fn create_app(context: &eframe::CreationContext<'_>) -> NebulusApp {
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 pub fn android_main(app: android_activity::AndroidApp) {
-    let filter = android_logger::FilterBuilder::new()
-        .parse("info,nebulus=debug,openipc_core=debug,openipc_rtl88xx=debug,openipc_video=debug")
-        .build();
-    android_logger::init_once(
-        android_logger::Config::default()
-            .with_tag("Nebulus")
-            .with_max_level(log::LevelFilter::Debug)
-            .with_filter(filter),
-    );
+    init_logging();
     android::install(app.clone());
     let mut wgpu_options = eframe::egui_wgpu::WgpuConfiguration::default();
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut wgpu_options.wgpu_setup {

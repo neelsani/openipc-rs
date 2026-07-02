@@ -20,7 +20,8 @@ pub(crate) struct MockRtpFrame {
 
 pub(crate) struct MockRtpEvent {
     pub(crate) packets: Vec<Vec<u8>>,
-    pub(crate) delay_micros: u64,
+    /// Absolute mock-stream deadline for the event after this one.
+    pub(crate) next_due_micros: u64,
 }
 
 /// Interleaves the pre-encoded video and audio fixtures on their RTP clocks.
@@ -82,7 +83,7 @@ impl MockAvStream {
         let next_due = self.next_video_micros.min(self.next_audio_micros);
         MockRtpEvent {
             packets,
-            delay_micros: next_due.saturating_sub(due),
+            next_due_micros: next_due,
         }
     }
 }
@@ -388,9 +389,29 @@ mod tests {
             .iter()
             .any(|packet| packet[1] & 0x7f == RTP_PAYLOAD_TYPE_OPUS));
         assert_eq!(
-            first.delay_micros,
+            first.next_due_micros,
             (1_000_000 / u64::from(MOCK_FPS)).min(20_000)
         );
+    }
+
+    #[test]
+    fn opus_fixture_has_audible_signal_level() {
+        let stream = MockAvStream::new().unwrap();
+        let mut decoder = ropus::Decoder::new(48_000, ropus::Channels::Mono).unwrap();
+        let mut pcm = vec![0.0; 5_760];
+        let frames = decoder
+            .decode_float(
+                &stream.audio_packets[0],
+                &mut pcm,
+                ropus::DecodeMode::Normal,
+            )
+            .unwrap();
+        let peak = pcm[..frames]
+            .iter()
+            .copied()
+            .map(f32::abs)
+            .fold(0.0, f32::max);
+        assert!(peak > 0.1, "mock Opus peak is too quiet: {peak}");
     }
 
     #[cfg(target_os = "macos")]

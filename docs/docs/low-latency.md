@@ -4,58 +4,77 @@ sidebar_position: 4
 
 # Low-Latency Operation
 
-OpenIPC Station uses bounded queues. USB reads stay posted, WFB/RTP data is
-processed as soon as it is recoverable, and compressed frames go to WebCodecs
-without a playback jitter buffer.
+Nebulus is designed to display the newest decodable frame instead of preserving
+every frame in a growing playback queue. USB, protocol recovery, decode, and
+presentation each use bounded work so temporary overload drops stale output
+rather than adding seconds of delay.
 
-## Browser path
+## Native And Android Path
 
-`WebUsbReceiverSession` owns the nusb WebUSB endpoint and keeps four bulk-IN
-transfers in flight by default. Each completion is processed inside Rust/WASM
-and its buffer is recycled immediately. Only completed video frames, selected
-route payloads, and diagnostics cross into JavaScript.
+The receiver worker keeps four USB bulk-IN transfers posted. It parses Realtek
+aggregates, advances WFB/FEC state, depacketizes RTP, and submits complete access
+units to `openipc-video`. The UI thread does not wait on USB or codec work.
 
-This removes the raw USB transfer round trip through JavaScript. One final
-WASM-to-JavaScript copy remains for compressed data supplied to WebCodecs;
-decoded surfaces remain in the browser.
+The decoder accepts at most three access units in flight. Decoded output is a
+single latest-frame slot: a newer native surface replaces an older surface that
+egui has not presented. Native targets upload NV12 or YUV planes to persistent
+GPU textures and perform color conversion in a shader. CPU RGBA conversion is a
+compatibility fallback.
 
-## Desktop path
+## Browser Path
 
-The Tauri receiver keeps native USB and WFB processing on its worker thread.
-Video frames use a raw Tauri channel with a compact binary header and Annex-B
-payload. Counters and control information use the lower-rate JSON event. This
-avoids base64 expansion and JSON serialization for video frames.
+Nebulus keeps WebUSB transfer buffers inside Rust/WASM and recycles each buffer
+after parsing. WFB, FEC, RTP, route selection, and decoder orchestration remain
+in Rust. WebCodecs returns browser `VideoFrame` objects, and the renderer uploads
+the newest frame directly to a WebGL texture. Decoded pixels do not make a
+round-trip through a WASM byte array.
 
-## Queue policy
+WebUSB and WebCodecs objects are local to the browser event loop, so the web
+build uses an async local executor rather than a native worker thread. Repaint
+requests are event-driven; Nebulus does not busy-loop while idle.
 
-If the WebCodecs decode queue grows beyond the station limit, the decoder is
-reset and the receiver waits for the next IDR frame instead of displaying stale
-footage. RTP reordering is disabled by default and should only be enabled when
-the link actually delivers out-of-order packets.
+## Queue Policy
 
-Audio starts with a short scheduling cushion. Recording adds browser media
-encoding work and can increase latency on slower machines.
+- Four USB reads stay in flight.
+- RTP reordering is disabled by default; enable it only for measured
+  out-of-order delivery.
+- Decoder input is bounded to three access units.
+- Decoded output is latest-only.
+- Runtime metrics and counters are coalesced before the UI consumes them.
+- Audio uses a short scheduling queue to absorb output-device jitter without
+  coupling video timing to audio playback.
 
-## Source-side settings
+After decoder reset or overload, playback waits for codec parameter sets and a
+new H.264 IDR or H.265 random-access frame. This avoids presenting corrupted
+delta frames. A shorter transmitter keyframe interval reduces recovery time.
 
-For `wfb-rs`, use zero tunnel aggregation when interactive latency matters. WFB
-primary fragments are emitted immediately; FEC parity is generated when a
-source block completes. Smaller FEC blocks reduce recovery wait at the cost of
-less parity efficiency.
+## Source-Side Settings
 
-The transmitter encoder remains part of the latency budget. Low-delay encoder
-settings, no lookahead, no B-frames, short GOPs, and frequent IDR frames are
-required for low glass-to-glass latency.
+Receiver tuning cannot compensate for a high-latency encoder. For FPV, configure
+the air-side encoder without B-frames or lookahead, use a short GOP, and emit
+regular keyframes. Smaller WFB FEC blocks recover sooner but have less efficient
+parity overhead; larger blocks improve coding efficiency at the cost of waiting
+for more source fragments.
 
-## Measuring latency
+For `wfb-rs`, avoid tunnel aggregation when interactive latency matters. WFB
+primary fragments are emitted immediately and parity is generated as a source
+block completes.
 
-Diagnostics cover the local path:
+## Measure The Right Boundary
+
+Nebulus reports local processing stages:
 
 ```text
-USB completion -> Realtek parse -> WFB/FEC -> RTP frame
-    -> IPC/WASM boundary -> decoder queue -> decoded output -> canvas
+USB completion -> Realtek parse -> WFB/FEC -> RTP depacketize
+    -> decoder submit -> decoded output -> GPU presentation
 ```
 
-These measurements identify receiver bottlenecks but are not a true
-glass-to-glass number. That requires a transmitter capture timestamp or a
-synchronized on-screen timestamp.
+Use **Metrics** for link quality, post-FEC loss, repair rate, bitrate, delivered
+FPS, and processing latency. Use **Diagnostics > Stage latency** to locate a
+specific receiver bottleneck. These are not glass-to-glass measurements; true
+camera-to-display latency requires a transmitter timestamp or synchronized
+visual test.
+
+The legacy React/Tauri Station has an additional encoded-frame IPC boundary and
+decodes through WebCodecs in its WebView. It remains documented as an integration
+example, but Nebulus is the primary low-latency path.

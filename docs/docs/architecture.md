@@ -16,9 +16,9 @@ flowchart LR
         Video["openipc-video<br/>platform H.264/H.265 decode"]
     end
 
-    Native["Native CLI app<br/>openipc-cli"] --> Rtl
-    Desktop["Tauri backend<br/>OpenIPC Station"] --> Rtl
     Nebulus["Nebulus<br/>egui native, Android, or WASM"] --> Rtl
+    Native["Native CLI app<br/>openipc-cli"] --> Rtl
+    Desktop["Legacy Tauri backend<br/>OpenIPC Station"] --> Rtl
     Browser["Browser UI<br/>React + WebUSB permission"] --> Wasm["openipc-web<br/>wasm-bindgen"]
     Wasm --> Rtl
     Rtl --> Core
@@ -56,7 +56,8 @@ protocol details, then let each target own the APIs that make sense there.
 - Realtek TX descriptor construction for monitor-injection packets before USB
   bulk OUT.
 - CLI output as Annex-B or RTP-over-UDP.
-- Tauri commands/events for the desktop station UI.
+- Nebulus worker-thread ownership of USB and platform decoder state.
+- Tauri commands/events for the legacy desktop station UI.
 
 ### Browser
 
@@ -72,9 +73,9 @@ protocol details, then let each target own the APIs that make sense there.
 - Nebulus drives `openipc_video::WebDecoder` directly and keeps WebUSB,
   protocol reconstruction, and WebCodecs orchestration in Rust/WASM.
 
-### Desktop
+### Desktop Applications
 
-The Tauri desktop app uses the same React components as the browser build, but
+The legacy Tauri app uses the same React components as its browser build, but
 the receive loop runs in native Rust. Encoded Annex-B frames and metrics are
 sent to the UI. WebCodecs still performs video decode inside the WebView, so the
 desktop path avoids copying decoded video surfaces through Rust.
@@ -86,7 +87,7 @@ WebView entirely.
 
 ## Copy Boundaries
 
-OpenIPC Station's largest regular boundary is the encoded video frame returned
+Legacy Station's largest regular boundary is the encoded video frame returned
 from Rust/WASM or native Tauri Rust to JavaScript. Decoded pixels then stay in
 WebCodecs and the browser/WebView canvas.
 

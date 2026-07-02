@@ -9,7 +9,8 @@ slug: /
 meant to be useful in two ways:
 
 - as reusable crates for people building their own OpenIPC tools, and
-- as working React/Tauri and pure-Rust egui ground-station apps.
+- as Nebulus, the primary pure-Rust ground station, with an older React/Tauri
+  client retained as an integration reference.
 
 The project was built after studying `devourer`, `aviateur`, `openipc-zig`, the
 standalone `adaptive-link` tools, and PixelPilot. Those projects are reference
@@ -25,8 +26,8 @@ openipc-rs/
   apps/openipc-cli/           native CLI utilities
   apps/wfb-rs/                WFB-ng-style Rust binaries over the userland driver
   crates/openipc-web/         wasm-bindgen SDK
-  apps/openipc-station/       browser and Tauri station UI
-  apps/nebulus/               egui station for desktop, Android, and browser
+  apps/nebulus/               primary egui station for desktop, Android, and browser
+  apps/openipc-station/       older browser and Tauri station implementation
   plugins/tauri-plugin-openipc-usb/
                                 Android USB permission plugin for Station
   docs/                       this Docusaurus site
@@ -45,16 +46,13 @@ The platform boundary is kept at the edges:
 - native apps open USB devices through `nusb`,
 - browser apps ask JavaScript for WebUSB permission and then pass the granted
   `UsbDevice` into Rust/WASM,
-- Android Tauri builds use a local `tauri-plugin-openipc-usb` plugin to request
-  USB permission and pass an opened file descriptor to Rust,
 - Nebulus Android builds perform the same permission/file-descriptor handoff
   through a small Rust JNI module and do not require Tauri,
-- playback is handled by WebCodecs in the React app; Rust/WASM applications can
-  also use the `openipc-video` WebCodecs backend directly,
-- desktop builds use Tauri only as the application shell around the same React
-  UI and native Rust backend.
+- Nebulus browser builds use the `openipc-video` WebCodecs backend directly,
+- the older Station app uses a local Tauri plugin on Android and WebCodecs in
+  its React frontend.
 
-Nebulus is the all-Rust application path: egui provides the UI and
+Nebulus is the main application: egui provides the UI and
 `openipc-video` selects VideoToolbox, VA-API, Media Foundation, MediaCodec, or
 WebCodecs for the current target.
 
@@ -67,9 +65,12 @@ binding requirements.
 
 ## Current Status
 
-The protocol pipeline, browser SDK, station UI, native CLI, adaptive-link
+The protocol pipeline, browser SDK, Nebulus UI, native CLI, adaptive-link
 feedback path, and Realtek driver are implemented, including Jaguar3
 RTL8812CU/EU and RTL8822CU/EU. The remaining work is mostly hardware
 validation: comparing traces against known-good receivers, testing more
 adapters, and proving cold-start behavior across chip families and operating
 systems.
+
+For normal use, start with [Nebulus](./nebulus.md). Use the crate and protocol
+pages when integrating the stack into another application.

@@ -2,7 +2,10 @@ use eframe::{
     egui,
     egui_wgpu::{self, wgpu},
 };
-use openipc_video::{AndroidImagePlane, AndroidVideoFrame, DecodedFrame};
+use openipc_video::{
+    AndroidImagePlane, AndroidVideoFrame, DecodedFrame, DecodedSurface, FrameDimensions,
+    PixelFormat,
+};
 
 const SHADER: &str = r#"
 @group(0) @binding(0) var video_sampler: sampler;
@@ -48,7 +51,66 @@ fn fragment(input: VertexOutput) -> @location(0) vec4<f32> {
 
 pub(crate) struct AndroidYuvRenderer {
     render_state: egui_wgpu::RenderState,
-    scratch: [Vec<u8>; 3],
+}
+
+/// CPU-packed planar YUV frame prepared away from egui's UI thread.
+#[derive(Debug)]
+pub(crate) struct AndroidYuvFrame {
+    dimensions: FrameDimensions,
+    planes: [Vec<u8>; 3],
+}
+
+impl DecodedSurface for AndroidYuvFrame {
+    fn dimensions(&self) -> FrameDimensions {
+        self.dimensions
+    }
+
+    fn pixel_format(&self) -> PixelFormat {
+        PixelFormat::Native(35)
+    }
+}
+
+pub(crate) fn pack_android_frame(
+    frame: DecodedFrame<AndroidVideoFrame>,
+) -> Result<DecodedFrame<AndroidYuvFrame>, String> {
+    let dimensions = frame.dimensions();
+    let width = dimensions.width as usize;
+    let height = dimensions.height as usize;
+    let [crop_x, crop_y] = frame.surface.crop_origin();
+    let planes = frame
+        .surface
+        .with_mapped_planes(|planes| {
+            let [y, u, v, ..] = planes else {
+                return Err("MediaCodec frame did not expose Y/U/V planes".to_owned());
+            };
+            let chroma_width = width.div_ceil(2);
+            let chroma_height = height.div_ceil(2);
+            let mut packed = std::array::from_fn(|_| Vec::new());
+            pack_plane(&mut packed[0], y, crop_x, crop_y, width, height)?;
+            pack_plane(
+                &mut packed[1],
+                u,
+                crop_x / 2,
+                crop_y / 2,
+                chroma_width,
+                chroma_height,
+            )?;
+            pack_plane(
+                &mut packed[2],
+                v,
+                crop_x / 2,
+                crop_y / 2,
+                chroma_width,
+                chroma_height,
+            )?;
+            Ok(packed)
+        })
+        .map_err(|error| error.to_string())??;
+    Ok(DecodedFrame {
+        surface: AndroidYuvFrame { dimensions, planes },
+        timestamp: frame.timestamp,
+        duration: frame.duration,
+    })
 }
 
 struct YuvResources {
@@ -78,55 +140,22 @@ impl AndroidYuvRenderer {
             .write()
             .callback_resources
             .insert(resources);
-        Ok(Self {
-            render_state,
-            scratch: std::array::from_fn(|_| Vec::new()),
-        })
+        Ok(Self { render_state })
     }
 
-    pub(crate) fn upload(&mut self, frame: &DecodedFrame<AndroidVideoFrame>) -> Result<(), String> {
+    pub(crate) fn upload(&mut self, frame: &DecodedFrame<AndroidYuvFrame>) -> Result<(), String> {
         let dimensions = frame.dimensions();
-        let width = dimensions.width as usize;
-        let height = dimensions.height as usize;
-        let [crop_x, crop_y] = frame.surface.crop_origin();
-        frame
-            .surface
-            .with_mapped_planes(|planes| {
-                let [y, u, v, ..] = planes else {
-                    return Err("MediaCodec frame did not expose Y/U/V planes".to_owned());
-                };
-                pack_plane(&mut self.scratch[0], y, crop_x, crop_y, width, height)?;
-                let chroma_width = width.div_ceil(2);
-                let chroma_height = height.div_ceil(2);
-                pack_plane(
-                    &mut self.scratch[1],
-                    u,
-                    crop_x / 2,
-                    crop_y / 2,
-                    chroma_width,
-                    chroma_height,
-                )?;
-                pack_plane(
-                    &mut self.scratch[2],
-                    v,
-                    crop_x / 2,
-                    crop_y / 2,
-                    chroma_width,
-                    chroma_height,
-                )?;
-                let mut renderer = self.render_state.renderer.write();
-                let resources = renderer
-                    .callback_resources
-                    .get_mut::<YuvResources>()
-                    .ok_or_else(|| "Android YUV GPU resources are unavailable".to_owned())?;
-                resources.upload(
-                    &self.render_state.device,
-                    &self.render_state.queue,
-                    [dimensions.width, dimensions.height],
-                    &self.scratch,
-                )
-            })
-            .map_err(|error| error.to_string())?
+        let mut renderer = self.render_state.renderer.write();
+        let resources = renderer
+            .callback_resources
+            .get_mut::<YuvResources>()
+            .ok_or_else(|| "Android YUV GPU resources are unavailable".to_owned())?;
+        resources.upload(
+            &self.render_state.device,
+            &self.render_state.queue,
+            [dimensions.width, dimensions.height],
+            &frame.surface.planes,
+        )
     }
 
     pub(crate) fn paint(&self, painter: &egui::Painter, rect: egui::Rect) {

@@ -132,7 +132,7 @@ error counters need to be visible when debugging field behavior.
 
 ### PixelPilot Parity Checklist
 
-The Rust core and Station app intentionally match PixelPilot at the wire
+The Rust core and Nebulus intentionally match PixelPilot at the wire
 boundaries:
 
 - `0x08 0x01` 802.11 data frames with mirrored `57:42:<channel_id>` source and
@@ -153,7 +153,7 @@ boundaries:
 
 The scheduling is different by design. PixelPilot uses native threads and UDP
 handoffs between its USB/WFB layer and player. `openipc-rs` keeps the same bytes
-in memory: the native/Tauri worker or browser/WebUSB loop pushes RX transfers
-into `ReceiverRuntime`, then the app forwards raw route payloads or feeds
-Annex-B frames to WebCodecs. That difference should improve latency and reduce
-copies without changing the protocol behavior.
+in memory: the Nebulus native worker or browser/WebUSB loop pushes RX transfers
+into `ReceiverRuntime`, then routes payloads and submits Annex-B frames to the
+platform decoder. That difference reduces IPC and copies without changing the
+wire behavior.

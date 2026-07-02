@@ -4,10 +4,10 @@ import Link from "@docusaurus/Link";
 
 const paths = [
   {
-    title: "Run the station",
-    body: "Start the browser app, build the Tauri desktop app, or open the hosted build.",
-    to: "/docs/getting-started",
-    action: "Start Here",
+    title: "Run Nebulus",
+    body: "Use the hosted WebUSB app, download a native release, or build the shared egui app for desktop, Android, and web.",
+    to: "/docs/nebulus",
+    action: "Nebulus Guide",
   },
   {
     title: "Use the Rust crates",
@@ -35,7 +35,7 @@ const pipeline = [
   "WFB decrypt/FEC",
   "RTP + payload taps",
   "Annex-B frames",
-  "WebCodecs/player",
+  "Platform decoder",
 ];
 
 const references = [
@@ -64,7 +64,7 @@ export default function Home(): JSX.Element {
   return (
     <Layout
       title="Rust OpenIPC ground-station stack"
-      description="Rust crates, WebUSB SDK, and station app for OpenIPC video"
+      description="Nebulus ground station and reusable Rust libraries for OpenIPC FPV"
     >
       <main className="homePage">
         <section className="heroShell">
@@ -80,21 +80,21 @@ export default function Home(): JSX.Element {
               </Heading>
               <p className="homeSubtitle">
                 Rust code for receiving OpenIPC video through Realtek USB WiFi
-                adapters, with a browser/WebUSB app, a Tauri desktop app, and
-                reusable crates for custom ground stations.
+                adapters, with the Nebulus native/WebUSB app and reusable crates
+                for custom ground stations.
               </p>
               <div className="heroActions">
                 <Link
                   className="button button--primary button--lg"
                   to="/docs/getting-started"
                 >
-                  Build And Run
+                  Get Started
                 </Link>
                 <a
                   className="button button--secondary button--lg"
-                  href="https://station.openipc-rs.neels.dev"
+                  href="https://nebulus.openipc-rs.neels.dev"
                 >
-                  Open Station
+                  Open Nebulus
                 </a>
                 <Link
                   className="button button--secondary button--lg"
@@ -113,11 +113,11 @@ export default function Home(): JSX.Element {
               <div className="signalReadout">
                 <div>
                   <strong>Targets</strong>
-                  <span>Linux, macOS, Windows, browser</span>
+                  <span>Linux, macOS, Windows, Android, browser</span>
                 </div>
                 <div>
                   <strong>Output</strong>
-                  <span>H.264/H.265 Annex-B frames</span>
+                  <span>H.264/H.265 video and raw payload routes</span>
                 </div>
               </div>
             </div>

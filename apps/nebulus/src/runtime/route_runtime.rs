@@ -9,6 +9,7 @@ use web_time::Instant;
 use crate::{
     audio::AudioPlayer,
     model::AudioStats,
+    recording::{AudioTrackConfig, RecordedAudioPacket},
     settings::{PayloadRouteSettings, RouteAction},
 };
 
@@ -36,6 +37,7 @@ struct ActiveRoute {
 
 pub(super) struct RouteProcessor {
     routes: BTreeMap<u64, ActiveRoute>,
+    recording_audio_route: Option<u64>,
     startup_logs: Vec<RouteLog>,
 }
 
@@ -119,8 +121,12 @@ impl RouteProcessor {
                 },
             );
         }
+        let recording_audio_route = routes
+            .iter()
+            .find_map(|(id, route)| (route.settings.action == RouteAction::Audio).then_some(*id));
         Ok(Self {
             routes,
+            recording_audio_route,
             startup_logs,
         })
     }
@@ -140,9 +146,15 @@ impl RouteProcessor {
     pub(super) fn process(
         &mut self,
         payloads: &[openipc_core::RoutePayload],
-    ) -> (Vec<RouteMetricDelta>, Vec<RouteLog>) {
+        capture_audio: bool,
+    ) -> (
+        Vec<RouteMetricDelta>,
+        Vec<RouteLog>,
+        Vec<RecordedAudioPacket>,
+    ) {
         let mut updates = BTreeMap::<u64, RouteMetricDelta>::new();
         let mut logs = Vec::new();
+        let mut recorded_audio = Vec::new();
         for payload in payloads {
             let Some(route) = self.routes.get_mut(&payload.route_id.raw()) else {
                 continue;
@@ -174,11 +186,21 @@ impl RouteProcessor {
                     }
                     Ok(())
                 }
-                RouteAction::Audio => route
-                    .audio
-                    .as_mut()
-                    .ok_or_else(|| "audio output unavailable".to_owned())
-                    .and_then(|audio| audio.push_rtp(&payload.data)),
+                RouteAction::Audio => {
+                    if capture_audio && self.recording_audio_route == Some(route.settings.id) {
+                        if let Ok(header) = openipc_core::RtpHeader::parse(&payload.data) {
+                            recorded_audio.push(RecordedAudioPacket {
+                                timestamp: header.timestamp,
+                                data: header.payload(&payload.data).to_vec(),
+                            });
+                        }
+                    }
+                    route
+                        .audio
+                        .as_mut()
+                        .ok_or_else(|| "audio output unavailable".to_owned())
+                        .and_then(|audio| audio.push_rtp(&payload.data))
+                }
                 RouteAction::Udp => {
                     #[cfg(not(target_arch = "wasm32"))]
                     {
@@ -209,7 +231,18 @@ impl RouteProcessor {
                 }
             }
         }
-        (updates.into_values().collect(), logs)
+        (updates.into_values().collect(), logs, recorded_audio)
+    }
+
+    pub(super) fn recording_audio_config(&self) -> Option<AudioTrackConfig> {
+        let id = self.recording_audio_route?;
+        let route = self.routes.get(&id)?;
+        Some(AudioTrackConfig {
+            // Opus RTP always uses a 48 kHz timestamp clock, regardless of the
+            // decoder output rate selected for playback.
+            sample_rate: 48_000,
+            channels: route.settings.channels.max(1),
+        })
     }
 
     pub(super) fn audio_stats(&self) -> AudioStats {
@@ -335,7 +368,10 @@ fn hex_preview(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use openipc_core::{ChannelId, FrameLayout, PayloadRouteId, ReceiverRuntime, WfbKeypair};
+    use openipc_core::{
+        ChannelId, FrameLayout, PayloadRouteId, RadioPort, ReceiverRuntime, RoutePayload,
+        WfbKeypair,
+    };
 
     use super::{configure_receiver, RouteProcessor};
     use crate::{runtime::StartRequest, settings::Settings};
@@ -414,5 +450,29 @@ mod tests {
             .err()
             .expect("reserved route id must be rejected");
         assert!(error.contains("reserved"));
+    }
+
+    #[test]
+    fn recording_tap_removes_the_opus_rtp_header() {
+        let request = request_from_settings(Settings::default());
+        let mut routes = RouteProcessor::new(&request).unwrap();
+        let opus = [0xf8, 0xff, 0xfe];
+        let mut rtp = vec![0x80, 0x80 | openipc_core::rtp::RTP_PAYLOAD_TYPE_OPUS];
+        rtp.extend_from_slice(&7u16.to_be_bytes());
+        rtp.extend_from_slice(&48_000u32.to_be_bytes());
+        rtp.extend_from_slice(&1u32.to_be_bytes());
+        rtp.extend_from_slice(&opus);
+        let payload = RoutePayload {
+            route_id: PayloadRouteId::new(3),
+            channel_id: ChannelId::from_link_port(request.channel_id >> 8, RadioPort::Video),
+            packet_seq: 9,
+            data: rtp,
+        };
+
+        let (_, _, recorded) = routes.process(&[payload], true);
+
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].timestamp, 48_000);
+        assert_eq!(recorded[0].data, opus);
     }
 }

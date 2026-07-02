@@ -410,6 +410,10 @@ pub struct MonitorOptions {
     pub firmware_8814_mode: Firmware8814Mode,
     /// Optional RTL8814 firmware chunk size override.
     pub firmware_8814_chunk: Option<usize>,
+    /// Optional Jaguar1 RX-chain mask written to register `0x808` after IQK.
+    ///
+    /// Bits 0/4 select CCK/OFDM path A, 1/5 path B, 2/6 path C, and 3/7 path D.
+    pub rx_path_mask: Option<u8>,
 }
 
 impl Default for MonitorOptions {
@@ -422,6 +426,7 @@ impl Default for MonitorOptions {
             skip_txgapk: false,
             firmware_8814_mode: Firmware8814Mode::Kernel,
             firmware_8814_chunk: None,
+            rx_path_mask: None,
         }
     }
 }
@@ -447,6 +452,7 @@ impl MonitorOptions {
                     .unwrap_or_default(),
                 firmware_8814_chunk: read_env_usize("DEVOURER_8814_FWDL_CHUNK")
                     .filter(|chunk| (64..=4096).contains(chunk)),
+                rx_path_mask: read_env_u8("DEVOURER_RX_PATHS"),
                 ..Self::default()
             }
         }
@@ -455,6 +461,12 @@ impl MonitorOptions {
     /// Return a copy with `accept_bad_fcs` changed.
     pub const fn with_accept_bad_fcs(mut self, accept_bad_fcs: bool) -> Self {
         self.accept_bad_fcs = accept_bad_fcs;
+        self
+    }
+
+    /// Return a copy with a Jaguar1 RX-chain mask applied after channel setup and IQK.
+    pub const fn with_rx_path_mask(mut self, mask: u8) -> Self {
+        self.rx_path_mask = Some(mask);
         self
     }
 
@@ -520,6 +532,8 @@ pub enum DriverError {
     UnsupportedPowerTrackingPath(ChipFamily),
     /// IQK calibration path is not implemented for this chip.
     UnsupportedIqkPath(ChipFamily),
+    /// RX-chain masking is only supported by the Jaguar1 register layout.
+    UnsupportedRxPathMask(ChipFamily),
     /// TX power override was outside the Realtek TXAGC range.
     InvalidTxPower(u8),
     /// Realtek RX aggregate parse error.
@@ -560,6 +574,9 @@ impl fmt::Display for DriverError {
             }
             Self::UnsupportedIqkPath(chip) => {
                 write!(f, "{} IQK calibration path is unsupported", chip.name())
+            }
+            Self::UnsupportedRxPathMask(chip) => {
+                write!(f, "{} does not use the Jaguar1 RX-path mask", chip.name())
             }
             Self::InvalidTxPower(power) => {
                 write!(

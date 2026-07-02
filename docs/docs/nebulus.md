@@ -9,10 +9,14 @@ targets macOS, Linux, Windows, Android, and browsers from one application
 crate. Use it when you want a native Rust UI or a compact reference showing how
 the driver, protocol, and decoder crates fit together.
 
-Nebulus is separate from OpenIPC Station. Station remains the React/Tauri
-application. Nebulus provides the lowest-latency video receive path, adaptive
-link, configurable payload routes, Opus playback, encoded recording, native
-VPN bridging, diagnostics, and a portable all-Rust UI.
+Nebulus is the project's primary ground station. It provides the low-latency
+video receive path, adaptive link, configurable payload routes, Opus playback,
+encoded recording, native VPN bridging, diagnostics, and a portable all-Rust
+UI. The older React/Tauri OpenIPC Station remains in the repository as an
+alternative implementation. New desktop and Android release artifacts, and the
+hosted app at [nebulus.openipc-rs.neels.dev](https://nebulus.openipc-rs.neels.dev),
+are built from Nebulus. The older React app remains available at its own legacy
+URL.
 
 The header always shows the package version. CI builds also embed the current
 tag and short commit hash from the same `OPENIPC_*` metadata used by Station.
@@ -25,7 +29,7 @@ flowchart LR
     RTL --> Core["openipc-core<br/>WFB, crypto, FEC, RTP"]
     Core --> Video["openipc-video<br/>platform H.264/H.265 decoder"]
     Core --> Routes["route fanout<br/>inspect, log, UDP, audio"]
-    Core --> Record["keyframe-aligned<br/>Annex-B recorder"]
+    Core --> Record["keyframe-aligned<br/>MP4 recorder"]
     Core --> Tun["native TUN<br/>RX 0x20 / TX 0xa0"]
     Routes --> Opus["ropus<br/>Opus to PCM"]
     Opus --> Audio["CPAL or Web Audio"]
@@ -68,6 +72,37 @@ From the repository root:
 cargo run -p nebulus --bin nebulus-desktop --release
 ```
 
+After a release is published to crates.io, a source install is also available:
+
+```sh
+cargo install nebulus
+nebulus-desktop
+```
+
+Prebuilt archives and app bundles are available from
+[GitHub Releases](https://github.com/neelsani/openipc-rs/releases). Linux and
+Windows archives contain the executable directly; macOS releases contain an
+ad-hoc-signed `.app` bundle. Platform security warnings are expected until
+notarization and code signing are configured.
+
+### System Tray
+
+macOS and Windows builds install a Nebulus tray icon. It appears in the macOS
+menu bar or the Windows notification area; Windows may move it under the
+overflow arrow. The menu provides:
+
+- **Show Nebulus** and **Hide Nebulus**,
+- **Start RX** or **Stop RX**, synchronized with receiver state,
+- **Enable VPN on next start**, available while the receiver is stopped,
+- **Open VPN Settings**, which restores the window and selects the VPN panel,
+- **Quit Nebulus**.
+
+VPN cannot be enabled in the middle of an active receiver session because its
+WFB tunnel routes and native TUN interface are constructed during startup. Stop
+RX, enable VPN from either the tray or VPN panel, then start RX again. Linux
+does not currently build the tray integration, avoiding additional
+AppIndicator/GTK runtime dependencies.
+
 Select a supported adapter, set the radio channel and width to match the VTX,
 confirm the WFB key, and press **Start RX**. The default OpenIPC `gs.key` is
 embedded. **Open file** uses the native desktop dialog, browser picker, or
@@ -75,6 +110,14 @@ Android Storage Access Framework to load another key. The key is never text
 editable. Dropping a `gs.key` file on the window remains available where the
 platform supports file drops. Channel, offset, and Link ID use bounded sliders
 with individual buttons that restore OpenIPC defaults.
+
+Once monitor initialization succeeds, the top of Settings shows the connected
+receiver's actual USB VID:PID, probed chip family, RF path layout, cut revision,
+USB connection speed, bulk endpoints, cold/warm initialization result, firmware
+download status, and active RF and video-channel configuration. These values
+come from the opened device and `InitReport`, not the selector's family hint.
+Nebulus clears the summary on stop or failure so it never looks like a stale
+device is still connected.
 
 The Linux decoder requires VA-API development packages. See
 [Platform Video Decoding](./native-video.md#linux-va-api) for the package list
@@ -120,6 +163,21 @@ Nebulus uses Android NativeActivity and declares USB-host support through
 Cargo APK metadata.
 
 ```sh
+./scripts/android-nebulus-dev.sh
+```
+
+The helper discovers Java, the Android SDK, and the newest installed NDK. It
+starts the first available AVD or reuses a running emulator, waits for boot,
+maps the emulator ABI to the correct Rust target, installs Nebulus, and follows
+timestamped Logcat output. Select an AVD or force a clean boot with:
+
+```sh
+./scripts/android-nebulus-dev.sh --avd openipc_pixel_8_api36 --cold-boot
+```
+
+For an APK-only build:
+
+```sh
 rustup target add aarch64-linux-android
 cargo install cargo-apk2 --locked
 cargo apk2 build -p nebulus --lib --target aarch64-linux-android
@@ -130,8 +188,9 @@ starts the receiver. The app keeps the `UsbDeviceConnection` alive for the
 whole receiver session and gives a duplicated descriptor to `nusb`, avoiding a
 second Java/Kotlin data path.
 
-The Android entrypoint installs `android_logger`, so driver and application
-messages are available in logcat under the `Nebulus` tag.
+The Android entrypoint installs Nebulus's shared Rust logger, so driver and
+application messages are available in standard application output and the
+in-app Logs tab.
 
 The default build uses Android's debug key. A distribution build additionally
 needs a release keystore configured through
@@ -231,21 +290,49 @@ Diagnostics is divided into four views:
   decoder APIs do not expose a reliable global maximum on every target, so
   observed limits are labeled as such.
 
-Diagnostic verbosity is persisted as Low, Normal, or High. Logs remain bounded
-to avoid memory growth.
+The Logs tab owns capture verbosity: Low, Normal, High, or Very verbose. It also
+has an independent minimum-level display filter and target/message search. Logs
+remain bounded to avoid memory growth.
+
+## GUI Settings
+
+The GUI tab keeps appearance controls separate from receiver and codec
+configuration. Settings apply immediately and persist through eframe storage:
+
+- **Theme** selects Catppuccin Latte, Frappé, Macchiato, or Mocha. Latte is the
+  light palette; the other three are dark palettes.
+- **Interface scale** adjusts the complete interface from 75% to 150% in 5%
+  increments without changing decoded video resolution.
+- **Link telemetry overlay** controls the in-video RSSI/SNR/loss/FEC strip.
+- **Controls panel visible** hides or restores the side/bottom controls. The
+  header's **Controls** button always remains available to restore it.
+- **Reset GUI settings** restores Macchiato, 100% scale, the telemetry overlay,
+  and a visible controls panel.
+
+These options are shared by desktop, Android, and browser builds. They do not
+change radio initialization, WFB processing, decoder selection, or recording
+output.
 
 ## Recording
 
-Nebulus records encoded H.264/H.265 Annex-B access units before decode. The
-recorder arms immediately but does not open/write the stream until the next
-keyframe, preserving a decodable random-access start without adding an encoder
-to the receive path.
+Nebulus records the original encoded H.264/H.265 access units before decode and
+muxes them into an `.mp4` file. It does not decode and re-encode the picture, so
+recording does not reduce quality or add an encoder to the receive path. The
+recorder arms immediately and begins at the next keyframe. Codec parameter sets
+and dimensions are read from that access unit, while RTP timestamps supply the
+MP4 sample timing.
 
-Desktop builds stream directly to the selected `.annexb`, `.h264`, or `.h265`
-file. Browser builds buffer at most 512 MiB and initiate a download when the
-operator stops recording. The current elementary-stream recorder is video-only;
-it does not mux the Opus route. This is intentionally different from Station's
-canvas `MediaRecorder` output, which re-records rendered media into WebM.
+The first enabled audio route is also recorded when it carries Opus RTP. The
+recorder strips the RTP header and writes each raw Opus packet to the MP4 audio
+track using Opus's fixed 48 kHz RTP clock and the route's channel count. Video
+and audio each retain their own RTP timing; recording begins both timelines at the first media
+captured after the keyframe because the receiver has no RTCP clock mapping.
+
+Native muxing runs on a bounded worker so filesystem and container work stay out
+of the USB/decode loop. Browser recordings are assembled and downloaded when
+recording stops. Both targets cap retained encoded media at 512 MiB. Each
+depacketized video access unit becomes exactly one MP4 sample, preserving
+multi-slice pictures and RTP's 90 kHz timing.
 
 ## VPN / TUN
 

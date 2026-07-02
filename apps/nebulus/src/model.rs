@@ -30,6 +30,7 @@ impl ReceiverState {
 /// Severity attached to one application log line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LogLevel {
+    Trace,
     Debug,
     Info,
     Warn,
@@ -39,10 +40,31 @@ pub(crate) enum LogLevel {
 impl LogLevel {
     pub(crate) const fn label(self) -> &'static str {
         match self {
+            Self::Trace => "TRACE",
             Self::Debug => "DEBUG",
             Self::Info => "INFO",
             Self::Warn => "WARN",
             Self::Error => "ERROR",
+        }
+    }
+
+    pub(crate) const fn priority(self) -> u8 {
+        match self {
+            Self::Trace => 0,
+            Self::Debug => 1,
+            Self::Info => 2,
+            Self::Warn => 3,
+            Self::Error => 4,
+        }
+    }
+
+    pub(crate) const fn from_log(level: log::Level) -> Self {
+        match level {
+            log::Level::Trace => Self::Trace,
+            log::Level::Debug => Self::Debug,
+            log::Level::Info => Self::Info,
+            log::Level::Warn => Self::Warn,
+            log::Level::Error => Self::Error,
         }
     }
 }
@@ -52,7 +74,7 @@ impl LogLevel {
 pub(crate) struct LogEntry {
     pub(crate) elapsed_seconds: f64,
     pub(crate) level: LogLevel,
-    pub(crate) target: &'static str,
+    pub(crate) target: String,
     pub(crate) message: String,
 }
 

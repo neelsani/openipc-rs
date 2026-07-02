@@ -34,7 +34,7 @@ impl MediaCodecSession {
     pub(crate) fn new(
         config: &CodecConfig,
         stream: &CodecStreamInfo,
-        max_frames_in_flight: usize,
+        _max_frames_in_flight: usize,
         low_latency: bool,
     ) -> Result<Self, VideoError> {
         let width = i32::try_from(stream.visible_dimensions.width)
@@ -44,8 +44,13 @@ impl MediaCodecSession {
         if width <= 0 || height <= 0 {
             return Err(invalid_dimensions(stream));
         }
-        let max_images = i32::try_from(max_frames_in_flight.saturating_add(1))
-            .map_err(|_| VideoError::InvalidOption("Android image queue is too large"))?;
+        // This is the number of images the consumer may hold concurrently,
+        // not MediaCodec's encoded-frame pipeline depth. Three images can be
+        // leased by the decoder mailbox and presentation path. Android's
+        // acquireLatestImage also needs two free slots to discard an older
+        // queued image, so keep one additional slot for asynchronous surface
+        // delivery.
+        let max_images = 6;
         let reader = ImageReader::new_with_usage(
             width,
             height,
@@ -127,18 +132,7 @@ impl MediaCodecSession {
     }
 
     pub(crate) fn poll(&self) -> Result<Option<AndroidVideoFrame>, VideoError> {
-        self.drain_outputs()?;
-        match self
-            .reader
-            .acquire_latest_image()
-            .map_err(|error| android_error("AImageReader_acquireLatestImage", error))?
-        {
-            AcquireResult::Image(image) => AndroidVideoFrame::new(image).map(Some),
-            AcquireResult::NoBufferAvailable | AcquireResult::MaxImagesAcquired => Ok(None),
-        }
-    }
-
-    fn drain_outputs(&self) -> Result<(), VideoError> {
+        let mut latest = None;
         for _ in 0..MAX_DRAINED_OUTPUTS {
             match self
                 .codec
@@ -150,17 +144,37 @@ impl MediaCodecSession {
                     self.codec
                         .release_output_buffer(output, render)
                         .map_err(|error| android_error("AMediaCodec_releaseOutputBuffer", error))?;
+                    if render {
+                        // Release the previous candidate before asking
+                        // acquireLatestImage to lock another buffer. Holding
+                        // it during acquisition can exhaust a small reader
+                        // pool even though only the newest frame is retained.
+                        drop(latest.take());
+                        if let Some(frame) = self.acquire_latest()? {
+                            latest = Some(frame);
+                        }
+                    }
                 }
-                DequeuedOutputBufferInfoResult::TryAgainLater => return Ok(()),
+                DequeuedOutputBufferInfoResult::TryAgainLater => break,
                 DequeuedOutputBufferInfoResult::OutputFormatChanged
                 | DequeuedOutputBufferInfoResult::OutputBuffersChanged => {}
             }
         }
-        Err(VideoError::Backend {
-            backend: "mediacodec",
-            operation: "drain decoder output",
-            message: "decoder produced more than 64 outputs in one poll".to_owned(),
-        })
+        if latest.is_none() {
+            latest = self.acquire_latest()?;
+        }
+        Ok(latest)
+    }
+
+    fn acquire_latest(&self) -> Result<Option<AndroidVideoFrame>, VideoError> {
+        match self
+            .reader
+            .acquire_latest_image()
+            .map_err(|error| android_error("AImageReader_acquireLatestImage", error))?
+        {
+            AcquireResult::Image(image) => AndroidVideoFrame::new(image).map(Some),
+            AcquireResult::NoBufferAvailable | AcquireResult::MaxImagesAcquired => Ok(None),
+        }
     }
 }
 

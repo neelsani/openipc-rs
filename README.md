@@ -2,9 +2,9 @@
 
 Rust libraries and apps for OpenIPC FPV ground stations.
 
-The repo contains the shared Rust packet pipeline, Realtek USB WiFi driver code,
-adaptive-link feedback, a WASM/WebUSB SDK, OpenIPC Station, and the pure-Rust
-Nebulus egui app.
+The repo contains the shared Rust packet pipeline, Realtek USB WiFi driver,
+adaptive-link feedback, a WASM/WebUSB SDK, and Nebulus, the primary ground
+station for desktop, Android, and the browser.
 
 ## Repository
 
@@ -15,8 +15,8 @@ crates/openipc-video      Cross-platform low-latency H.264/H.265 decoding
 crates/openipc-web        wasm-bindgen package for browser/WebUSB apps
 apps/openipc-cli          Native command-line utilities
 apps/wfb-rs               WFB-style Rust command-line tools
-apps/openipc-station      React/Vite browser app and Tauri desktop app
-apps/nebulus              Pure-Rust egui desktop, Android, and WebUSB app
+apps/nebulus              Main egui ground station for desktop, Android, and WebUSB
+apps/openipc-station      Older React/Vite and Tauri station implementation
 plugins/tauri-plugin-openipc-usb
                           Android USB and VPN permission bridge used by Station
 docs                      Docusaurus documentation site
@@ -32,6 +32,7 @@ scripts                   cleanup helpers
 | `openipc-video`   | [crates.io](https://crates.io/crates/openipc-video)   | Hardware H.264/H.265 decoding for macOS, Linux, Windows, Android, and WebAssembly/WebCodecs.                               |
 | `openipc-web`     | [crates.io](https://crates.io/crates/openipc-web)     | Rust/WASM bindings for browser WebUSB applications.                                                                        |
 | `wfb-rs`          | [crates.io](https://crates.io/crates/wfb-rs)          | WFB-style command-line tools backed by the Rust userland Realtek driver.                                                   |
+| `nebulus`         | [crates.io](https://crates.io/crates/nebulus)         | Primary egui ground station for desktop, Android, and browser/WebUSB.                                                      |
 | `@openipc-rs/web` | [npm](https://www.npmjs.com/package/@openipc-rs/web)  | Generated npm package from `openipc-web`, with WASM, JS glue, and TypeScript definitions.                                  |
 
 ## Quick Start
@@ -39,7 +40,8 @@ scripts                   cleanup helpers
 Public links:
 
 - Docs: [openipc-rs.neels.dev](https://openipc-rs.neels.dev)
-- Station web app: [station.openipc-rs.neels.dev](https://station.openipc-rs.neels.dev)
+- Nebulus web app: [nebulus.openipc-rs.neels.dev](https://nebulus.openipc-rs.neels.dev)
+- Legacy Station: [station.openipc-rs.neels.dev](https://station.openipc-rs.neels.dev)
 
 Test the core:
 
@@ -47,23 +49,7 @@ Test the core:
 cargo test -p openipc-core
 ```
 
-Run the browser/WebUSB station:
-
-```sh
-cd apps/openipc-station
-bun install
-bun run dev
-```
-
-Run the desktop station:
-
-```sh
-cd apps/openipc-station
-bun install
-bun run desktop:dev
-```
-
-Run the pure-Rust egui station:
+Run Nebulus on desktop:
 
 ```sh
 cargo run -p nebulus --bin nebulus-desktop --release
@@ -76,16 +62,30 @@ cd apps/nebulus
 trunk serve --release --open
 ```
 
-Start the Tauri Android shell setup:
+Build Nebulus for Android:
 
 ```sh
-cd apps/openipc-station
-bun run android:init
-bun run android:dev
+./scripts/android-nebulus-dev.sh
+```
+
+The script starts or reuses an emulator, waits for Android to boot, selects the
+matching Rust target, installs Nebulus, and follows its timestamped Logcat
+output. For an explicit AVD or a clean boot:
+
+```sh
+./scripts/android-nebulus-dev.sh --avd openipc_pixel_8_api36 --cold-boot
+```
+
+To build an APK without starting an emulator:
+
+```sh
+rustup target add aarch64-linux-android
+cargo install cargo-apk2 --version 1.3.11 --locked
+cargo apk2 build -p nebulus --lib --target aarch64-linux-android
 ```
 
 On macOS with Homebrew OpenJDK and the default Android SDK path, this is the
-environment Tauri expects if auto-detection does not pick it up:
+environment the Android build expects if auto-detection does not pick it up:
 
 ```sh
 export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
@@ -96,11 +96,10 @@ export NDK_HOME=$ANDROID_NDK_HOME
 export PATH="$JAVA_HOME/bin:$ANDROID_HOME/emulator:$ANDROID_HOME/platform-tools:$ANDROID_HOME/cmdline-tools/bin:$PATH"
 ```
 
-Android USB discovery and VPN setup use the local `tauri-plugin-openipc-usb`
-plugin. It asks for USB permission with Android `UsbManager`, opens the adapter,
-passes the file descriptor to Rust, and the Rust backend continues through
-`nusb::Device::from_fd`. When the VPN tab is enabled, the same plugin requests
-`VpnService` consent and passes the VPN/TUN file descriptor to Rust.
+Nebulus asks Android's `UsbManager` for USB permission, passes the opened file
+descriptor to `nusb::Device::from_fd`, and keeps all radio operations in Rust.
+Its JNI bridge also handles Android `VpnService` consent for the optional VPN
+route.
 
 Use the native CLI:
 
@@ -125,9 +124,9 @@ sh scripts/clean-generated.sh
 
 ## Status
 
-The Rust protocol pipeline, Realtek driver path, WebUSB/WASM bindings,
-WebCodecs station UI, adaptive-link feedback, native VPN tunnel bridging, and
-CI/release automation are implemented. The driver tracks newer devourer
+The Rust protocol pipeline, Realtek driver path, WebUSB/WASM bindings, Nebulus
+platform decoding and UI, adaptive-link feedback, native VPN tunnel bridging,
+and CI/release automation are implemented. The driver tracks newer devourer
 behavior for TX modes, multi-transfer RX, RTL8814 firmware bring-up,
 RTL8812CU/EU and RTL8822CU/EU Jaguar3 descriptors, firmware, tables, EFUSE,
 RFE, calibration, per-rate TX power, PHYDM, power tracking, IQK, C2H/TX-status
@@ -180,7 +179,8 @@ Useful repository secrets:
 
 - `CARGO_REGISTRY_TOKEN` for crates.io releases
 - npm trusted publishing for `@openipc-rs/web`
-- `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` for station/docs deploys
+- `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` for Nebulus, legacy
+  Station, and docs deploys
 
 ## License
 

@@ -19,7 +19,7 @@ RTL8812CU/EU and RTL8822CU/EU IDs from devourer:
 
 | VID:PID     | Family Hint | Label                               |
 | ----------- | ----------- | ----------------------------------- |
-| `0bda:8812` | RTL8812     | RTL8812AU / RTL8811AU / RTL8812EU  |
+| `0bda:8812` | RTL8812     | RTL8812AU / RTL8811AU / RTL8812EU   |
 | `0bda:881a` | RTL8812     | RTL8812AU-VS / RTL8812EU variant    |
 | `0bda:881b` | RTL8812     | RTL8812AU-VL / RTL8812EU variant    |
 | `0bda:881c` | RTL8822E    | RTL8812EU variant                   |
@@ -78,8 +78,10 @@ Platform-specific filters are derived from this table:
   `navigator.usb.requestDevice`,
 - the desktop/Tauri backend reports devices through the same driver table and
   runtime `nusb` discovery,
-- the Android Tauri plugin generates its USB attach XML and Kotlin runtime
-  filter from `SUPPORTED_DEVICES` during its Rust build script.
+- Nebulus uses the table for desktop/WebUSB discovery and Android permission
+  filtering,
+- the legacy Android Tauri plugin generates its USB attach XML and Kotlin
+  runtime filter from `SUPPORTED_DEVICES` during its Rust build script.
 
 ## Implemented Operations
 
@@ -100,6 +102,8 @@ Platform-specific filters are derived from this table:
 - monitor filters,
 - channel, channel-width, band-switch, RFE pinmux, and BB-swing setup for
   RTL8812/RTL8821/RTL8814 plus Jaguar3 5/10/20 MHz tuning,
+- the RTL8822C 3-wire/RXBB/AGC/CCK-RXIQ channel sequence required for working
+  2.4 GHz receive,
 - RX bulk reads, including multi-transfer in-flight reads mirroring newer
   devourer's always-posted bulk-IN model,
 - C2H packet surfacing, RTL8814 TX-status parsing, and optional corrupted-FCS
@@ -154,11 +158,11 @@ The browser still needs the same Realtek HAL work as native: WebUSB changes how
 control and bulk transfers are issued, not what registers or firmware steps the
 adapter needs.
 
-Android is another transport boundary. OpenIPC Station uses the local
-`tauri-plugin-openipc-usb` plugin for `UsbManager` discovery and permission,
-then passes an already-open file descriptor to the Rust Tauri command that wraps it with
-`nusb::Device::from_fd`. Once the descriptor is wrapped, the same Realtek
-initialization and RX/TX code runs.
+Android is another transport boundary. Nebulus calls `UsbManager` through its
+small JNI module for discovery and permission, then wraps the already-open file
+descriptor with `nusb::Device::from_fd`. The legacy Station performs the same
+handoff through `tauri-plugin-openipc-usb`. In either application, the shared
+Realtek initialization and RX/TX code takes over after permission is granted.
 
 ## Runtime Options
 
@@ -167,7 +171,8 @@ Native and browser code use the same two option structs:
 - `DriverOptions`: USB reset behavior, VID/PID targeting, and bulk-OUT endpoint
   override.
 - `MonitorOptions`: bad-FCS retention, TX-power programming skip, IQK/TXGAPK
-  policy, and RTL8814 firmware download mode/chunk size.
+  policy, RTL8814 firmware download mode/chunk size, and an optional Jaguar1
+  RX-chain mask.
 
 Native builds additionally read devourer-compatible environment variables:
 
@@ -179,10 +184,11 @@ Native builds additionally read devourer-compatible environment variables:
 | `DEVOURER_SKIP_TXPWR`              | Skip TX-power table programming during channel set.    |
 | `DEVOURER_FORCE_IQK`               | Run IQK where it is otherwise opt-in, notably RTL8814. |
 | `DEVOURER_DISABLE_IQK`             | Suppress IQK.                                          |
-| `DEVOURER_SKIP_IQK`                | Suppress IQK using newer devourer naming.               |
-| `DEVOURER_SKIP_TXGAPK`             | Skip RTL8822E TX gain calibration.                      |
+| `DEVOURER_SKIP_IQK`                | Suppress IQK using newer devourer naming.              |
+| `DEVOURER_SKIP_TXGAPK`             | Skip RTL8822E TX gain calibration.                     |
 | `DEVOURER_8814_FWDL=kernel\|rtw88` | Select the RTL8814 firmware path.                      |
 | `DEVOURER_8814_FWDL_CHUNK=<n>`     | Override RTL8814 kernel-path chunk size.               |
+| `DEVOURER_RX_PATHS=<mask>`         | Select Jaguar1 RX chains after channel setup and IQK.  |
 | `DEVOURER_TX_LEGACY_8812_DESC`     | Use the older 8812 TX descriptor shape on RTL8814.     |
 
 The browser API exposes the same choices with
@@ -230,8 +236,8 @@ Current status:
 - RTL8812 thermal power tracking, RTL8812 IQK, RTL8814 IQK, and the PHYDM
   false-alarm/DIG watchdog have Rust implementations. They are exposed natively
   and through WASM, but still need register-trace comparison on real adapters.
-- RTL8812CU/EU and RTL8822CU/EU Jaguar3 support is ported through devourer
-  `55f0649`. The RTL8822E firmware and all seven generated table arrays are
+- RTL8812CU/EU and RTL8822CU/EU Jaguar3 support is audited through devourer
+  `7cd094a`. The RTL8822E firmware and all seven generated table arrays are
   byte-for-byte equal to the reference commit. Chip-ID dispatch, V1 EFUSE,
   PA-bias, RFE defaults/pinmux, DACK, IQK, TXGAPK, DPK bypass, per-rate TXAGC,
   thermal tracking, descriptors, coex/H2C, and shutdown are implemented. This

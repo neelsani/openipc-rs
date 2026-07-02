@@ -5,7 +5,6 @@ use crate::{
     model::{ReceiverState, RouteStats},
     settings::{PayloadRouteSettings, RouteAction},
 };
-
 const PORTS: &[(u8, &str)] = &[
     (0x00, "Video / mixed RTP"),
     (0x10, "Telemetry RX"),

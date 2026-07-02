@@ -30,11 +30,15 @@ lists.
 - RFE-aware MAC/BB/RF table loading, including conditional RF table entries.
 - Channel, channel-width, band-switch, RFE pinmux, and TX BB swing
   configuration.
+- Hardware-validated RTL8822C channel switching, including the 3-wire RF reset,
+  gated RXBB write, per-band AGC selection, CCK RX-IQ setup, and force-anapar
+  update needed for 2.4 GHz receive.
 - RX bulk transfer reads, including multi-transfer in-flight reads.
 - TX bulk writes, runtime TX-mode/radiotap parsing, descriptors, and TX power
   overrides for adaptive-link feedback frames.
 - EFUSE-backed per-rate TXAGC programming, including the devourer 8812A
-  by-rate and regulatory limit tables.
+  by-rate and regulatory limit tables, corrected 5 GHz groups, and vendor PG
+  defaults for blank or partially programmed Jaguar1 EFUSE maps.
 - RTL8812 thermal power tracking, RTL8812/RTL8814 IQK, Jaguar3 DACK/IQK,
   RTL8822E TXGAPK, Jaguar3 thermal-power tracking, and monitor-mode PHYDM
   false-alarm/DIG watchdog helpers.
@@ -139,6 +143,7 @@ DEVOURER_SKIP_IQK                 suppress IQK (newer devourer spelling)
 DEVOURER_SKIP_TXGAPK              skip RTL8822E TX gain calibration
 DEVOURER_8814_FWDL=kernel|rtw88   select RTL8814 firmware download path
 DEVOURER_8814_FWDL_CHUNK=<n>      override RTL8814 kernel-path chunk size
+DEVOURER_RX_PATHS=<mask>          select Jaguar1 RX chains, for example 0x11 or 0xff
 DEVOURER_TX_LEGACY_8812_DESC      use the older 8812 descriptor shape on RTL8814 TX
 ```
 
@@ -182,6 +187,12 @@ cold-start failure harder to diagnose.
 
 ## Diagnostics And Polling
 
+The driver emits through the standard [`log`](https://docs.rs/log) facade and
+does not install a logger. Initialization milestones are `info`/`debug`, USB
+retries are `warn`, and register plus bulk-transfer details are `trace`. Trace
+logging is intentionally high volume and should be enabled only for short
+hardware investigations.
+
 The crate exposes diagnostics as explicit calls: thermal meter reads, false
 alarm counters, RTL8814 queue depth, BB register/dbgport reads, PHYDM watchdog
 ticks, IQK, RTL8812 power tracking ticks, and Jaguar3 thermal tracking ticks. It
@@ -196,6 +207,8 @@ using devourer, aviateur, and openipc-zig as references. The cold-start path now
 includes EFUSE-backed RFE selection and devourer-style band switching for
 RTL8812/RTL8821/RTL8814, plus the newer devourer TX power, PHYDM, power
 tracking, IQK, C2H, TX-status, RTL8814 firmware controls, and the complete
-`rtl8822e` Jaguar3 path through devourer `55f0649`. Hardware bring-up still
+`rtl8822e` Jaguar3 path through devourer `7cd094a`. The driver also includes
+the later RTL8822C 2.4 GHz channel fix and Jaguar1 TX-power parity changes.
+Hardware bring-up still
 needs live adapter testing and register-trace comparison per chip family before
 the support matrix should be treated as final.

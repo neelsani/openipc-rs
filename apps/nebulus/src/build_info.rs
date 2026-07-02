@@ -1,4 +1,7 @@
-const REPOSITORY_URL: &str = "https://github.com/neelsani/openipc-rs";
+pub(crate) const DOCS_URL: &str = "https://openipc-rs.neels.dev";
+pub(crate) const WEB_APP_URL: &str = "https://nebulus.openipc-rs.neels.dev";
+pub(crate) const REPOSITORY_URL: &str = "https://github.com/neelsani/openipc-rs";
+pub(crate) const RELEASES_URL: &str = "https://github.com/neelsani/openipc-rs/releases";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BuildInfo {

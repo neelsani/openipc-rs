@@ -9,27 +9,29 @@ pushes to `master`, `v*` tags, and manual dispatch.
 
 ## What Runs
 
-| Job                          | Purpose                                                                                                                                                                    |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Rust Workspace`             | Installs Linux desktop dependencies, runs format/workspace clippy/tests/version checks, checks `openipc-web`, and clippies the `openipc-video` and Nebulus WASM paths.     |
-| `WASM SDK Package`           | Builds Station and Nebulus for the browser, verifies Nebulus emitted a real WASM module, and dry-runs the generated `@openipc-rs/web` package.                              |
-| `Docs Site`                  | Builds the Docusaurus site.                                                                                                                                                |
-| `Desktop Check`              | Tests the matching `openipc-video` backend, checks Nebulus, and checks Tauri for Linux x64/arm64, macOS Apple Silicon/Intel, and Windows x64/arm64.                        |
-| `Android Check`              | Clippies the MediaCodec and Nebulus paths for aarch64 Android, initializes the generated Tauri project, and builds a debug APK including the USB plugin.                  |
-| `Deploy Station Site`        | Deploys `apps/openipc-station/dist` to Cloudflare Pages on pushes to `master` and `v*` tags.                                                                               |
-| `Deploy Docs Site`           | Deploys `docs/build` to Cloudflare Pages on pushes to `master` and `v*` tags.                                                                                              |
-| `Publish Crates.io Packages` | Publishes the workspace crates on `v*` tags.                                                                                                                               |
-| `Publish WASM SDK To npm`    | Builds `@openipc-rs/web` with Bun and publishes it with npm trusted publishing on `v*` tags.                                                                               |
-| `Desktop Release`            | Uses `tauri-apps/tauri-action` to build and upload desktop bundles to the GitHub Release on `v*` tags.                                                                     |
-| `Android Release`            | Builds unsigned universal Android APK/AAB artifacts with the Tauri CLI and uploads them to the GitHub Release on `v*` tags.                                                |
+| Job                              | Purpose                                                                                                                                                                |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Rust Workspace`                 | Installs Linux desktop dependencies, runs format/workspace clippy/tests/version checks, checks `openipc-web`, and clippies the `openipc-video` and Nebulus WASM paths. |
+| `WASM SDK Package`               | Builds Station and Nebulus for the browser, verifies Nebulus emitted a real WASM module, and dry-runs the generated `@openipc-rs/web` package.                         |
+| `Docs Site`                      | Builds the Docusaurus site.                                                                                                                                            |
+| `Desktop Check`                  | Tests the matching `openipc-video` backend and checks Nebulus for Linux x64/arm64, macOS Apple Silicon/Intel, and Windows x64/arm64.                                   |
+| `Android Check`                  | Clippies the MediaCodec and Nebulus paths for aarch64 Android and builds a Nebulus debug APK with `cargo-apk2`.                                                        |
+| `Deploy Legacy Station Site`     | Builds and deploys `apps/openipc-station/dist` to the existing `openipc-rs-station` Cloudflare Pages project.                                                          |
+| `Deploy Nebulus Web App`         | Builds and deploys `apps/nebulus/dist` to the separate `openipc-rs-nebulus` Cloudflare Pages project.                                                                  |
+| `Deploy Docs Site`               | Deploys `docs/build` to Cloudflare Pages on pushes to `master` and `v*` tags.                                                                                          |
+| `Publish Crates.io Packages`     | Publishes the workspace crates on `v*` tags.                                                                                                                           |
+| `Publish WASM SDK To npm`        | Builds `@openipc-rs/web` with Bun and publishes it with npm trusted publishing on `v*` tags.                                                                           |
+| `Nebulus Desktop Release`        | Builds and packages Nebulus for all six desktop targets on `v*` tags.                                                                                                  |
+| `Nebulus Android Release`        | Builds a signed Nebulus arm64 APK with `cargo-apk2` on `v*` tags.                                                                                                      |
+| `Publish Nebulus GitHub Release` | Collects all platform artifacts and checksums into one GitHub Release.                                                                                                 |
 
 ## Event Behavior
 
 | Event             | Validation      | Deploys                                | Publishes                                                    |
 | ----------------- | --------------- | -------------------------------------- | ------------------------------------------------------------ |
 | Pull request      | yes             | no                                     | no                                                           |
-| Push to `master`  | yes             | station and docs                       | no                                                           |
-| Push tag `v0.2.0` | yes             | station and docs                       | crates.io, npm, GitHub Release desktop and Android artifacts |
+| Push to `master`  | yes             | legacy station, Nebulus, and docs      | no                                                           |
+| Push tag `v0.2.0` | yes             | legacy station, Nebulus, and docs      | crates.io, npm, GitHub Release desktop and Android artifacts |
 | Manual dispatch   | validation jobs | no deploy unless it is also a push ref | no                                                           |
 
 `cargo release` creates a release commit on `master` and a `v*` tag. GitHub
@@ -41,14 +43,13 @@ commit runs the normal `master` path and the tag runs the release path.
 Pushes to tags like `v0.2.0` run the release publishing jobs after validation:
 
 - publishable Rust crates (`openipc-core`, `openipc-rtl88xx`, `openipc-video`,
-  `openipc-web`, and `wfb-rs`) publish to crates.io with
+  `openipc-web`, `wfb-rs`, and `nebulus`) publish to crates.io with
   `cargo publish --workspace`,
 - `@openipc-rs/web` builds with Bun and publishes to npm with npm trusted
   publishing,
-- Tauri builds desktop bundles and uploads them to the GitHub Release for that
-  tag,
-- Tauri builds unsigned Android APK/AAB artifacts and uploads them to
-  the same GitHub Release after the desktop release job succeeds.
+- Nebulus builds for six desktop targets and one Android target,
+- a final job collects the platform archives, APK, and SHA-256 files into one
+  GitHub Release for the tag.
 
 Desktop release targets:
 
@@ -61,15 +62,16 @@ Desktop release targets:
 | `windows-x64`         | `windows-2025`     | `x86_64-pc-windows-msvc`    |
 | `windows-arm64`       | `windows-11-arm`   | `aarch64-pc-windows-msvc`   |
 
-Linux releases are built on Ubuntu runners and use Tauri's Linux bundle targets
-from that host, such as AppImage, Debian package, and RPM package. This is not a
-separate build per Linux distribution.
+Linux releases are portable `.tar.gz` archives built on Ubuntu. macOS releases
+are ad-hoc-signed `.app.zip` bundles. Windows releases are `.zip` archives that
+include `Nebulus.exe` and the architecture-matched `wintun.dll` needed by the
+optional VPN feature.
 
 Android release artifacts:
 
-| Release label       | GitHub runner   | Android/Rust target         | Artifacts        |
-| ------------------- | --------------- | --------------------------- | ---------------- |
-| `android-universal` | `ubuntu-latest` | Tauri default Android build | unsigned APK/AAB |
+| Release label   | GitHub runner   | Android/Rust target     | Artifacts       |
+| --------------- | --------------- | ----------------------- | --------------- |
+| `android-arm64` | `ubuntu-latest` | `aarch64-linux-android` | installable APK |
 
 Required repository secret:
 
@@ -81,25 +83,30 @@ publishing is not supported by Bun yet. Configure `@openipc-rs/web` on npmjs.com
 with GitHub Actions as the trusted publisher, repository `neelsani/openipc-rs`,
 workflow filename `ci.yml`, and package publishing from this workflow.
 
-The desktop release job uses the built-in `GITHUB_TOKEN`. `tauri-action` uses
-this asset naming pattern:
+The release jobs use the built-in `GITHUB_TOKEN`. Desktop assets use names such
+as:
 
 ```text
-openipc-rs-station-[platform]-[arch]-[version].[ext]
+nebulus-linux-x64-0.2.0.tar.gz
+nebulus-macos-apple-silicon-0.2.0.zip
+nebulus-windows-arm64-0.2.0.zip
 ```
 
-macOS bundles are ad-hoc signed with `signingIdentity = "-"`. Release bundles
-are not notarized unless Apple signing and notarization credentials are added
-later.
+macOS bundles are ad-hoc signed and are not notarized. Windows and Linux
+archives are not code-signed.
 
-The Android release job also uses the built-in `GITHUB_TOKEN`. It does not use
-Android signing credentials yet; uploaded APKs are unsigned and named like:
+For Android releases, configure both secrets to keep a stable signing identity:
 
 ```text
-openipc-rs-station-android-universal-[version]-unsigned.apk
-openipc-rs-station-android-universal-[version].aab
-SHA256SUMS-android-universal.txt
+ANDROID_KEYSTORE_BASE64
+ANDROID_KEYSTORE_PASSWORD
 ```
+
+`ANDROID_KEYSTORE_BASE64` is the base64-encoded Java keystore. Its key password
+must match the keystore password because that is the interface exposed by
+`cargo-apk2`. If the secrets are absent, CI creates an ephemeral key and still
+publishes an installable APK, but that APK cannot upgrade an installation from
+another release because Android requires matching signing identities.
 
 The workspace also contains local `publish = false` crates, including the Tauri
 desktop shell and `tauri-plugin-openipc-usb`. They are checked, tested, and
@@ -107,10 +114,10 @@ versioned with the repo, but they are not crates.io packages.
 
 ## Cloudflare Deployments
 
-The station web/WASM app and docs site deploy on normal pushes to `master` and
-on `v*` release tags using `cloudflare/wrangler-action`. The action uploads the
-built directories to Cloudflare Pages, so the repo does not need local
-Cloudflare config files or local deployment dependencies.
+Nebulus, legacy Station, and the docs site deploy on normal pushes to `master`
+and on `v*` release tags using `cloudflare/wrangler-action`. Each app has its
+own Cloudflare Pages project. The repo does not need local Cloudflare config
+files or deployment dependencies.
 
 The workflow passes `--branch=master` to Cloudflare Pages so both `master`
 pushes and release tags update the production custom domains instead of creating
@@ -118,7 +125,8 @@ preview-only deployments.
 
 Public URLs:
 
-- Station: [station.openipc-rs.neels.dev](https://station.openipc-rs.neels.dev)
+- Nebulus: [nebulus.openipc-rs.neels.dev](https://nebulus.openipc-rs.neels.dev)
+- Legacy Station: [station.openipc-rs.neels.dev](https://station.openipc-rs.neels.dev)
 - Docs: [openipc-rs.neels.dev](https://openipc-rs.neels.dev)
 
 Required repository secrets:
@@ -126,5 +134,9 @@ Required repository secrets:
 - `CLOUDFLARE_API_TOKEN`
 - `CLOUDFLARE_ACCOUNT_ID`
 
-The station build output is `apps/openipc-station/dist`. The docs build output
-is `docs/build`.
+Create the `openipc-rs-nebulus` Pages project in the same Cloudflare account
+before its first CI deployment. The existing `openipc-rs-station` project is
+left unchanged and continues serving the legacy app.
+
+Nebulus builds to `apps/nebulus/dist`; legacy Station builds to
+`apps/openipc-station/dist`; docs build to `docs/build`.

@@ -4,6 +4,7 @@ const sidebars: SidebarsConfig = {
   mainSidebar: [
     "intro",
     "getting-started",
+    "nebulus",
     "architecture",
     {
       type: "category",
@@ -16,7 +17,6 @@ const sidebars: SidebarsConfig = {
         "web-wasm",
         "wasm-sdk",
         "desktop-tauri",
-        "nebulus",
       ],
     },
     {

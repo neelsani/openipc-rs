@@ -57,8 +57,9 @@ the next release.
 - Done: RTP-over-UDP mirror.
 - Done: Annex-B output.
 - Done: native adaptive-link uplink.
-- Done: Tauri desktop station using native Rust/nusb backend.
-- Still useful: dedicated low-latency native renderer outside the Tauri app.
+- Done: Nebulus native/Android renderer with platform decoders and latest-frame
+  presentation.
+- Done: legacy Tauri desktop station using the native Rust/nusb backend.
 
 ## Browser
 
@@ -73,8 +74,8 @@ the next release.
 
 - Done: crates.io metadata and crate READMEs.
 - Done: generated npm package metadata for `@openipc-rs/web`.
-- Done: GitHub Actions validation, Cloudflare Pages deploys, Bun-based npm
-  package publishing, crates.io publishing, and Tauri desktop release jobs.
+- Done: GitHub Actions validation, Cloudflare Pages deploys, npm trusted
+  publishing, crates.io publishing, and Nebulus desktop/Android release jobs.
 - Still useful: signed and notarized desktop releases.
 - Still useful: a hardware test matrix that records adapter model, chip family,
   OS, browser, cold-start result, RX result, and adaptive-link TX result.

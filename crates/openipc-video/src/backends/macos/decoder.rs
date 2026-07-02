@@ -90,6 +90,7 @@ impl MacOsDecoder {
     }
 
     fn replace_session(&mut self, config: CodecConfig) -> Result<(), VideoError> {
+        log::info!(target: "openipc_video::videotoolbox", "configuring decoder codec={}", config.codec());
         self.supports_requested_codec(config.codec())?;
         if let Some(session) = self.session.take() {
             session.finish()?;
@@ -153,6 +154,7 @@ impl VideoDecoder for MacOsDecoder {
             return Ok(SubmitOutcome::WaitingForKeyframe);
         }
         if self.stats.snapshot().frames_in_flight >= self.options.max_frames_in_flight {
+            log::warn!(target: "openipc_video::videotoolbox", "decoder backpressure; dropping access unit");
             self.stats.update(|stats| stats.backpressure_drops += 1);
             return Ok(SubmitOutcome::DroppedForBackpressure);
         }

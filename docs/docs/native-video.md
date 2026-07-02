@@ -25,9 +25,10 @@ Linux and Windows currently expose H.265 Main 8-bit/NV12 output. A P010 surface
 path is still required before those two backends can advertise Main10. Android,
 macOS, and WebCodecs negotiate platform output according to device support.
 
-OpenIPC Station currently calls WebCodecs from its React frontend. Rust/WASM
-apps can use `WebDecoder` directly; both routes keep decoded pixels inside the
-browser decoder rather than copying them through WASM memory.
+Nebulus uses every backend in this table directly, including `WebDecoder` in
+its WASM build. The legacy React Station calls WebCodecs from JavaScript. Both
+browser routes keep decoded pixels in browser-owned `VideoFrame` objects rather
+than copying them through WASM memory.
 
 ```mermaid
 flowchart LR

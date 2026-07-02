@@ -7,68 +7,6 @@ use crate::{app::NebulusApp, model::METRIC_WINDOW_SECONDS, ui::format_bitrate};
 
 pub(crate) fn show(app: &NebulusApp, ui: &mut egui::Ui) {
     let latest_time = app.metric_view_time();
-
-    ui.columns(2, |columns| {
-        metric(
-            &mut columns[0],
-            "Receive",
-            format!("{:.1} fps", app.metrics.receive_fps),
-        );
-        metric(
-            &mut columns[1],
-            "Bitrate",
-            format_bitrate(app.metrics.bitrate_bps),
-        );
-        metric(
-            &mut columns[0],
-            "Decode",
-            format!("{:.1} fps", app.metrics.decode_fps),
-        );
-        metric(
-            &mut columns[1],
-            "Render",
-            format!("{:.1} fps", app.metrics.render_fps),
-        );
-        metric(
-            &mut columns[0],
-            "Decode latency",
-            format!("{:.1} ms", app.metrics.decode_latency_ms),
-        );
-        metric(
-            &mut columns[1],
-            "Decoder drops",
-            app.metrics.decoder_drops.to_string(),
-        );
-        metric(
-            &mut columns[0],
-            "Resolution",
-            app.metrics
-                .resolution
-                .map(|[width, height]| format!("{width} x {height}"))
-                .unwrap_or_else(|| "Waiting".to_owned()),
-        );
-        metric(
-            &mut columns[1],
-            "Decoder",
-            app.metrics.decoder_label().to_owned(),
-        );
-        metric(
-            &mut columns[0],
-            "Radio",
-            app.chip
-                .clone()
-                .unwrap_or_else(|| "Not connected".to_owned()),
-        );
-        metric(
-            &mut columns[1],
-            "Link score",
-            format!(
-                "{} / {}",
-                app.metrics.link_score[0], app.metrics.link_score[1]
-            ),
-        );
-    });
-    ui.add_space(10.0);
     ui.scope(|ui| {
         ui.set_max_width((ui.available_width() - 14.0).max(0.0));
         ui.spacing_mut().item_spacing.x = 10.0;
@@ -138,6 +76,120 @@ pub(crate) fn show(app: &NebulusApp, ui: &mut egui::Ui) {
             );
         });
     });
+    metrics_summary(app, ui);
+}
+
+fn metrics_summary(app: &NebulusApp, ui: &mut egui::Ui) {
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new("Current values").strong());
+    ui.add_space(4.0);
+
+    let resolution = app
+        .metrics
+        .resolution
+        .map(|[width, height]| format!("{width} x {height}"))
+        .unwrap_or_else(|| "Waiting".to_owned());
+    let radio = app
+        .receiver_info
+        .as_ref()
+        .map(|receiver| receiver.label.as_str())
+        .unwrap_or("Not connected")
+        .to_owned();
+
+    ui.columns(2, |columns| {
+        metric_group(&mut columns[0], "STREAM", "metrics_stream", |ui| {
+            metric_row(ui, "Resolution", &resolution);
+            metric_row(
+                ui,
+                "Receive",
+                &format!("{:.1} fps", app.metrics.receive_fps),
+            );
+            metric_row(ui, "Decode", &format!("{:.1} fps", app.metrics.decode_fps));
+            metric_row(ui, "Render", &format!("{:.1} fps", app.metrics.render_fps));
+            metric_row(ui, "Bitrate", &format_bitrate(app.metrics.bitrate_bps));
+            metric_row(ui, "Radio", &radio);
+        });
+
+        metric_group(
+            &mut columns[1],
+            "PIPELINE / LINK",
+            "metrics_pipeline",
+            |ui| {
+                metric_row(ui, "Decoder", app.metrics.decoder_label());
+                metric_row(
+                    ui,
+                    "Decode latency",
+                    &format!("{:.1} ms", app.metrics.decode_latency_ms),
+                );
+                metric_row(
+                    ui,
+                    "Local processing",
+                    &format!("{:.1} ms", app.metrics.local_processing_latency_ms),
+                );
+                metric_row(
+                    ui,
+                    "Decoder drops / errors",
+                    &format!(
+                        "{} / {}",
+                        app.metrics.decoder_drops, app.metrics.decoder_errors
+                    ),
+                );
+                metric_row(
+                    ui,
+                    "RSSI / SNR",
+                    &format!(
+                        "{}/{} dBm  {}/{} dB",
+                        app.metrics.rssi[0],
+                        app.metrics.rssi[1],
+                        app.metrics.snr[0],
+                        app.metrics.snr[1]
+                    ),
+                );
+                metric_row(
+                    ui,
+                    "FEC recovered / lost",
+                    &format!(
+                        "{} / {}",
+                        app.metrics.recovered_packets, app.metrics.lost_packets
+                    ),
+                );
+            },
+        );
+    });
+}
+
+fn metric_group(ui: &mut egui::Ui, heading: &str, id: &str, rows: impl FnOnce(&mut egui::Ui)) {
+    ui.label(
+        egui::RichText::new(heading)
+            .small()
+            .strong()
+            .color(ui.visuals().weak_text_color()),
+    );
+    ui.add_space(2.0);
+    egui::Grid::new(id)
+        .num_columns(2)
+        .striped(true)
+        .spacing(egui::vec2(10.0, 5.0))
+        .show(ui, rows);
+}
+
+fn metric_row(ui: &mut egui::Ui, label: &str, value: &str) {
+    ui.label(
+        egui::RichText::new(label)
+            .small()
+            .color(ui.visuals().weak_text_color()),
+    );
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.add(
+            egui::Label::new(egui::RichText::new(value).monospace().strong())
+                .truncate()
+                .sense(egui::Sense::hover()),
+        )
+        .on_hover_text(value);
+    });
+    ui.end_row();
 }
 
 #[derive(Clone, Copy)]
@@ -154,16 +206,7 @@ enum PlotScale {
 const FIRST_SERIES_COLOR: egui::Color32 = egui::Color32::from_rgb(237, 135, 150);
 const SECOND_SERIES_COLOR: egui::Color32 = egui::Color32::from_rgb(138, 173, 244);
 const LIVE_GUTTER_SECONDS: f64 = 1.5;
-
-fn metric(ui: &mut egui::Ui, label: &str, value: String) {
-    ui.label(
-        egui::RichText::new(label)
-            .small()
-            .color(ui.visuals().weak_text_color()),
-    );
-    ui.label(egui::RichText::new(value).monospace().size(16.0).strong());
-    ui.add_space(8.0);
-}
+const PLOT_SLOT_HEIGHT: f32 = 152.0;
 
 fn plot_one<Series>(
     ui: &mut egui::Ui,
@@ -175,72 +218,84 @@ fn plot_one<Series>(
 ) where
     Series: Iterator<Item = [f64; 2]>,
 {
-    let window_end = latest_time.max(METRIC_WINDOW_SECONDS)
-        + if latest_time >= METRIC_WINDOW_SECONDS {
-            LIVE_GUTTER_SECONDS
-        } else {
-            0.0
-        };
-    let window_start = window_end - METRIC_WINDOW_SECONDS;
-    let points = points.collect::<Vec<_>>();
-    let latest = points.last().copied();
-    let y_bounds = match scale {
-        PlotScale::Dynamic {
-            non_negative,
-            minimum_span,
-        } => dynamic_y_bounds(&points, non_negative, minimum_span),
-        PlotScale::CenteredZero { minimum_span } => centered_zero_y_bounds(&points, minimum_span),
-    };
-    let hide_negative_ticks = matches!(scale, PlotScale::CenteredZero { .. });
-
-    ui.add_sized(
-        [ui.available_width(), 20.0],
-        egui::Label::new(egui::RichText::new(id).strong())
-            .halign(egui::Align::Center)
-            .truncate(),
-    );
-
-    let axis = AxisHints::new_y()
-        .formatter(move |mark, _| {
-            if hide_negative_ticks && mark.value < 0.0 {
-                String::new()
-            } else {
-                format_axis_tick(mark.value, mark.step_size)
+    let width = ui.available_width();
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, PLOT_SLOT_HEIGHT),
+        egui::Layout::top_down(egui::Align::Min),
+        move |ui| {
+            if !ui.is_rect_visible(ui.max_rect()) {
+                return;
             }
-        })
-        .min_thickness(48.0)
-        .label_spacing(0.0..=1.0)
-        .tick_label_color(ui.visuals().text_color())
-        .tick_label_font(egui::FontId::monospace(10.0));
-    let plot = Plot::new(id)
-        .width(ui.available_width())
-        .height(104.0)
-        .sense(egui::Sense::hover())
-        .allow_drag(false)
-        .allow_axis_zoom_drag(false)
-        .allow_zoom(false)
-        .allow_scroll(false)
-        .allow_double_click_reset(false)
-        .auto_bounds([false, false])
-        .show_axes([false, true])
-        .show_grid([true, true])
-        .y_grid_spacer(stable_y_grid)
-        .grid_fade(0.25)
-        .custom_y_axes(vec![axis]);
+            let window_end = latest_time.max(METRIC_WINDOW_SECONDS)
+                + if latest_time >= METRIC_WINDOW_SECONDS {
+                    LIVE_GUTTER_SECONDS
+                } else {
+                    0.0
+                };
+            let window_start = window_end - METRIC_WINDOW_SECONDS;
+            let points = points.collect::<Vec<_>>();
+            let latest = points.last().copied();
+            let y_bounds = match scale {
+                PlotScale::Dynamic {
+                    non_negative,
+                    minimum_span,
+                } => dynamic_y_bounds(&points, non_negative, minimum_span),
+                PlotScale::CenteredZero { minimum_span } => {
+                    centered_zero_y_bounds(&points, minimum_span)
+                }
+            };
+            let hide_negative_ticks = matches!(scale, PlotScale::CenteredZero { .. });
 
-    plot.show(ui, |plot| {
-        plot.set_plot_bounds_x(window_start..=window_end);
-        plot.set_plot_bounds_y(y_bounds);
-        plot.line(
-            Line::new(id, PlotPoints::from(points))
-                .color(color)
-                .width(1.5),
-        );
-        if let Some(point) = latest {
-            endpoint(plot, id, id, point, color, egui::Align2::RIGHT_CENTER);
-        }
-    });
-    ui.add_space(14.0);
+            ui.add_sized(
+                [ui.available_width(), 20.0],
+                egui::Label::new(egui::RichText::new(id).strong())
+                    .halign(egui::Align::Center)
+                    .truncate(),
+            );
+
+            let axis = AxisHints::new_y()
+                .formatter(move |mark, _| {
+                    if hide_negative_ticks && mark.value < 0.0 {
+                        String::new()
+                    } else {
+                        format_axis_tick(mark.value, mark.step_size)
+                    }
+                })
+                .min_thickness(48.0)
+                .label_spacing(0.0..=1.0)
+                .tick_label_color(ui.visuals().text_color())
+                .tick_label_font(egui::FontId::monospace(10.0));
+            let plot = Plot::new(id)
+                .width(ui.available_width())
+                .height(104.0)
+                .sense(egui::Sense::hover())
+                .allow_drag(false)
+                .allow_axis_zoom_drag(false)
+                .allow_zoom(false)
+                .allow_scroll(false)
+                .allow_double_click_reset(false)
+                .auto_bounds([false, false])
+                .show_axes([false, true])
+                .show_grid([true, true])
+                .y_grid_spacer(stable_y_grid)
+                .grid_fade(0.25)
+                .custom_y_axes(vec![axis]);
+
+            plot.show(ui, |plot| {
+                plot.set_plot_bounds_x(window_start..=window_end);
+                plot.set_plot_bounds_y(y_bounds);
+                plot.line(
+                    Line::new(id, PlotPoints::from(points))
+                        .color(color)
+                        .width(1.5)
+                        .allow_hover(false),
+                );
+                if let Some(point) = latest {
+                    endpoint(plot, id, id, point, color, egui::Align2::RIGHT_CENTER);
+                }
+            });
+        },
+    );
 }
 
 fn dynamic_y_bounds(

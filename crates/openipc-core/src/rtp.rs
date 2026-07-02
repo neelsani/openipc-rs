@@ -436,6 +436,15 @@ impl RtpDepacketizer {
         self.status.last_sequence_number = Some(header.sequence_number);
         self.status.last_timestamp = Some(header.timestamp);
         let payload = header.payload(packet);
+        log::trace!(
+            target: "openipc_core::rtp",
+            "received RTP packet sequence={} timestamp={} pt={} marker={} bytes={}",
+            header.sequence_number,
+            header.timestamp,
+            header.payload_type,
+            header.marker,
+            payload.len()
+        );
         if header.payload_type == RTP_PAYLOAD_TYPE_OPUS {
             self.record_error(RtpError::UnsupportedPayload);
             return Err(RtpError::UnsupportedPayload);
@@ -456,7 +465,14 @@ impl RtpDepacketizer {
             Ok(Some(_)) => {
                 self.status.frames_emitted = self.status.frames_emitted.saturating_add(1)
             }
-            Err(err) => self.record_error(*err),
+            Err(err) => {
+                log::debug!(
+                    target: "openipc_core::rtp",
+                    "RTP packet rejected sequence={}: {err:?}",
+                    header.sequence_number
+                );
+                self.record_error(*err);
+            }
             _ => {}
         }
         result

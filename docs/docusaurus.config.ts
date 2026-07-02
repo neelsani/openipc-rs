@@ -33,7 +33,7 @@ function buildInfo() {
 
 const config: Config = {
   title: "openipc-rs",
-  tagline: "Rust crates, WebUSB SDK, and station app for OpenIPC video",
+  tagline: "Nebulus ground station and Rust libraries for OpenIPC FPV",
   favicon: "img/logo.svg",
 
   url: process.env.DOCUSAURUS_URL ?? "https://openipc-rs.neels.dev",
@@ -109,8 +109,8 @@ const config: Config = {
           position: "right",
         },
         {
-          href: "https://station.openipc-rs.neels.dev",
-          label: "Station",
+          href: "https://nebulus.openipc-rs.neels.dev",
+          label: "Open Nebulus",
           position: "right",
         },
         {
@@ -168,7 +168,11 @@ const config: Config = {
               to: "/docs/roadmap",
             },
             {
-              label: "Station",
+              label: "Nebulus",
+              href: "https://nebulus.openipc-rs.neels.dev",
+            },
+            {
+              label: "Legacy Station",
               href: "https://station.openipc-rs.neels.dev",
             },
           ],

@@ -38,7 +38,7 @@ pub(crate) fn show(app: &NebulusApp, ui: &mut egui::Ui) {
 
 fn health(app: &NebulusApp, ui: &mut egui::Ui) {
     let counters = app.diagnostics.counters;
-    health_row(ui, "USB adapter initialized", app.chip.is_some());
+    health_row(ui, "USB adapter initialized", app.receiver_info.is_some());
     health_row(ui, "USB transfers arriving", app.metrics.usb_transfers > 0);
     health_row(ui, "802.11 packets parsed", app.metrics.wifi_packets > 0);
     health_row(ui, "Frames accepted", counters.accepted_packets > 0);
@@ -58,7 +58,8 @@ fn health(app: &NebulusApp, ui: &mut egui::Ui) {
     health_row(
         ui,
         "Audio route healthy",
-        !app.audio.enabled || (app.audio.supported && app.audio.errors == 0),
+        !app.audio.enabled
+            || (app.audio.supported && app.audio.decoded_frames > 0 && app.audio.errors == 0),
     );
     health_row(
         ui,

@@ -653,6 +653,7 @@ impl WebUsbRealtekDevice {
             skip_txgapk,
             firmware_8814_mode: mode,
             firmware_8814_chunk: optional_usize(firmware_8814_chunk, "firmware8814Chunk")?,
+            rx_path_mask: None,
         };
         let report = self
             .driver
@@ -667,6 +668,15 @@ impl WebUsbRealtekDevice {
     pub async fn shutdown_monitor(&self) -> Result<(), JsValue> {
         self.driver
             .shutdown_monitor_async()
+            .await
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = setRxPathMask)]
+    /// Select active Jaguar1 receive chains for diversity diagnostics.
+    pub async fn set_rx_path_mask(&self, mask: u8) -> Result<(), JsValue> {
+        self.driver
+            .set_rx_path_mask_async(mask)
             .await
             .map_err(driver_error)
     }

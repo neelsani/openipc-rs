@@ -29,6 +29,7 @@ path = "src/lib.rs"
 [dependencies]
 bytes = "1"
 cros-codecs = { version = "0.0.6", default-features = false }
+log.workspace = true
 openipc-core = { path = "../openipc-core", version = "0.1.25" }
 thiserror = "2"
 

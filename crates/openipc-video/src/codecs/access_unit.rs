@@ -58,6 +58,10 @@ impl CodecConfigTracker {
         if self.current.as_ref() == Some(&config) {
             Ok(ConfigUpdate::Unchanged)
         } else {
+            log::debug!(
+                target: "openipc_video::codec",
+                "complete codec configuration observed codec={codec}"
+            );
             self.current = Some(config.clone());
             Ok(ConfigUpdate::Changed(config))
         }

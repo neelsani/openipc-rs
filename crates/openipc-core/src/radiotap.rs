@@ -527,7 +527,7 @@ fn parse_tx_rate_token(token: &str) -> Option<TxMode> {
     match token {
         "1M" => Some(TxMode::legacy(2)),
         "2M" => Some(TxMode::legacy(4)),
-        "5.5M" | "5M" => Some(TxMode::legacy(11)),
+        "5.5M" | "5_5M" | "5M" => Some(TxMode::legacy(11)),
         "6M" => Some(TxMode::legacy(12)),
         "9M" => Some(TxMode::legacy(18)),
         "11M" => Some(TxMode::legacy(22)),
@@ -609,6 +609,21 @@ mod tests {
         assert!(mode.short_gi);
         assert!(mode.ldpc);
         assert!(mode.stbc);
+    }
+
+    #[test]
+    fn parses_devourer_cck_rate_names() {
+        for (spec, rate) in [
+            ("1M", 2),
+            ("2M", 4),
+            ("5.5M", 11),
+            ("5_5M", 11),
+            ("11M", 22),
+        ] {
+            let mode = parse_tx_mode_str(spec);
+            assert_eq!(mode.kind, TxModeKind::Legacy);
+            assert_eq!(mode.legacy_rate_500kbps, rate);
+        }
     }
 
     #[test]

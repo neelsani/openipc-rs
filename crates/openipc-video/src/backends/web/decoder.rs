@@ -140,6 +140,7 @@ impl WebDecoder {
     }
 
     fn replace_session(&mut self, config: CodecConfig) -> Result<(), VideoError> {
+        log::info!(target: "openipc_video::webcodecs", "configuring decoder codec={}", config.codec());
         let stream = config.stream_info()?;
         self.session = None;
         self.frames.clear();
@@ -303,6 +304,7 @@ impl VideoDecoder for WebDecoder {
         if self.pending.len() >= self.options.max_frames_in_flight
             || queue_size >= self.options.max_frames_in_flight
         {
+            log::warn!(target: "openipc_video::webcodecs", "decoder backpressure pending={} queue={}; resetting", self.pending.len(), queue_size);
             self.recover_from_backpressure();
             return Ok(SubmitOutcome::DroppedForBackpressure);
         }

@@ -43,6 +43,7 @@ pub(crate) enum DiagnosticVerbosity {
     #[default]
     Normal,
     High,
+    VeryHigh,
 }
 
 impl DiagnosticVerbosity {
@@ -51,7 +52,44 @@ impl DiagnosticVerbosity {
             Self::Low => "Low",
             Self::Normal => "Normal",
             Self::High => "High",
+            Self::VeryHigh => "Very verbose",
         }
+    }
+
+    pub(crate) const fn log_level(self) -> log::LevelFilter {
+        match self {
+            Self::Low => log::LevelFilter::Warn,
+            Self::Normal => log::LevelFilter::Info,
+            Self::High => log::LevelFilter::Debug,
+            Self::VeryHigh => log::LevelFilter::Trace,
+        }
+    }
+}
+
+/// Persisted Catppuccin palette used by the Nebulus interface.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum GuiTheme {
+    Latte,
+    Frappe,
+    #[default]
+    Macchiato,
+    Mocha,
+}
+
+impl GuiTheme {
+    pub(crate) const ALL: [Self; 4] = [Self::Latte, Self::Frappe, Self::Macchiato, Self::Mocha];
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Latte => "Latte",
+            Self::Frappe => "Frappé",
+            Self::Macchiato => "Macchiato",
+            Self::Mocha => "Mocha",
+        }
+    }
+
+    pub(crate) const fn is_dark(self) -> bool {
+        !matches!(self, Self::Latte)
     }
 }
 
@@ -149,6 +187,8 @@ pub(crate) struct Settings {
     pub(crate) tx_power: u8,
     pub(crate) show_osd: bool,
     pub(crate) show_sidebar: bool,
+    pub(crate) gui_theme: GuiTheme,
+    pub(crate) interface_scale_percent: u16,
     pub(crate) audio_volume: u8,
     pub(crate) payload_routes: Vec<PayloadRouteSettings>,
     pub(crate) transfer_size: usize,
@@ -178,6 +218,8 @@ impl Default for Settings {
             tx_power: 20,
             show_osd: true,
             show_sidebar: true,
+            gui_theme: GuiTheme::Macchiato,
+            interface_scale_percent: 100,
             audio_volume: 80,
             payload_routes: default_routes(),
             transfer_size: openipc_core::realtek::DEFAULT_RX_TRANSFER_SIZE,

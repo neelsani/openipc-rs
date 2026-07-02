@@ -51,6 +51,26 @@ pub struct RealtekDevice {
 }
 
 impl RealtekDevice {
+    /// USB vendor identifier reported by the opened adapter.
+    pub const fn vendor_id(&self) -> u16 {
+        self.vendor_id
+    }
+
+    /// USB product identifier reported by the opened adapter.
+    pub const fn product_id(&self) -> u16 {
+        self.product_id
+    }
+
+    /// Selected bulk-IN endpoint address.
+    pub const fn bulk_in_endpoint_address(&self) -> u8 {
+        self.bulk_in_ep
+    }
+
+    /// Selected bulk-OUT endpoint address.
+    pub const fn bulk_out_endpoint_address(&self) -> u8 {
+        self.bulk_out_ep
+    }
+
     /// Open the selected bulk-IN endpoint without changing endpoint state.
     ///
     /// Long-running receive loops should keep the returned endpoint alive and
@@ -229,6 +249,12 @@ impl RealtekDevice {
     /// Best-effort monitor-mode shutdown for chips that need explicit deinit.
     pub fn shutdown_monitor(&self) -> Result<(), DriverError> {
         block_on_ready(self.shutdown_monitor_async())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Select the active Jaguar1 receive chains for diversity diagnostics.
+    pub fn set_rx_path_mask(&self, mask: u8) -> Result<(), DriverError> {
+        block_on_ready(self.set_rx_path_mask_async(mask))
     }
 
     #[cfg(not(target_arch = "wasm32"))]

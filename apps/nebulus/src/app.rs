@@ -13,7 +13,7 @@ use crate::{
         AudioStats, DiagnosticsState, EnvironmentDetails, LiveMetrics, LogEntry, LogLevel,
         MetricHistory, ReceiverState, RecordingState, RecordingStatus, RouteStats, VpnStatus,
     },
-    runtime::{Runtime, RuntimeEvent, StartRequest, UsbDeviceInfo},
+    runtime::{ReceiverInfo, Runtime, RuntimeEvent, StartRequest, UsbDeviceInfo},
     settings::Settings,
 };
 
@@ -22,11 +22,12 @@ pub struct NebulusApp {
     pub(crate) settings: Settings,
     pub(crate) state: ReceiverState,
     pub(crate) devices: Vec<UsbDeviceInfo>,
-    pub(crate) connected_label: Option<String>,
-    pub(crate) chip: Option<String>,
+    pub(crate) receiver_info: Option<ReceiverInfo>,
     pub(crate) metrics: LiveMetrics,
     pub(crate) history: MetricHistory,
     pub(crate) logs: Vec<LogEntry>,
+    pub(crate) log_filter: LogLevel,
+    pub(crate) log_search: String,
     pub(crate) route_stats: BTreeMap<u64, RouteStats>,
     pub(crate) audio: AudioStats,
     pub(crate) diagnostics: DiagnosticsState,
@@ -37,12 +38,15 @@ pub struct NebulusApp {
     pub(crate) runtime: Runtime,
     pub(crate) texture: Option<egui::TextureHandle>,
     pub(crate) video_renderer: Option<crate::video::PlatformVideoRenderer>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub(crate) desktop_tray: Option<crate::desktop_tray::DesktopTray>,
     pub(crate) frame_size: Option<[usize; 2]>,
     pub(crate) key_name: String,
     pub(crate) key_error: Option<String>,
     #[cfg(target_arch = "wasm32")]
     key_file_result: PendingKeyFile,
     pub(crate) video_fullscreen: bool,
+    pub(crate) show_about: bool,
     started_at: Instant,
     metrics_started_at: Instant,
     rate_window_started: Instant,
@@ -59,6 +63,7 @@ impl NebulusApp {
             .storage
             .and_then(|storage| eframe::get_value(storage, eframe::APP_KEY))
             .unwrap_or_default();
+        crate::logging::set_level(settings.diagnostic_verbosity.log_level());
         let key_name = if settings.key_bytes == crate::settings::DEFAULT_KEY_BYTES {
             "Default gs.key".to_owned()
         } else {
@@ -68,11 +73,12 @@ impl NebulusApp {
             settings,
             state: ReceiverState::Idle,
             devices: Vec::new(),
-            connected_label: None,
-            chip: None,
+            receiver_info: None,
             metrics: LiveMetrics::default(),
             history: MetricHistory::default(),
             logs: Vec::new(),
+            log_filter: LogLevel::Trace,
+            log_search: String::new(),
             route_stats: BTreeMap::new(),
             audio: AudioStats::default(),
             diagnostics: DiagnosticsState::default(),
@@ -83,12 +89,15 @@ impl NebulusApp {
             runtime: Runtime::new(context.egui_ctx.clone()),
             texture: None,
             video_renderer: crate::video::PlatformVideoRenderer::new(context).ok(),
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            desktop_tray: None,
             frame_size: None,
             key_name,
             key_error: None,
             #[cfg(target_arch = "wasm32")]
             key_file_result: Rc::new(RefCell::new(None)),
             video_fullscreen: false,
+            show_about: false,
             started_at: Instant::now(),
             metrics_started_at: Instant::now(),
             rate_window_started: Instant::now(),
@@ -98,7 +107,16 @@ impl NebulusApp {
             rate_window_rendered: 0,
             last_rate_fec: openipc_core::FecCounters::default(),
         };
-        crate::ui::theme::apply(&context.egui_ctx);
+        crate::ui::theme::apply(&context.egui_ctx, app.settings.gui_theme);
+        app.settings.interface_scale_percent = app.settings.interface_scale_percent.clamp(75, 150);
+        context
+            .egui_ctx
+            .set_zoom_factor(f32::from(app.settings.interface_scale_percent) / 100.0);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        match crate::desktop_tray::DesktopTray::new(&context.egui_ctx) {
+            Ok(tray) => app.desktop_tray = Some(tray),
+            Err(error) => app.log(LogLevel::Warn, "tray", error),
+        }
         app.log(LogLevel::Info, "app", "Nebulus ready");
         app.log(
             LogLevel::Debug,
@@ -188,9 +206,9 @@ impl NebulusApp {
     #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
     fn start_recording(&mut self) {
         let Some(path) = rfd::FileDialog::new()
-            .set_title("Save encoded OpenIPC recording")
-            .set_file_name("openipc-recording.annexb")
-            .add_filter("Annex-B video", &["annexb", "h264", "h265"])
+            .set_title("Save OpenIPC recording")
+            .set_file_name("openipc-recording.mp4")
+            .add_filter("MP4 video", &["mp4"])
             .save_file()
         else {
             return;
@@ -203,7 +221,7 @@ impl NebulusApp {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_secs());
-        let path = std::env::temp_dir().join(format!("openipc-{timestamp}.annexb"));
+        let path = std::env::temp_dir().join(format!("openipc-{timestamp}.mp4"));
         self.runtime.start_recording(path);
     }
 
@@ -235,14 +253,13 @@ impl NebulusApp {
                 RuntimeEvent::DiscoveryFailed(error) => {
                     self.log(LogLevel::Warn, "usb", error);
                 }
-                RuntimeEvent::Connecting => self.state = ReceiverState::Connecting,
-                RuntimeEvent::Connected {
-                    label,
-                    chip,
-                    decoder,
-                } => {
-                    self.connected_label = Some(label.clone());
-                    self.chip = Some(chip);
+                RuntimeEvent::Connecting => {
+                    self.receiver_info = None;
+                    self.state = ReceiverState::Connecting;
+                }
+                RuntimeEvent::Connected { receiver, decoder } => {
+                    let label = receiver.label.clone();
+                    self.receiver_info = Some(receiver);
                     self.metrics.decoder_name = decoder.backend.clone();
                     self.environment.decoder_backend = decoder.backend;
                     self.environment.h264 =
@@ -328,12 +345,14 @@ impl NebulusApp {
                     self.log(LogLevel::Error, "record", error);
                 }
                 RuntimeEvent::Stopped => {
+                    self.receiver_info = None;
                     self.state = ReceiverState::Idle;
                     self.recording.state = RecordingState::Idle;
                     self.vpn.active = false;
                     self.log(LogLevel::Info, "rx", "Receiver stopped");
                 }
                 RuntimeEvent::Failed(error) => {
+                    self.receiver_info = None;
                     self.state = ReceiverState::Failed;
                     self.recording.state = RecordingState::Idle;
                     self.vpn.active = false;
@@ -607,7 +626,7 @@ impl NebulusApp {
 
     fn update_rates(&mut self) {
         let elapsed = self.rate_window_started.elapsed();
-        if elapsed.as_secs_f64() < 0.25 {
+        if elapsed.as_secs_f64() < 1.0 {
             return;
         }
         let seconds = elapsed.as_secs_f64();
@@ -672,15 +691,18 @@ impl NebulusApp {
     pub(crate) fn log(
         &mut self,
         level: LogLevel,
-        target: &'static str,
+        target: impl Into<String>,
         message: impl Into<String>,
     ) {
         let visible = match self.settings.diagnostic_verbosity {
             crate::settings::DiagnosticVerbosity::Low => {
                 matches!(level, LogLevel::Warn | LogLevel::Error)
             }
-            crate::settings::DiagnosticVerbosity::Normal => level != LogLevel::Debug,
-            crate::settings::DiagnosticVerbosity::High => true,
+            crate::settings::DiagnosticVerbosity::Normal => {
+                matches!(level, LogLevel::Info | LogLevel::Warn | LogLevel::Error)
+            }
+            crate::settings::DiagnosticVerbosity::High => !matches!(level, LogLevel::Trace),
+            crate::settings::DiagnosticVerbosity::VeryHigh => true,
         };
         if !visible {
             return;
@@ -691,7 +713,7 @@ impl NebulusApp {
         self.logs.push(LogEntry {
             elapsed_seconds: self.started_at.elapsed().as_secs_f64(),
             level,
-            target,
+            target: target.into(),
             message: message.into(),
         });
     }
@@ -761,6 +783,21 @@ fn fec_window_percentages(total: u64, recovered: u64, lost: u64) -> (f64, f64) {
 
 impl eframe::App for NebulusApp {
     fn logic(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        crate::logging::set_level(self.settings.diagnostic_verbosity.log_level());
+        // Egui may run more than one sizing pass for a frame. Mutating the log
+        // rows between those passes changes widget identity and can trigger a
+        // self-amplifying stream of layout warnings.
+        if context.current_pass_index() == 0 {
+            for record in crate::logging::drain() {
+                self.log(
+                    LogLevel::from_log(record.level),
+                    record.target,
+                    record.message,
+                );
+            }
+        }
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        self.process_tray(context);
         self.process_events(context);
         if self.state == ReceiverState::Receiving {
             context.request_repaint_after(std::time::Duration::from_millis(16));

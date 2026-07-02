@@ -1,5 +1,7 @@
 use eframe::egui::{self, Color32, Stroke};
 
+use crate::settings::GuiTheme;
+
 macro_rules! color {
     ($value:expr) => {{
         let [red, green, blue, alpha] = $value.to_array();
@@ -7,9 +9,18 @@ macro_rules! color {
     }};
 }
 
-pub(crate) fn apply(context: &egui::Context) {
-    let theme = catppuccin_egui::MACCHIATO;
-    let mut visuals = egui::Visuals::dark();
+pub(crate) fn apply(context: &egui::Context, selected: GuiTheme) {
+    let theme = match selected {
+        GuiTheme::Latte => catppuccin_egui::LATTE,
+        GuiTheme::Frappe => catppuccin_egui::FRAPPE,
+        GuiTheme::Macchiato => catppuccin_egui::MACCHIATO,
+        GuiTheme::Mocha => catppuccin_egui::MOCHA,
+    };
+    let mut visuals = if selected.is_dark() {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
+    };
 
     visuals.hyperlink_color = color!(theme.rosewater);
     visuals.faint_bg_color = color!(theme.surface0);
@@ -61,9 +72,13 @@ pub(crate) fn apply(context: &egui::Context) {
     let shadow_color = Color32::from_black_alpha(96);
     visuals.window_shadow.color = shadow_color;
     visuals.popup_shadow.color = shadow_color;
-    visuals.dark_mode = true;
+    visuals.dark_mode = selected.is_dark();
 
-    let egui_theme = egui::Theme::Dark;
+    let egui_theme = if selected.is_dark() {
+        egui::Theme::Dark
+    } else {
+        egui::Theme::Light
+    };
     context.all_styles_mut(|style| style.visuals = visuals.clone());
     context.set_theme(egui_theme);
     context.request_repaint();
@@ -90,17 +105,27 @@ fn apply_widget(
 #[cfg(test)]
 mod tests {
     use super::apply;
+    use crate::settings::GuiTheme;
     use eframe::egui;
 
     #[test]
     fn applies_macchiato() {
         let context = egui::Context::default();
 
-        apply(&context);
+        apply(&context, GuiTheme::Macchiato);
         assert_eq!(context.theme(), egui::Theme::Dark);
         assert_eq!(
             context.style_of(egui::Theme::Dark).visuals.panel_fill,
             egui::Color32::from_rgb(36, 39, 58)
         );
+    }
+
+    #[test]
+    fn latte_uses_light_visuals() {
+        let context = egui::Context::default();
+
+        apply(&context, GuiTheme::Latte);
+        assert_eq!(context.theme(), egui::Theme::Light);
+        assert!(!context.style_of(egui::Theme::Light).visuals.dark_mode);
     }
 }

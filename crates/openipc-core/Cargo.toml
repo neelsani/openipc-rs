@@ -12,6 +12,7 @@ name = "openipc_core"
 path = "src/lib.rs"
 
 [dependencies]
+log.workspace = true
 chacha20 = { version = "0.10", features = ["cipher", "legacy"] }
 crypto_box = "0.9"
 poly1305 = "0.9"

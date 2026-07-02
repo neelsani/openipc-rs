@@ -1,6 +1,6 @@
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 fn main() -> eframe::Result {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    nebulus::init_logging();
     eframe::run_native(
         "Nebulus",
         eframe::NativeOptions {

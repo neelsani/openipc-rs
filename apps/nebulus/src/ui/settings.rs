@@ -8,6 +8,9 @@ use crate::{
 };
 
 pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
+    if app.receiver_info.is_some() {
+        connected_receiver(app, ui);
+    }
     let editable = matches!(app.state, ReceiverState::Idle | ReceiverState::Failed);
     ui.add_enabled_ui(editable, |ui| {
         section(ui, "Receiver", |ui| {
@@ -148,7 +151,6 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
                         }
                     });
             });
-            ui.checkbox(&mut app.settings.show_osd, "Link telemetry overlay");
             ui.horizontal(|ui| {
                 ui.label("Decoder queue");
                 ui.label("3 frames, latest-frame output");
@@ -168,26 +170,88 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
                             .range(4_096..=1_048_576),
                     );
                     ui.end_row();
-                    ui.label("Diagnostic verbosity");
-                    egui::ComboBox::from_id_salt("diagnostic-verbosity")
-                        .selected_text(app.settings.diagnostic_verbosity.label())
-                        .show_ui(ui, |ui| {
-                            for verbosity in [
-                                crate::settings::DiagnosticVerbosity::Low,
-                                crate::settings::DiagnosticVerbosity::Normal,
-                                crate::settings::DiagnosticVerbosity::High,
-                            ] {
-                                ui.selectable_value(
-                                    &mut app.settings.diagnostic_verbosity,
-                                    verbosity,
-                                    verbosity.label(),
-                                );
-                            }
-                        });
-                    ui.end_row();
                 });
         });
     });
+}
+
+fn connected_receiver(app: &NebulusApp, ui: &mut egui::Ui) {
+    let receiver = app
+        .receiver_info
+        .as_ref()
+        .expect("receiver info checked before rendering");
+    section(ui, "Connected receiver", |ui| {
+        egui::Grid::new("connected-receiver-info")
+            .num_columns(2)
+            .striped(true)
+            .spacing([18.0, 7.0])
+            .show(ui, |ui| {
+                receiver_row(ui, "Adapter", &receiver.label);
+                receiver_row(
+                    ui,
+                    "USB ID",
+                    &match (receiver.vendor_id, receiver.product_id) {
+                        (Some(vendor), Some(product)) => format!("{vendor:04x}:{product:04x}"),
+                        _ => "Not applicable".to_owned(),
+                    },
+                );
+                receiver_row(ui, "Chipset", &receiver.chip);
+                receiver_row(ui, "RF paths", &receiver.rf_paths);
+                receiver_row(
+                    ui,
+                    "Cut revision",
+                    &receiver
+                        .cut_version
+                        .map_or_else(|| "Not reported".to_owned(), |cut| cut.to_string()),
+                );
+                receiver_row(ui, "USB link", &receiver.usb_speed);
+                receiver_row(
+                    ui,
+                    "Bulk endpoints",
+                    &match (receiver.bulk_in_endpoint, receiver.bulk_out_endpoint) {
+                        (Some(input), Some(output)) => {
+                            format!("IN 0x{input:02x} / OUT 0x{output:02x}")
+                        }
+                        _ => "Not applicable".to_owned(),
+                    },
+                );
+                receiver_row(ui, "Initialization", &receiver.initialization);
+                receiver_row(
+                    ui,
+                    "Firmware downloaded",
+                    match receiver.firmware_downloaded {
+                        Some(true) => "Yes",
+                        Some(false) => "No",
+                        None => "Not applicable",
+                    },
+                );
+                receiver_row(
+                    ui,
+                    "RF configuration",
+                    &format!(
+                        "channel {} / {} MHz / offset {}",
+                        app.settings.channel,
+                        app.settings.channel_width_mhz,
+                        app.settings.channel_offset
+                    ),
+                );
+                receiver_row(
+                    ui,
+                    "Video channel",
+                    &format!(
+                        "Link 0x{:06x} / port 0x{:02x}",
+                        app.settings.link_id,
+                        openipc_core::RadioPort::Video.as_u8()
+                    ),
+                );
+            });
+    });
+}
+
+fn receiver_row(ui: &mut egui::Ui, label: &str, value: &str) {
+    ui.label(egui::RichText::new(label).color(ui.visuals().weak_text_color()));
+    ui.monospace(value);
+    ui.end_row();
 }
 
 fn parse_link_id(value: &str) -> Option<f64> {

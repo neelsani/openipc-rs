@@ -4,8 +4,14 @@ sidebar_position: 6
 
 # Desktop Tauri
 
-The desktop app lives in `apps/openipc-station/src-tauri` and reuses the same
-React UI as the browser station.
+This page documents the legacy OpenIPC Station implementation. New application
+releases use [Nebulus](./nebulus.md), which replaces the WebView with an egui
+frontend and platform-native decoders. The older app remains useful as an
+example of integrating `@openipc-rs/web` with React and sharing one UI between
+WebUSB and a Tauri backend.
+
+The legacy desktop app lives in `apps/openipc-station/src-tauri` and reuses the
+same React UI as its browser build.
 
 ```sh
 cd apps/openipc-station

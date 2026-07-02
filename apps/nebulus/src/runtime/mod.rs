@@ -6,7 +6,7 @@ mod messages;
 mod route_runtime;
 
 #[cfg(debug_assertions)]
-mod codec_mock;
+pub(crate) mod codec_mock;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;

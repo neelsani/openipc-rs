@@ -1,5 +1,6 @@
 import { CommandBar } from "@/components/station/command-bar";
 import { Inspector } from "@/components/station/inspector";
+import { NebulusBanner } from "@/components/station/nebulus-banner";
 import { VideoPanel } from "@/components/station/video-panel";
 import { useStation } from "@/lib/use-station";
 import { isTauriRuntime } from "@/runtime/tauri";
@@ -27,6 +28,7 @@ function OpenIpcStation() {
   return (
     <div className="flex min-h-svh flex-col bg-background text-foreground lg:h-svh lg:overflow-hidden">
       <CommandBar api={api} />
+      {!isTauriRuntime() && <NebulusBanner />}
 
       <main className="flex min-h-0 flex-1 flex-col gap-3 p-3 lg:flex-row lg:items-start lg:overflow-hidden lg:p-4">
         <section className="flex min-w-0 flex-1 flex-col lg:min-h-0 lg:overflow-y-auto">

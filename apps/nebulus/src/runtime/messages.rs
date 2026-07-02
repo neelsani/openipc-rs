@@ -5,6 +5,80 @@ use crate::{
     settings::{CodecPreference, PayloadRouteSettings},
 };
 
+/// Hardware and initialization details captured when a receiver connects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReceiverInfo {
+    pub(crate) label: String,
+    pub(crate) vendor_id: Option<u16>,
+    pub(crate) product_id: Option<u16>,
+    pub(crate) chip: String,
+    pub(crate) rf_paths: String,
+    pub(crate) cut_version: Option<u8>,
+    pub(crate) usb_speed: String,
+    pub(crate) bulk_in_endpoint: Option<u8>,
+    pub(crate) bulk_out_endpoint: Option<u8>,
+    pub(crate) initialization: String,
+    pub(crate) firmware_downloaded: Option<bool>,
+}
+
+impl ReceiverInfo {
+    pub(crate) fn initialized(
+        label: String,
+        device: &openipc_rtl88xx::RealtekDevice,
+        report: &openipc_rtl88xx::InitReport,
+    ) -> Self {
+        use openipc_rtl88xx::{InitStatus, RfType};
+
+        let rf_paths = match report.chip.rf_type {
+            RfType::OneTOneR => "1T1R",
+            RfType::TwoTTwoR => "2T2R",
+            RfType::FourTFourR => "4T4R",
+        };
+        let usb_speed = match device.device_speed() {
+            Some(nusb::Speed::Low) => "Low speed (1.5 Mbps)",
+            Some(nusb::Speed::Full) => "Full speed (12 Mbps)",
+            Some(nusb::Speed::High) => "High speed (480 Mbps)",
+            Some(nusb::Speed::Super) => "SuperSpeed (5 Gbps)",
+            Some(nusb::Speed::SuperPlus) => "SuperSpeed+ (10 Gbps)",
+            Some(_) | None => "Not reported",
+        };
+        Self {
+            label,
+            vendor_id: Some(device.vendor_id()),
+            product_id: Some(device.product_id()),
+            chip: report.chip.family.name().to_owned(),
+            rf_paths: rf_paths.to_owned(),
+            cut_version: Some(report.chip.cut_version),
+            usb_speed: usb_speed.to_owned(),
+            bulk_in_endpoint: Some(device.bulk_in_endpoint_address()),
+            bulk_out_endpoint: Some(device.bulk_out_endpoint_address()),
+            initialization: match report.status {
+                InitStatus::AlreadyRunning => "Already initialized",
+                InitStatus::Initialized => "Cold initialization completed",
+            }
+            .to_owned(),
+            firmware_downloaded: Some(report.firmware_downloaded),
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    pub(crate) fn codec_mock() -> Self {
+        Self {
+            label: "Pre-recorded 1080p H.264 + Opus".to_owned(),
+            vendor_id: None,
+            product_id: None,
+            chip: "Synthetic A/V RTP".to_owned(),
+            rf_paths: "Synthetic".to_owned(),
+            cut_version: None,
+            usb_speed: "No USB device".to_owned(),
+            bulk_in_endpoint: None,
+            bulk_out_endpoint: None,
+            initialization: "Development codec mock".to_owned(),
+            firmware_downloaded: None,
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) type NativeVideoSurface = openipc_video::MacOsVideoFrame;
 #[cfg(target_os = "linux")]
@@ -12,7 +86,7 @@ pub(crate) type NativeVideoSurface = openipc_video::LinuxVideoFrame;
 #[cfg(target_os = "windows")]
 pub(crate) type NativeVideoSurface = openipc_video::WindowsVideoFrame;
 #[cfg(target_os = "android")]
-pub(crate) type NativeVideoSurface = openipc_video::AndroidVideoFrame;
+pub(crate) type NativeVideoSurface = crate::video::AndroidYuvFrame;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub(crate) type NativeVideoSurface = openipc_video::WebVideoFrame;
 
@@ -178,8 +252,7 @@ pub(crate) enum RuntimeEvent {
     DiscoveryFailed(String),
     Connecting,
     Connected {
-        label: String,
-        chip: String,
+        receiver: ReceiverInfo,
         decoder: DecoderEnvironment,
     },
     Started,

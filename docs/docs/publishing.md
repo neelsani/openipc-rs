@@ -4,8 +4,8 @@ sidebar_position: 11
 
 # Publishing
 
-The repository uses one lockstep SemVer version for the Rust crates, WASM npm
-metadata, station app, Tauri shell, and docs site.
+The repository uses one lockstep SemVer version for the Rust crates, Nebulus,
+WASM npm metadata, legacy Station, the Tauri shell, and the docs site.
 
 Use `cargo release` with the workspace `release.toml` to update the shared
 version, update Bun lockfiles, update the changelog, create the release commit,
@@ -43,8 +43,8 @@ notes to `CHANGELOG.md` with `git-cliff`.
 
 Pushing the `v0.2.0` tag triggers GitHub Actions release jobs. After the normal
 checks pass, CI publishes crates.io packages, publishes `@openipc-rs/web` to npm
-with npm trusted publishing, and uploads Tauri desktop bundles to the GitHub
-Release.
+with npm trusted publishing, and uploads Nebulus desktop and Android artifacts
+to the GitHub Release.
 
 Required release secret:
 
@@ -68,12 +68,14 @@ deploys:
 
 CI deploys the public sites:
 
-- Station: [station.openipc-rs.neels.dev](https://station.openipc-rs.neels.dev)
+- Nebulus: [nebulus.openipc-rs.neels.dev](https://nebulus.openipc-rs.neels.dev)
+- Legacy Station: [station.openipc-rs.neels.dev](https://station.openipc-rs.neels.dev)
 - Docs: [openipc-rs.neels.dev](https://openipc-rs.neels.dev)
 
 Release commits on `master` run the normal branch CI/deploy jobs. The tag
-workflow for the same commit runs the release path: validation, station/docs
-deploy, crates.io publish, npm package publish, and desktop artifact upload.
+workflow for the same commit runs the release path: validation, Nebulus/legacy
+Station/docs deploys, crates.io publish, npm package publish, and Nebulus
+artifact upload.
 
 ## Release Checklist
 
@@ -149,10 +151,10 @@ The library crates are intended for crates.io publication:
 - `openipc-video`
 - `openipc-web`
 - `wfb-rs`
+- `nebulus`
 
-`apps/openipc-cli`, `apps/openipc-station/src-tauri`, Nebulus, and the local
-Android USB plugin are versioned with the workspace but marked
-`publish = false`.
+`apps/openipc-cli`, `apps/openipc-station/src-tauri`, and the local Android USB
+plugin are versioned with the workspace but marked `publish = false`.
 
 `openipc-core` is the easiest crate to publish because it owns protocol logic
 and does not need USB access. `openipc-video` has target-specific decoder
@@ -176,18 +178,20 @@ Publish after logging in to crates.io or configuring `CARGO_REGISTRY_TOKEN`:
 cargo publish --workspace
 ```
 
-`openipc-rs-desktop` and `tauri-plugin-openipc-usb` are marked
-`publish = false`. The desktop shell is released as bundled applications, and
-the Android USB plugin is a local support crate for Station rather than a
-public SDK.
+Nebulus is published as a Cargo package for source installation and reuse, and
+is also distributed as ready-to-run GitHub Release artifacts. Its versioned
+path dependencies resolve to the corresponding crates.io versions when Cargo
+packages it. `openipc-rs-desktop` and `tauri-plugin-openipc-usb` remain
+`publish = false` because they are local parts of the older Station
+implementation.
 
 ## Desktop Releases
 
-Tauri desktop bundles are uploaded to the GitHub Release for each `v*` tag.
-The workflow uses Tauri's asset naming pattern:
+Nebulus desktop builds are uploaded to the GitHub Release for each `v*` tag.
+Artifacts have explicit operating-system and architecture names:
 
 ```text
-openipc-rs-station-[platform]-[arch]-[version].[ext]
+nebulus-[platform]-[architecture]-[version].[ext]
 ```
 
 Build targets:
@@ -201,24 +205,23 @@ Build targets:
 | `windows-x64`         | `windows-2025`     | `x86_64-pc-windows-msvc`    |
 | `windows-arm64`       | `windows-11-arm`   | `aarch64-pc-windows-msvc`   |
 
-Linux releases are built on Ubuntu runners and emit the Linux bundle formats
-enabled by Tauri, such as AppImage, `.deb`, and `.rpm`; they are not separate
-per-distro builds.
+Linux releases are built on Ubuntu runners and packaged as `.tar.gz` archives;
+they are not separate per-distribution builds.
 
-macOS bundles are ad-hoc signed with `signingIdentity = "-"`. Windows and Linux
-bundles are not code-signed. Users may see operating-system warnings until
-platform signing and macOS notarization are configured.
+macOS Nebulus `.app` bundles are ad-hoc signed. Windows and Linux archives are
+not code-signed. Users may see operating-system warnings until platform signing
+and macOS notarization are configured.
 
-## Station Web App
+## Nebulus Web App
 
-The browser/WebUSB OpenIPC Station app is built from `apps/openipc-station`.
-Its production build includes the generated Rust/WASM package:
+The hosted browser/WebUSB ground station is Nebulus. Build it with Trunk:
 
 ```sh
-cd apps/openipc-station
-bun run build
+cd apps/nebulus
+trunk build --release
 ```
 
-The deployable output is `apps/openipc-station/dist`. GitHub Actions deploys it
-to Cloudflare from normal `master` pushes and `v*` release tags; there is no
-local deploy script.
+The deployable output is `apps/nebulus/dist`. GitHub Actions deploys it to the
+separate `openipc-rs-nebulus` Cloudflare Pages project from normal `master`
+pushes and `v*` release tags. The existing `openipc-rs-station` project keeps
+serving `apps/openipc-station/dist`; neither deployment needs a local script.

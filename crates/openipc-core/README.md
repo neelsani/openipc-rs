@@ -181,6 +181,13 @@ the depacketizer waits for the next clean fragment start.
 
 ## Crate Boundaries
 
+## Logging
+
+The crate emits diagnostics through the standard [`log`](https://docs.rs/log)
+facade and never installs a logger. Applications choose the subscriber. Session
+changes are `info`, FEC recovery and rejected RTP are `debug`, failures are
+`warn`, and per-packet WFB/RTP details are `trace`.
+
 `openipc-core` intentionally has no USB device ownership. Pair it with:
 
 - `openipc-rtl88xx` for native or WebUSB Realtek adapter IO.

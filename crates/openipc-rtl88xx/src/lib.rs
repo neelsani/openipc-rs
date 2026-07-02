@@ -29,6 +29,7 @@ mod regs;
 mod rtl_data;
 mod time;
 mod tx;
+mod tx_power_defaults;
 mod types;
 mod usb_recovery;
 mod usb_transport;

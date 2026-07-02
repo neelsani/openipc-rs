@@ -120,6 +120,7 @@ impl WindowsDecoder {
     }
 
     fn replace_session(&mut self, config: CodecConfig) -> Result<(), VideoError> {
+        log::info!(target: "openipc_video::media_foundation", "configuring decoder codec={}", config.codec());
         self.ensure_supported(config.codec())?;
         if let Some(mut session) = self.session.take() {
             let _ = session.flush();
@@ -222,6 +223,7 @@ impl VideoDecoder for WindowsDecoder {
             return Ok(SubmitOutcome::WaitingForKeyframe);
         }
         if self.pending.len() >= self.options.max_frames_in_flight {
+            log::warn!(target: "openipc_video::media_foundation", "decoder backpressure; dropping access unit");
             self.stats.update(|stats| stats.backpressure_drops += 1);
             return Ok(SubmitOutcome::DroppedForBackpressure);
         }

@@ -334,6 +334,7 @@ impl WfbReceiver {
 
     /// Push one WFB forwarder packet payload.
     pub fn push_forwarder_packet(&mut self, buf: &[u8]) -> Result<Vec<WfbEvent>, WfbError> {
+        log::trace!(target: "openipc_core::wfb", "received WFB forwarder packet bytes={}", buf.len());
         match parse_forwarder_packet(buf)? {
             WfbPacket::SessionKey {
                 session_nonce,
@@ -348,6 +349,14 @@ impl WfbReceiver {
                     .map(|current| current.session_key != session.session_key)
                     .unwrap_or(true);
                 if changed {
+                    log::info!(
+                        target: "openipc_core::wfb",
+                        "accepted WFB session epoch={} channel=0x{:08x} fec={}/{}",
+                        session.epoch,
+                        session.channel_id.raw(),
+                        session.fec_k,
+                        session.fec_n
+                    );
                     self.assembler = Some(PlainAssembler::new(session.fec_k, session.fec_n)?);
                     self.session = Some(session.clone());
                     Ok(vec![WfbEvent::Session(session)])
@@ -373,11 +382,18 @@ impl WfbReceiver {
                 )
                 .map_err(|_| WfbError::DataDecryptFailed)?;
                 let assembler = self.assembler.as_mut().ok_or(WfbError::MissingSession)?;
-                Ok(assembler
+                let payloads: Vec<_> = assembler
                     .push_decrypted_fragment(data_nonce, &self.decrypt_scratch)?
                     .into_iter()
                     .map(WfbEvent::Payload)
-                    .collect())
+                    .collect();
+                log::trace!(
+                    target: "openipc_core::wfb",
+                    "processed encrypted WFB data fragment nonce={} payloads={}",
+                    data_nonce,
+                    payloads.len()
+                );
+                Ok(payloads)
             }
         }
     }
@@ -613,9 +629,21 @@ impl PlainAssembler {
                         .recover_primary(&mut block.fragments, MAX_FEC_PAYLOAD)
                     {
                         Ok(recovered) => {
+                            if recovered > 0 {
+                                log::debug!(
+                                    target: "openipc_core::fec",
+                                    "recovered missing primary WFB fragments block={} recovered={}",
+                                    block_idx,
+                                    recovered
+                                );
+                            }
                             self.recovered_packets += recovered as u64;
                         }
-                        Err(_) => {
+                        Err(error) => {
+                            log::warn!(
+                                target: "openipc_core::fec",
+                                "FEC recovery failed block={block_idx}: {error}"
+                            );
                             self.bad_packets += 1;
                             self.force_flush_block(block_idx, &mut out);
                             continue;

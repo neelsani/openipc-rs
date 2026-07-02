@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.27 - 2026-07-02
+
+### Fixes
+- Fix(ci): harden cached tools and release workflow (dfb9438)
+
+
 ## 0.1.26 - 2026-07-02
 
 ### Changes

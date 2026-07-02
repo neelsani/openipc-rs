@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.26 - 2026-07-02
+
+### Changes
+- Update ci (340633c)
+
+### Features
+- Feat: add Nebulus ground station and native video backends (36d3bea)
+- Feat: harden Nebulus ground station and receiver stack (0bd6594)
+- Feat(docs): redesign landing page around Nebulus (37c1954)
+
+### Fixes
+- Fix(nebulus): return unit from Linux TUN configuration (fb2a44a)
+
+### Performance
+- Perf: reduce receiver and video pipeline latency (77eac4a)
+
+
 ## 0.1.25 - 2026-07-01
 
 ### Features

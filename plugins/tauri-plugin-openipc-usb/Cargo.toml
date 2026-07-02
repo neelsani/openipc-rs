@@ -1,6 +1,6 @@
 [package]
 name = "tauri-plugin-openipc-usb"
-version = "0.1.25"
+version = "0.1.26"
 description = "Tauri Android USB permission bridge for OpenIPC Station"
 edition.workspace = true
 license.workspace = true

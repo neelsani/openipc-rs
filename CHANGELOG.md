@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.1.28 - 2026-07-03
+
+### Features
+- Feat(nebulus): add low-latency Android surface rendering (6265a89)
+- Feat(nebulus): provision Wintun from VPN panel
+
+Detect bundled and per-user Wintun installations, download the official signed archive with progress, verify its pinned SHA-256 and Authenticode signer, and gate only the Windows VPN bridge until installation completes. Document that adaptive-link TX remains independent of Wintun. (c3781ec)
+
+### Fixes
+- Fix(nebulus): disambiguate web library target
+
+Keep the installed executable named nebulus while naming the internal WASM and Android library nebulus_app, avoiding duplicate Cargo artifact selection in Trunk. (ecce13e)
+
+### Performance
+- Perf(nebulus): minimize receiver latency
+
+Prioritize and decouple native receive work, bound browser and decoder queues, reduce media copies and allocations, tune platform presentation and audio paths, and document the resulting low-latency behavior. Rename the installed desktop executable to nebulus and update release packaging. (a76f66f)
+
+
 ## 0.1.27 - 2026-07-02
 
 ### Fixes

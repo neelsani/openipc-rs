@@ -15,12 +15,49 @@ The receiver worker keeps four USB bulk-IN transfers posted. It parses Realtek
 aggregates, advances WFB/FEC state, depacketizes RTP, and submits complete access
 units to `openipc-video`. The UI thread does not wait on USB or codec work.
 
+Each completed transfer is returned to the endpoint immediately after WFB/RTP
+processing stops borrowing its storage. Video submission then runs before VPN,
+audio, UDP, adaptive-link, and diagnostic work. The encoded access-unit buffer
+is moved into `openipc-video`; ordinary playback does not clone the H.264/H.265
+frame. Recording is the exception because the muxer and decoder both need to
+own the encoded sample.
+
+Native adaptive-link/VPN bulk-OUT and Jaguar3 coexistence/power maintenance run
+on a bounded background radio worker below the RX thread's scheduling
+priority. A stalled transmitter can drop auxiliary packets, but it cannot hold
+the receive loop. Browser adaptive feedback similarly uses one persistent
+bounded WebUSB OUT endpoint and never awaits a normal TX completion in the RX
+future. Jaguar3 browser maintenance runs as a separately cancellable local
+task and is joined before monitor shutdown.
+
+The route manager parses the 802.11 header once before handing a matched
+forwarder payload to its WFB runtime. `openipc-video` then inspects Annex-B
+configuration and keyframe state in one allocation-free NAL pass. On macOS,
+the normal uniquely owned four-byte Annex-B buffer is converted to
+VideoToolbox length prefixes in place; unusual shared or three-byte input uses
+the general copying fallback.
+
 The decoder uses a small platform-bounded input queue. Decoded output is a
 single latest-frame slot: a newer native surface replaces an older surface that
 egui has not presented. Desktop targets upload NV12 or YUV planes to persistent
 GPU textures and perform color conversion in a shader. Android instead renders
 MediaCodec output directly into a SurfaceTexture external GLES texture, avoiding
 decoded-plane mapping and per-frame texture upload.
+
+Desktop wgpu presentation requests a non-vsynced surface with one frame of
+surface latency. The exact present mode still depends on the graphics backend
+and compositor, and tearing is possible. macOS marks render and receiver work
+as user-interactive QoS. Windows raises the receiver/render thread priority.
+Linux requests a negative nice value when permissions allow it. Android uses
+urgent-display priority for rendering, PixelPilot's `-16` receive priority,
+the fastest same-resolution display mode, a non-vsynced egui surface, and a
+MediaCodec realtime/low-latency configuration.
+
+Physical Android devices use the normal three-frame decoder bound. Nebulus
+detects the Android SDK emulator and permits twelve in-flight frames only
+there, because Goldfish's software codec advertises an eight-frame output
+delay. Emulator throughput and latency are therefore development signals, not
+representative performance measurements.
 
 ## Browser Path
 
@@ -32,18 +69,23 @@ round-trip through a WASM byte array.
 
 WebUSB and WebCodecs objects are local to the browser event loop, so the web
 build uses an async local executor rather than a native worker thread. Repaint
-requests are event-driven; Nebulus does not busy-loop while idle.
+requests are event-driven; Nebulus does not run a fixed 60 Hz timer while idle.
+The canvas requests a desynchronized, high-performance WebGL2 context without
+antialias, depth, stencil, or preserved-backbuffer work. These attributes are
+browser hints; unsupported hints are ignored.
 
 ## Queue Policy
 
 - Four USB reads stay in flight.
 - RTP reordering is disabled by default; enable it only for measured
   out-of-order delivery.
-- Decoder input is bounded per platform; overload drops input instead of growing latency.
+- Decoder input is bounded per platform. Overload discards stale work, resets
+  dependency state, and resumes at a keyframe instead of growing latency.
 - Decoded output is latest-only.
-- Runtime metrics and counters are coalesced before the UI consumes them.
-- Audio uses a short scheduling queue to absorb output-device jitter without
-  coupling video timing to audio playback.
+- Runtime metrics and counters are emitted at 20 Hz; video repaint requests are
+  immediate and independent of that throttle.
+- Native audio requests a 256-frame device buffer and caps queued PCM at 40 ms.
+  Web Audio restarts near 5 ms and trims a schedule that exceeds 40 ms.
 
 After decoder reset or overload, playback waits for codec parameter sets and a
 new H.264 IDR or H.265 random-access frame. This avoids presenting corrupted
@@ -70,6 +112,17 @@ USB completion -> Realtek parse -> WFB/FEC -> RTP depacketize
     -> decoder submit -> decoded output -> GPU presentation
 ```
 
+`USB completion to decode submit` is the video critical path. `Receive batch`
+also includes route, recording, VPN, and maintenance work that runs after video
+submission, so it should not be treated as display latency. `Decode to GPU
+upload` includes time in the latest-only app event slot plus the platform upload
+or SurfaceTexture latch.
+
+Packet-level trace targets are sampled one in 128 by Nebulus's log sink. The
+protocol counters are exact; sampling only prevents string formatting and
+stderr/Logcat output from becoming the largest latency source in Very verbose
+mode.
+
 Use **Metrics** for link quality, post-FEC loss, repair rate, bitrate, delivered
 FPS, and processing latency. Use **Diagnostics > Stage latency** to locate a
 specific receiver bottleneck. These are not glass-to-glass measurements; true
@@ -77,5 +130,9 @@ camera-to-display latency requires a transmitter timestamp or synchronized
 visual test.
 
 The legacy React/Tauri Station has an additional encoded-frame IPC boundary and
-decodes through WebCodecs in its WebView. It remains documented as an integration
-example, but Nebulus is the primary low-latency path.
+decodes through WebCodecs in its WebView. Aviateur adds a local UDP handoff,
+FFmpeg demux, decoded-frame transfer, and a small presentation queue. PixelPilot
+uses a direct MediaCodec surface on Android. Nebulus removes the former
+handoffs and uses the same direct-surface class of path as PixelPilot on
+Android, but performance claims still require the same adapter, VTX stream,
+display mode, and a synchronized glass-to-glass test.

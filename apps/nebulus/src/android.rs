@@ -173,6 +173,42 @@ pub(crate) fn install(app: AndroidApp) {
         .expect("Android app mutex poisoned") = Some(app);
 }
 
+/// Apply an Android/Linux scheduling priority to the calling native thread.
+pub(crate) fn set_current_thread_priority(priority: i32) -> Result<(), String> {
+    let app = app()?;
+    let vm = java_vm(&app)?;
+    vm.attach_current_thread(|env| {
+        let process = env.find_class(jni_str!("android/os/Process"))?;
+        env.call_static_method(
+            &process,
+            jni_str!("setThreadPriority"),
+            jni_sig!("(I)V"),
+            &[JValue::Int(priority)],
+        )?;
+        Ok(())
+    })
+    .map_err(|error: jni::errors::Error| format!("set Android thread priority failed: {error}"))
+}
+
+/// Return whether Android appears to be running in the SDK emulator.
+pub(crate) fn is_probably_emulator() -> Result<bool, String> {
+    let app = app()?;
+    let vm = java_vm(&app)?;
+    vm.attach_current_thread(|env| {
+        let raw_activity = app.activity_as_ptr() as jni::sys::jobject;
+        // SAFETY: android-activity owns this activity global reference.
+        let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&raw_activity)? };
+        env.call_method(
+            &activity,
+            jni_str!("isProbablyEmulator"),
+            jni_sig!("()Z"),
+            &[],
+        )?
+        .z()
+    })
+    .map_err(|error: jni::errors::Error| format!("detect Android emulator failed: {error}"))
+}
+
 pub(crate) fn open_key_file(context: eframe::egui::Context) -> Result<(), String> {
     *KEY_FILE_CONTEXT
         .get_or_init(|| Mutex::new(None))

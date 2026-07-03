@@ -62,15 +62,17 @@ cannot recover packets that never arrived.
 
 ## Stage Timings
 
-| Stage           | Meaning                                                                            |
-| --------------- | ---------------------------------------------------------------------------------- |
-| USB wait        | Time until a bulk transfer completes; high idle values may simply mean no traffic. |
-| Realtek parse   | Splitting the USB aggregate and interpreting RX descriptors.                       |
-| WFB/RTP         | Filtering, session crypto, FEC, route fanout, and video depacketization.           |
-| Routes          | Inspect/log/UDP/audio processing for recovered payload routes.                     |
-| Decoder submit  | Preparing and handing an access unit to the platform decoder.                      |
-| Hardware decode | Submit-to-output latency reported by `openipc-video`.                              |
-| Receive batch   | Total local work for a completed USB batch.                                        |
+| Stage                           | Meaning                                                                            |
+| ------------------------------- | ---------------------------------------------------------------------------------- |
+| USB wait                        | Time until a bulk transfer completes; high idle values may simply mean no traffic. |
+| Realtek parse                   | Splitting the USB aggregate and interpreting RX descriptors.                       |
+| WFB/RTP                         | Filtering, session crypto, FEC, route fanout, and video depacketization.           |
+| Decoder submit                  | Preparing and handing an access unit to the platform decoder.                      |
+| USB completion to decode submit | Critical receive path before auxiliary route work.                                 |
+| Hardware decode                 | Submit-to-output latency reported by `openipc-video`.                              |
+| Decode to GPU upload            | Latest-frame event wait plus platform texture upload/latch.                        |
+| Routes                          | Inspect/log/UDP/audio processing for recovered payload routes.                     |
+| Receive batch                   | All local work, including work performed after video submission.                   |
 
 The view keeps last, average, p95, maximum, and sample count. Compare latency
 with queue and drop counters: a low average can hide periodic stalls, while a
@@ -106,17 +108,17 @@ tab. The tab can filter by minimum severity and search both target and message.
 | High          | Debug and above                  | Adapter, WFB, FEC, RTP, and decoder investigation |
 | Very verbose  | Trace, Debug, Info, Warn, Error  | Register, USB transfer, and per-packet tracing    |
 
-**Very verbose** can generate thousands of records per second. The capture
-queue keeps at most 4,000 pending records and the visible app history trims
-itself at 1,000 entries. Use the target search to isolate
+Packet-level Trace records from RTP, WFB, and USB targets are sampled one in
+128 before formatting. Counters and stage metrics still account for every
+packet. The capture queue keeps at most 4,000 pending records and the visible
+app history trims itself at 1,000 entries. Use the target search to isolate
 `openipc_rtl88xx::register`, `openipc_rtl88xx::usb`, `openipc_core::wfb`,
 `openipc_core::fec`, `openipc_core::rtp`, or `openipc_video`.
 
 A useful startup trace contains device open, chip probe, firmware/EFUSE
 initialization, monitor channel setup, WFB session acceptance, codec
-configuration, keyframe acceptance, and decoder activation. Do not leave Very
-verbose enabled while measuring latency: formatting and displaying per-packet
-records is deliberately expensive.
+configuration, keyframe acceptance, and decoder activation. Normal remains the
+recommended setting for measurements; even sampled trace output adds work.
 
 The Environment view identifies target OS/architecture, renderer, USB API,
 decoder backend, codec support, acceleration status where the platform exposes

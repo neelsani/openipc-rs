@@ -12,6 +12,8 @@ pub(crate) struct AudioPlayer {
     context: AudioContext,
     gain: GainNode,
     next_start: f64,
+    decoded: Vec<f32>,
+    channel_samples: Vec<f32>,
     stats: AudioStats,
 }
 
@@ -40,6 +42,8 @@ impl AudioPlayer {
             next_start: context.current_time(),
             context,
             gain,
+            decoded: Vec::new(),
+            channel_samples: Vec::new(),
             stats: AudioStats {
                 enabled: true,
                 supported: true,
@@ -56,21 +60,22 @@ impl AudioPlayer {
             RtpHeader::parse(packet).map_err(|error| format!("invalid audio RTP: {error:?}"))?;
         let payload = header.payload(packet);
         let max_frames = (self.sample_rate as usize * 120) / 1_000;
-        let mut decoded = vec![0.0; max_frames * self.channels];
+        self.decoded.resize(max_frames * self.channels, 0.0);
         let frames = self
             .decoder
-            .decode_float(payload, &mut decoded, DecodeMode::Normal)
+            .decode_float(payload, &mut self.decoded, DecodeMode::Normal)
             .map_err(|error| format!("Opus decode failed: {error}"))?;
         let buffer = self
             .context
             .create_buffer(self.channels as u32, frames as u32, self.sample_rate as f32)
             .map_err(js_error)?;
         for channel in 0..self.channels {
-            let samples = (0..frames)
-                .map(|frame| decoded[frame * self.channels + channel])
-                .collect::<Vec<_>>();
+            self.channel_samples.clear();
+            self.channel_samples.reserve(frames);
+            self.channel_samples
+                .extend((0..frames).map(|frame| self.decoded[frame * self.channels + channel]));
             buffer
-                .copy_to_channel(&samples, channel as i32)
+                .copy_to_channel(&self.channel_samples, channel as i32)
                 .map_err(js_error)?;
         }
         let source = self.context.create_buffer_source().map_err(js_error)?;
@@ -79,8 +84,8 @@ impl AudioPlayer {
             .connect_with_audio_node(self.gain.unchecked_ref::<AudioNode>())
             .map_err(js_error)?;
         let now = self.context.current_time();
-        if self.next_start < now || self.next_start - now > 0.25 {
-            self.next_start = now + 0.01;
+        if self.next_start < now || self.next_start - now > 0.04 {
+            self.next_start = now + 0.005;
         }
         source.start_with_when(self.next_start).map_err(js_error)?;
         self.next_start += frames as f64 / self.sample_rate as f64;

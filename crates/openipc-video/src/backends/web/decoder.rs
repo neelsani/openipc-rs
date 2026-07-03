@@ -266,8 +266,8 @@ impl VideoDecoder for WebDecoder {
             self.remember_poll_error(&error);
             return Err(error);
         }
-        frame.keyframe |= CodecConfigTracker::is_keyframe(frame.codec, &frame.data)?;
-        let update = self.tracker.observe(frame.codec, &frame.data)?;
+        let (update, observed_keyframe) = self.tracker.inspect(frame.codec, &frame.data)?;
+        frame.keyframe |= observed_keyframe;
         let mut reconfigured = false;
         if let ConfigUpdate::Changed(config) = update {
             self.replace_session(config)?;

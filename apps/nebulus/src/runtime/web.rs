@@ -281,39 +281,45 @@ fn js_error(error: JsValue) -> String {
 }
 
 mod worker {
+    #[cfg(debug_assertions)]
+    use std::time::Duration;
     use std::{
         cell::{Cell, RefCell},
         collections::VecDeque,
         rc::Rc,
-        time::Duration,
     };
 
-    use futures_util::future::{select, Either};
-    use nusb::transfer::{Bulk, Completion, In, TransferError};
+    use futures_channel::oneshot;
+    use futures_util::{
+        future::{select, Either},
+        FutureExt as _,
+    };
+    use nusb::transfer::{Buffer, Bulk, Completion, In, Out, TransferError};
     use openipc_core::{
         realtek::{parse_rx_aggregate_with_kind, RxPacketType},
         AdaptiveLink, AdaptiveLinkSender, ChannelId, FecCounters, FrameLayout, PayloadRouteId,
         ReceiverRuntime, WfbKeypair, WfbTxKeypair,
     };
     use openipc_rtl88xx::{
-        ChannelWidth, ChipFamily, Jaguar3PowerTrackingState, RadioConfig, RealtekDevice,
-        RealtekTxDescriptor, RealtekTxOptions,
+        build_usb_tx_frame, ChannelWidth, ChipFamily, Jaguar3PowerTrackingState, RadioConfig,
+        RealtekDevice, RealtekTxDescriptor, RealtekTxOptions,
     };
     use openipc_video::{DecoderOptions, PlatformDecoder, VideoDecoder as _};
     use wasm_bindgen::JsValue;
-    use wasm_bindgen_futures::JsFuture;
+    use wasm_bindgen_futures::{spawn_local, JsFuture};
     use web_time::Instant;
 
     use crate::{
         model::LogLevel,
         runtime::{
             route_runtime::{configure_receiver, RouteProcessor},
-            BatchMetrics, RuntimeEvent, StartRequest,
+            BatchMetrics, MetricsThrottle, RuntimeEvent, StartRequest,
         },
     };
 
     const VIDEO_ROUTE: PayloadRouteId = PayloadRouteId::new(1);
     const RX_TRANSFERS_IN_FLIGHT: usize = 4;
+    const TX_TRANSFERS_IN_FLIGHT: usize = 8;
     const MAX_BROWSER_RECORDING_BYTES: usize = 512 * 1024 * 1024;
 
     struct BrowserRecorder {
@@ -390,13 +396,117 @@ mod worker {
         pub(super) events: Rc<RefCell<VecDeque<RuntimeEvent>>>,
         pub(super) context: eframe::egui::Context,
     }
-    const MAINTENANCE_INTERVAL_MS: u64 = 2_000;
-
     struct LinkRuntime {
         quality: AdaptiveLink,
         sender: Option<AdaptiveLinkSender>,
         last_fec: FecCounters,
         tx_options: RealtekTxOptions,
+        last_tx_queue_warning_ms: Option<u64>,
+    }
+
+    struct WebTxQueue {
+        endpoint: nusb::Endpoint<Bulk, Out>,
+        stalled: bool,
+        last_error: Option<String>,
+    }
+
+    impl WebTxQueue {
+        async fn new(device: &RealtekDevice) -> Result<Self, String> {
+            let mut endpoint = device
+                .open_bulk_out_endpoint()
+                .map_err(|error| error.to_string())?;
+            endpoint
+                .clear_halt()
+                .await
+                .map_err(|error| format!("clear bulk-OUT halt failed: {error}"))?;
+            Ok(Self {
+                endpoint,
+                stalled: false,
+                last_error: None,
+            })
+        }
+
+        fn enqueue(&mut self, frame: Vec<u8>, options: RealtekTxOptions) -> Result<bool, String> {
+            self.drain_ready();
+            if self.stalled || self.endpoint.pending() >= TX_TRANSFERS_IN_FLIGHT {
+                return Ok(false);
+            }
+            let usb_frame =
+                build_usb_tx_frame(&frame, options).map_err(|error| error.to_string())?;
+            self.endpoint.submit(Buffer::from(usb_frame));
+            Ok(true)
+        }
+
+        fn drain_ready(&mut self) {
+            while self.endpoint.pending() > 0 {
+                let Some(completion) = self.endpoint.next_complete().now_or_never() else {
+                    break;
+                };
+                if let Err(error) = completion.status {
+                    self.stalled |= error == TransferError::Stall;
+                    self.last_error = Some(format!("WebUSB bulk OUT failed: {error}"));
+                    if self.stalled {
+                        break;
+                    }
+                }
+            }
+        }
+
+        async fn service(&mut self) -> Option<String> {
+            self.drain_ready();
+            if self.stalled {
+                if let Err(error) = self.endpoint.clear_halt().await {
+                    self.last_error = Some(format!("clear WebUSB bulk-OUT halt failed: {error}"));
+                } else {
+                    self.stalled = false;
+                }
+            }
+            self.last_error.take()
+        }
+    }
+
+    struct WebMaintenance {
+        stop: Option<oneshot::Sender<()>>,
+        done: oneshot::Receiver<()>,
+    }
+
+    impl WebMaintenance {
+        fn start(device: Rc<RealtekDevice>, chip: ChipFamily) -> Option<Self> {
+            if !chip.is_jaguar3() {
+                return None;
+            }
+            let (stop, stop_receiver) = oneshot::channel();
+            let (done_sender, done) = oneshot::channel();
+            spawn_local(async move {
+                let mut stop_receiver = Box::pin(stop_receiver);
+                let mut power_tracking = Jaguar3PowerTrackingState::default();
+                loop {
+                    let timer = Box::pin(sleep_ms(2_000));
+                    match select(timer, stop_receiver).await {
+                        Either::Left(((), remaining_stop)) => {
+                            stop_receiver = remaining_stop;
+                            let _ = device.run_jaguar3_coex_keepalive_async().await;
+                            let _ = device
+                                .tick_jaguar3_power_tracking_async(&mut power_tracking)
+                                .await;
+                        }
+                        Either::Right((_stop, _timer)) => break,
+                    }
+                }
+                let _ = done_sender.send(());
+            });
+            Some(Self {
+                stop: Some(stop),
+                done,
+            })
+        }
+
+        async fn stop(mut self) {
+            if let Some(stop) = self.stop.take() {
+                let _ = stop.send(());
+            }
+            let _ = self.done.await;
+        }
     }
 
     impl LinkRuntime {
@@ -448,9 +558,11 @@ mod worker {
                 web_device.product_id()
             )
         });
-        let device = RealtekDevice::from_web_usb_device(web_device)
-            .await
-            .map_err(|error| error.to_string())?;
+        let device = Rc::new(
+            RealtekDevice::from_web_usb_device(web_device)
+                .await
+                .map_err(|error| error.to_string())?,
+        );
         let report = device
             .initialize_monitor_async(
                 RadioConfig {
@@ -502,6 +614,11 @@ mod worker {
             );
         }
         let mut link = build_link(&request, chip, receiver.video_fec_counters(), &device).await?;
+        let mut tx_queue = if link.sender.is_some() {
+            Some(WebTxQueue::new(&device).await?)
+        } else {
+            None
+        };
         let mut endpoint = device
             .open_bulk_in_endpoint()
             .map_err(|error| error.to_string())?;
@@ -512,6 +629,7 @@ mod worker {
         while endpoint.pending() < RX_TRANSFERS_IN_FLIGHT {
             endpoint.submit(endpoint.allocate(request.transfer_size));
         }
+        let maintenance = WebMaintenance::start(Rc::clone(&device), chip);
         super::emit(events, context, RuntimeEvent::Started);
         log(
             events,
@@ -522,14 +640,16 @@ mod worker {
         );
 
         let descriptor = device.rx_descriptor_kind();
-        let mut last_maintenance = 0;
-        let mut power_tracking = Jaguar3PowerTrackingState::default();
         let mut last_decode_errors = 0;
         let mut recorder: Option<BrowserRecorder> = None;
         let mut recording_armed = false;
+        let mut metrics_throttle = MetricsThrottle::new();
         while !cancel.get() {
             let usb_start = Instant::now();
             let Some(completion) = next_with_timeout(&mut endpoint).await else {
+                if let Some(metrics) = metrics_throttle.flush() {
+                    super::emit(events, context, RuntimeEvent::Batch(Box::new(metrics)));
+                }
                 update_recording(
                     &[],
                     recording_control,
@@ -539,8 +659,12 @@ mod worker {
                     events,
                     context,
                 );
-                tick_maintenance(&device, chip, &mut last_maintenance, &mut power_tracking).await;
-                tick_adaptive(&device, &mut link, now_ms(), events, context).await;
+                tick_adaptive(&mut link, tx_queue.as_mut(), now_ms(), events, context);
+                if let Some(tx_queue) = tx_queue.as_mut() {
+                    if let Some(error) = tx_queue.service().await {
+                        log(events, context, LogLevel::Warn, "adaptive", error);
+                    }
+                }
                 continue;
             };
             let usb_latency_ms = usb_start.elapsed().as_secs_f64() * 1_000.0;
@@ -589,8 +713,15 @@ mod worker {
                 }
             }
             let pipeline_start = Instant::now();
-            let batch = receiver.push_rx_packets(packets, &options);
+            let mut batch = receiver.push_rx_packets(packets, &options);
             let pipeline_latency_ms = pipeline_start.elapsed().as_secs_f64() * 1_000.0;
+
+            // Re-arm WebUSB as soon as parsing and WFB recovery no longer
+            // borrow this transfer. Browser rendering and route work must not
+            // create a gap in the USB receive queue.
+            endpoint.submit(completion.buffer);
+
+            let video_bytes = batch.frames.iter().map(|frame| frame.data.len()).sum();
             update_recording(
                 &batch.frames,
                 recording_control,
@@ -600,6 +731,37 @@ mod worker {
                 events,
                 context,
             );
+            let decode_submit_start = Instant::now();
+            for frame in std::mem::take(&mut batch.frames)
+                .into_iter()
+                .filter(|frame| request.codec_preference.accepts(frame.codec))
+            {
+                if let Err(error) = decoder.submit(frame.into()) {
+                    log(
+                        events,
+                        context,
+                        LogLevel::Warn,
+                        "decoder",
+                        format!("decode submit failed: {error}"),
+                    );
+                }
+            }
+            let decode_submit_latency_ms = decode_submit_start.elapsed().as_secs_f64() * 1_000.0;
+            if let Some(decoded) = decoder.latest_frame() {
+                let decode_latency_ms = decoder.stats().last_decode_latency_us as f64 / 1_000.0;
+                super::emit(
+                    events,
+                    context,
+                    RuntimeEvent::NativeVideo {
+                        frame: decoded,
+                        decode_latency_ms,
+                        ready_at: Instant::now(),
+                    },
+                );
+            }
+
+            let video_submit_path_ms = batch_start.elapsed().as_secs_f64() * 1_000.0;
+
             route_processor.set_audio_volume(audio_volume.get());
             let route_start = Instant::now();
             let (route_updates, route_logs, recorded_audio) =
@@ -621,69 +783,36 @@ mod worker {
             }
             link.record_fec(now, batch.fec_counters);
             let quality = link.quality.quality(now);
-
-            let decode_submit_start = Instant::now();
-            for frame in batch
-                .frames
-                .iter()
-                .filter(|frame| request.codec_preference.accepts(frame.codec))
-                .cloned()
-            {
-                if let Err(error) = decoder.submit(frame.into()) {
-                    log(
-                        events,
-                        context,
-                        LogLevel::Warn,
-                        "decoder",
-                        format!("decode submit failed: {error}"),
-                    );
-                }
-            }
-            let decode_submit_latency_ms = decode_submit_start.elapsed().as_secs_f64() * 1_000.0;
-            if let Some(decoded) = decoder.latest_frame() {
-                let decode_latency_ms = decoder.stats().last_decode_latency_us as f64 / 1_000.0;
-                super::emit(
-                    events,
-                    context,
-                    RuntimeEvent::NativeVideo {
-                        frame: decoded,
-                        decode_latency_ms,
-                    },
-                );
-            }
             let stats = decoder.stats();
-            super::emit(
-                events,
-                context,
-                RuntimeEvent::Batch(Box::new(BatchMetrics {
-                    transfers: 1,
-                    transfer_bytes: actual_len,
-                    packets: batch.counters.packets,
-                    rtp_packets: batch.counters.rtp_packets,
-                    video_frames: batch.counters.video_frames,
-                    video_bytes: batch.frames.iter().map(|frame| frame.data.len()).sum(),
-                    usb_latency_ms,
-                    parse_latency_ms,
-                    pipeline_latency_ms,
-                    route_latency_ms,
-                    decode_submit_latency_ms,
-                    batch_latency_ms: batch_start.elapsed().as_secs_f64() * 1_000.0,
-                    rssi: quality.rssi,
-                    snr: quality.snr,
-                    link_score: quality.link_score,
-                    decoder_drops: stats.waiting_drops
-                        + stats.backpressure_drops
-                        + stats.output_drops,
-                    decoder_errors: stats.decode_errors,
-                    fec: batch.fec_counters,
-                    counters: batch.counters,
-                    rtp: batch.rtp_status,
-                    reorder: batch.rtp_reorder_status,
-                    routes: route_updates,
-                    audio: route_processor.audio_stats(),
-                    ..BatchMetrics::default()
-                })),
-            );
+            if let Some(metrics) = metrics_throttle.push(BatchMetrics {
+                transfers: 1,
+                transfer_bytes: actual_len,
+                packets: batch.counters.packets,
+                rtp_packets: batch.counters.rtp_packets,
+                video_frames: batch.counters.video_frames,
+                video_bytes,
+                usb_latency_ms,
+                parse_latency_ms,
+                pipeline_latency_ms,
+                route_latency_ms,
+                decode_submit_latency_ms,
+                video_submit_path_ms,
+                batch_latency_ms: batch_start.elapsed().as_secs_f64() * 1_000.0,
+                rssi: quality.rssi,
+                snr: quality.snr,
+                link_score: quality.link_score,
+                decoder_drops: stats.waiting_drops + stats.backpressure_drops + stats.output_drops,
+                decoder_errors: stats.decode_errors,
+                fec: batch.fec_counters,
+                counters: batch.counters,
+                rtp: batch.rtp_status,
+                reorder: batch.rtp_reorder_status,
+                routes: route_updates,
+                audio: route_processor.audio_stats(),
+                ..BatchMetrics::default()
+            }) {
+                super::emit(events, context, RuntimeEvent::Batch(Box::new(metrics)));
+            }
             if stats.decode_errors > last_decode_errors {
                 last_decode_errors = stats.decode_errors;
                 log(
@@ -694,12 +823,22 @@ mod worker {
                     format!("decoder errors: {last_decode_errors}"),
                 );
             }
-            tick_maintenance(&device, chip, &mut last_maintenance, &mut power_tracking).await;
-            tick_adaptive(&device, &mut link, now, events, context).await;
-            endpoint.submit(completion.buffer);
+            tick_adaptive(&mut link, tx_queue.as_mut(), now, events, context);
+            if let Some(tx_queue) = tx_queue.as_mut() {
+                if let Some(error) = tx_queue.service().await {
+                    log(events, context, LogLevel::Warn, "adaptive", error);
+                }
+            }
         }
 
+        if let Some(metrics) = metrics_throttle.flush() {
+            super::emit(events, context, RuntimeEvent::Batch(Box::new(metrics)));
+        }
         drop(endpoint);
+        drop(tx_queue);
+        if let Some(maintenance) = maintenance {
+            maintenance.stop().await;
+        }
         finish_recording(&mut recorder, events, context);
         let _ = decoder.flush();
         device
@@ -838,6 +977,7 @@ mod worker {
                     RuntimeEvent::NativeVideo {
                         frame: decoded,
                         decode_latency_ms,
+                        ready_at: Instant::now(),
                     },
                 );
             }
@@ -1059,31 +1199,43 @@ mod worker {
                 descriptor: RealtekTxDescriptor::for_chip_family(chip),
                 ..RealtekTxOptions::default()
             },
+            last_tx_queue_warning_ms: None,
         })
     }
 
-    async fn tick_adaptive(
-        device: &RealtekDevice,
+    fn tick_adaptive(
         runtime: &mut LinkRuntime,
+        tx_queue: Option<&mut WebTxQueue>,
         now: u64,
         events: &Rc<RefCell<VecDeque<RuntimeEvent>>>,
         context: &eframe::egui::Context,
     ) {
-        let Some(sender) = runtime.sender.as_mut() else {
+        let (Some(sender), Some(tx_queue)) = (runtime.sender.as_mut(), tx_queue) else {
             return;
         };
         match sender.tick(now) {
             Ok(frames) => {
+                let mut dropped = false;
                 for frame in frames {
-                    if let Err(error) = device.send_packet_async(&frame, runtime.tx_options).await {
-                        log(
-                            events,
-                            context,
-                            LogLevel::Warn,
-                            "adaptive",
-                            error.to_string(),
-                        );
+                    match tx_queue.enqueue(frame, runtime.tx_options) {
+                        Ok(true) => {}
+                        Ok(false) => dropped = true,
+                        Err(error) => log(events, context, LogLevel::Warn, "adaptive", error),
                     }
+                }
+                if dropped
+                    && runtime
+                        .last_tx_queue_warning_ms
+                        .is_none_or(|last| now.saturating_sub(last) >= 1_000)
+                {
+                    runtime.last_tx_queue_warning_ms = Some(now);
+                    log(
+                        events,
+                        context,
+                        LogLevel::Warn,
+                        "adaptive",
+                        "WebUSB TX queue full; dropped adaptive-link feedback",
+                    );
                 }
             }
             Err(error) => log(
@@ -1094,23 +1246,6 @@ mod worker {
                 error.to_string(),
             ),
         }
-    }
-
-    async fn tick_maintenance(
-        device: &RealtekDevice,
-        chip: ChipFamily,
-        last_tick: &mut u64,
-        power_tracking: &mut Jaguar3PowerTrackingState,
-    ) {
-        let now = now_ms();
-        if !chip.is_jaguar3() || now.saturating_sub(*last_tick) < MAINTENANCE_INTERVAL_MS {
-            return;
-        }
-        *last_tick = now;
-        let _ = device.run_jaguar3_coex_keepalive_async().await;
-        let _ = device
-            .tick_jaguar3_power_tracking_async(power_tracking)
-            .await;
     }
 
     async fn next_with_timeout(endpoint: &mut nusb::Endpoint<Bulk, In>) -> Option<Completion> {

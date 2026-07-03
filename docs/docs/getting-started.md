@@ -72,7 +72,7 @@ packet loss. See [Debugging And Metrics](./debugging-metrics.md).
 ## Run Nebulus On Desktop
 
 ```sh
-cargo run -p nebulus --bin nebulus-desktop --release
+cargo run -p nebulus --bin nebulus --release
 ```
 
 Desktop Nebulus uses native `nusb`, a platform hardware decoder, and the same

@@ -3,7 +3,7 @@
 use std::{
     collections::VecDeque,
     sync::{
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicU8, AtomicUsize, Ordering},
         Mutex, Once,
     },
 };
@@ -22,6 +22,7 @@ pub(crate) struct CapturedLog {
 
 struct NebulusLogger {
     level: AtomicU8,
+    hot_trace_sequence: AtomicUsize,
     captured: Mutex<VecDeque<CapturedLog>>,
 }
 
@@ -29,6 +30,7 @@ impl NebulusLogger {
     const fn new() -> Self {
         Self {
             level: AtomicU8::new(LevelFilter::Info as u8),
+            hot_trace_sequence: AtomicUsize::new(0),
             captured: Mutex::new(VecDeque::new()),
         }
     }
@@ -42,6 +44,15 @@ impl Log for NebulusLogger {
     fn log(&self, record: &Record<'_>) {
         if !self.enabled(record.metadata()) {
             return;
+        }
+        // Packet, USB, and WFB trace sites can fire tens of thousands of times
+        // per second. Preserve periodic samples for diagnosis without letting
+        // string formatting, stderr, or the log panel preempt receive/decode.
+        if record.level() == Level::Trace && high_rate_target(record.target()) {
+            let sequence = self.hot_trace_sequence.fetch_add(1, Ordering::Relaxed);
+            if !sequence.is_multiple_of(128) {
+                return;
+            }
         }
         let message = record.args().to_string();
         platform_output(record.level(), record.target(), &message);
@@ -64,6 +75,13 @@ impl Log for NebulusLogger {
     }
 
     fn flush(&self) {}
+}
+
+fn high_rate_target(target: &str) -> bool {
+    matches!(
+        target,
+        "openipc_core::rtp" | "openipc_core::wfb" | "openipc_rtl88xx::usb"
+    )
 }
 
 static LOGGER: NebulusLogger = NebulusLogger::new();

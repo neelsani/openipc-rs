@@ -6,9 +6,12 @@ import android.database.Cursor;
 import android.graphics.SurfaceTexture;
 import android.net.Uri;
 import android.net.VpnService;
+import android.os.Build;
 import android.os.Bundle;
 import android.provider.OpenableColumns;
+import android.view.Display;
 import android.view.Surface;
+import android.view.WindowManager;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 
@@ -24,6 +27,41 @@ public final class NebulusActivity extends NativeActivity {
     private static native void nativeKeyError(String message);
     static native void nativeVpnOpened(int fd, String interfaceName);
     static native void nativeVpnError(String message);
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        requestFastestDisplayMode();
+    }
+
+    @SuppressWarnings("deprecation")
+    private void requestFastestDisplayMode() {
+        Display display = getWindowManager().getDefaultDisplay();
+        Display.Mode current = display.getMode();
+        Display.Mode fastest = current;
+        for (Display.Mode candidate : display.getSupportedModes()) {
+            boolean sameSize = candidate.getPhysicalWidth() == current.getPhysicalWidth()
+                && candidate.getPhysicalHeight() == current.getPhysicalHeight();
+            if (sameSize && candidate.getRefreshRate() > fastest.getRefreshRate()) {
+                fastest = candidate;
+            }
+        }
+        WindowManager.LayoutParams attributes = getWindow().getAttributes();
+        attributes.preferredDisplayModeId = fastest.getModeId();
+        attributes.preferredRefreshRate = fastest.getRefreshRate();
+        getWindow().setAttributes(attributes);
+    }
+
+    /** Distinguish the high-latency software emulator codec from real hardware. */
+    public boolean isProbablyEmulator() {
+        return Build.FINGERPRINT.startsWith("generic")
+            || Build.FINGERPRINT.contains("emulator")
+            || Build.MODEL.contains("Emulator")
+            || Build.MODEL.contains("sdk_gphone")
+            || Build.HARDWARE.contains("goldfish")
+            || Build.HARDWARE.contains("ranchu");
+    }
 
     /** Create the MediaCodec producer surface for a GL_TEXTURE_EXTERNAL_OES name. */
     public synchronized Surface createVideoSurface(int textureId) {

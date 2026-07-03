@@ -12,7 +12,7 @@ readme = "README.md"
 crate-type = ["cdylib", "rlib"]
 
 [[bin]]
-name = "nebulus-desktop"
+name = "nebulus"
 path = "src/main.rs"
 
 [dependencies]
@@ -30,7 +30,7 @@ serde = { version = "1", features = ["derive"] }
 web-time = "1.1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-cpal = "0.18.1"
+cpal = { version = "0.18.1", features = ["realtime"] }
 tun = { version = "0.8", features = ["async"] }
 
 [target.'cfg(all(unix, not(target_arch = "wasm32")))'.dependencies]
@@ -48,6 +48,7 @@ eframe = { version = "0.35", default-features = false, features = ["wgpu"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 eframe = { version = "0.35", default-features = false, features = ["wgpu"] }
 tokio = { version = "1", features = ["rt", "time"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 tray-icon = "0.24.1"
@@ -66,6 +67,7 @@ console_error_panic_hook = "0.1"
 eframe = { version = "0.35", default-features = false, features = ["glow"] }
 egui_glow = "0.35"
 futures-util = "0.3"
+futures-channel = "0.3"
 js-sys = "0.3"
 rfd = { version = "0.17.2", default-features = false }
 wasm-bindgen = "0.2"

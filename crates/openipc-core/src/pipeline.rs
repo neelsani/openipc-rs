@@ -114,12 +114,20 @@ impl PayloadPipeline {
             return Ok(vec![PayloadPipelineEvent::IgnoredFrame]);
         }
 
+        self.push_matched_payload(frame.payload())
+    }
+
+    /// Process the forwarder payload of an 802.11 frame already matched to this channel.
+    pub(crate) fn push_matched_payload(
+        &mut self,
+        payload: &[u8],
+    ) -> Result<Vec<PayloadPipelineEvent>, WfbError> {
         if let Some(receiver) = self.wfb_receiver.as_mut() {
-            let events = receiver.push_forwarder_packet(frame.payload())?;
+            let events = receiver.push_forwarder_packet(payload)?;
             return Ok(self.map_wfb_events(events));
         }
 
-        match parse_forwarder_packet(frame.payload())? {
+        match parse_forwarder_packet(payload)? {
             WfbPacket::Data {
                 data_nonce,
                 encrypted_payload,

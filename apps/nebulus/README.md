@@ -20,14 +20,14 @@ The source package is published at
 ## Run On Desktop
 
 ```sh
-cargo run -p nebulus --bin nebulus-desktop --release
+cargo run -p nebulus --bin nebulus --release
 ```
 
 Or install the published package from crates.io:
 
 ```sh
 cargo install nebulus
-nebulus-desktop
+nebulus
 ```
 
 On Linux, install the VA-API build dependencies listed in the
@@ -139,9 +139,18 @@ CPAL feeds native and Android audio devices; browser builds schedule PCM with
 Web Audio. Output volume can be adjusted while the receiver is running and is
 applied to every active audio route without restarting RX.
 
-Pending frame events use a one-frame replacement slot, while pending batch
-metrics are merged. Rendering stalls therefore drop old pictures instead of
-growing a delayed playback queue.
+Pending frame events use a one-frame replacement slot. USB buffers are
+re-armed before decode or route work, encoded frames move into the decoder
+without a playback copy, and diagnostic batches are emitted at 20 Hz. Rendering
+stalls therefore drop old pictures instead of growing a delayed playback queue.
+Codec configuration and keyframe detection share one allocation-free Annex-B
+scan. The macOS path also converts the normal uniquely owned Annex-B buffer to
+VideoToolbox length prefixes in place.
+
+Adaptive-link/VPN transmit and Jaguar3 maintenance do not run on the native RX
+thread. Browser adaptive feedback uses a retained bounded WebUSB OUT queue, and
+browser Jaguar3 maintenance runs as a separate local async task. Auxiliary TX
+is dropped under sustained overload rather than delaying incoming video.
 
 The default Metrics view focuses on six operational signals: best-path link
 score, unrecoverable post-FEC loss, FEC recovery percentage, encoded video
@@ -163,6 +172,14 @@ decoder image, so decoded planes are never mapped or copied through Rust. The
 browser keeps WebCodecs `VideoFrame`
 objects inside Rust/WASM and uploads them directly into a persistent WebGL
 texture; decoded pixel arrays never cross the WASM boundary.
+
+Desktop builds request non-vsynced wgpu presentation with one frame of surface
+latency. Android requests its fastest same-resolution display mode, disables
+egui vsync, raises the receive thread priority, and configures MediaCodec for
+low latency. Physical Android devices retain a three-frame decoder bound; the
+SDK emulator alone gets a larger allowance for Goldfish's delayed software
+codec. Native audio requests a 256-frame output buffer and keeps no more than
+40 ms of queued PCM.
 
 ## Included Controls
 
@@ -204,7 +221,7 @@ as RTP, and interleaves them on their media clocks. Native debug builds can
 start it automatically for profiling:
 
 ```sh
-NEBULUS_CODEC_MOCK=1 cargo run -p nebulus --bin nebulus-desktop
+NEBULUS_CODEC_MOCK=1 cargo run -p nebulus --bin nebulus
 ```
 
 Video passes through the normal RTP depacketizer and `openipc-video`; audio passes through

@@ -245,14 +245,17 @@ impl ReceiverRuntime {
         &mut self,
         packet: &[u8],
     ) -> Result<Vec<DepacketizedFrame>, crate::rtp::RtpError> {
-        self.push_video_payload(packet)
+        let mut frames = Vec::new();
+        self.push_video_payload_into(packet, &mut frames)?;
+        Ok(frames)
     }
 
-    fn push_video_payload(
+    fn push_video_payload_into(
         &mut self,
         payload: &[u8],
-    ) -> Result<Vec<DepacketizedFrame>, crate::rtp::RtpError> {
-        let mut frames = Vec::new();
+        frames: &mut Vec<DepacketizedFrame>,
+    ) -> Result<usize, crate::rtp::RtpError> {
+        let before = frames.len();
         if let Some(reorder) = self.rtp_reorder.as_mut() {
             for ordered in reorder.push(payload)? {
                 if let Some(frame) = self.rtp.push(&ordered)? {
@@ -262,7 +265,7 @@ impl ReceiverRuntime {
         } else if let Some(frame) = self.rtp.push(payload)? {
             frames.push(frame);
         }
-        Ok(frames)
+        Ok(frames.len() - before)
     }
 
     /// Add an unencrypted/plain raw-payload route.
@@ -467,9 +470,10 @@ impl ReceiverRuntime {
                     if route_ids.contains(&self.video_route_id) {
                         batch.counters.wfb_payloads += 1;
                         batch.counters.rtp_packets += 1;
-                        if let Ok(frames) = self.push_rtp_packet(&payload.data) {
-                            batch.counters.video_frames += frames.len();
-                            batch.frames.extend(frames);
+                        if let Ok(frames) =
+                            self.push_video_payload_into(&payload.data, &mut batch.frames)
+                        {
+                            batch.counters.video_frames += frames;
                         }
                     }
 

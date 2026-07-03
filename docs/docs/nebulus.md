@@ -69,14 +69,14 @@ performed by the Rust driver.
 From the repository root:
 
 ```sh
-cargo run -p nebulus --bin nebulus-desktop --release
+cargo run -p nebulus --bin nebulus --release
 ```
 
 After a release is published to crates.io, a source install is also available:
 
 ```sh
 cargo install nebulus
-nebulus-desktop
+nebulus
 ```
 
 Prebuilt packages are available from
@@ -149,7 +149,7 @@ directly from disk; WebUSB is unavailable from a `file:` origin.
 
 Run `trunk serve` without `--release` to expose the development-only
 **Codec mock** button. The same button is available from a debug native build
-started with `cargo run -p nebulus --bin nebulus-desktop`. It loops an embedded,
+started with `cargo run -p nebulus --bin nebulus`. It loops an embedded,
 pre-recorded 1920x1080 H.264 stream with 48 kHz Opus audio. Rust packetizes and
 interleaves both tracks as RTP. Video runs through the normal depacketizer and
 production decode/presentation path; audio runs through the configured

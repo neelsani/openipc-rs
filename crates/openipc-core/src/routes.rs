@@ -141,9 +141,12 @@ impl PayloadChannelPipeline {
         }
     }
 
-    fn push_80211_frame(&mut self, frame: &[u8]) -> Result<Vec<PayloadPipelineEvent>, WfbError> {
+    fn push_matched_payload(
+        &mut self,
+        payload: &[u8],
+    ) -> Result<Vec<PayloadPipelineEvent>, WfbError> {
         match self {
-            Self::Real(pipeline) => pipeline.push_80211_frame(frame),
+            Self::Real(pipeline) => pipeline.push_matched_payload(payload),
             Self::Mock(_) => Ok(vec![PayloadPipelineEvent::IgnoredFrame]),
         }
     }
@@ -364,7 +367,7 @@ impl PayloadRouteManager {
             .filter(|(key, _)| key.channel_id() == channel_id)
         {
             matched = true;
-            match runtime.pipeline.push_80211_frame(frame) {
+            match runtime.pipeline.push_matched_payload(frame_view.payload()) {
                 Ok(events) => {
                     route_events.extend(map_pipeline_events(*key, runtime.route_ids(), events));
                 }

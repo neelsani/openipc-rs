@@ -8,6 +8,8 @@ mod build_info;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod desktop_tray;
 mod logging;
+#[cfg(not(target_arch = "wasm32"))]
+mod low_latency;
 mod model;
 mod recording;
 mod runtime;
@@ -27,6 +29,8 @@ pub fn init_logging() {
 /// Build Nebulus from an eframe creation context.
 pub fn create_app(context: &eframe::CreationContext<'_>) -> NebulusApp {
     init_logging();
+    #[cfg(not(target_arch = "wasm32"))]
+    low_latency::tune_render_thread();
     NebulusApp::new(context)
 }
 
@@ -36,10 +40,17 @@ pub fn create_app(context: &eframe::CreationContext<'_>) -> NebulusApp {
 pub fn android_main(app: android_activity::AndroidApp) {
     init_logging();
     android::install(app.clone());
+    let glow_options = egui_glow::GlowConfiguration {
+        vsync: false,
+        hardware_acceleration: egui_glow::HardwareAcceleration::Required,
+        ..Default::default()
+    };
     let options = eframe::NativeOptions {
         android_app: Some(app),
         viewport: eframe::egui::ViewportBuilder::default().with_fullscreen(true),
         renderer: eframe::Renderer::Glow,
+        glow_options,
+        dithering: false,
         ..Default::default()
     };
     let _ = eframe::run_native(
@@ -64,11 +75,46 @@ pub async fn start_web() -> Result<(), wasm_bindgen::JsValue> {
         .get_element_by_id("nebulus-canvas")
         .ok_or_else(|| wasm_bindgen::JsValue::from_str("missing #nebulus-canvas"))?
         .dyn_into::<web_sys::HtmlCanvasElement>()?;
+    prime_low_latency_webgl(&canvas)?;
+    let options = eframe::WebOptions {
+        dithering: false,
+        ..Default::default()
+    };
     eframe::WebRunner::new()
         .start(
             canvas,
-            eframe::WebOptions::default(),
+            options,
             Box::new(|context| Ok(Box::new(create_app(context)))),
         )
         .await
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn prime_low_latency_webgl(
+    canvas: &web_sys::HtmlCanvasElement,
+) -> Result<(), wasm_bindgen::JsValue> {
+    let options = js_sys::Object::new();
+    for (name, value) in [
+        ("alpha", false),
+        ("antialias", false),
+        ("depth", false),
+        ("desynchronized", true),
+        ("preserveDrawingBuffer", false),
+        ("stencil", false),
+    ] {
+        js_sys::Reflect::set(
+            &options,
+            &wasm_bindgen::JsValue::from_str(name),
+            &wasm_bindgen::JsValue::from_bool(value),
+        )?;
+    }
+    js_sys::Reflect::set(
+        &options,
+        &wasm_bindgen::JsValue::from_str("powerPreference"),
+        &wasm_bindgen::JsValue::from_str("high-performance"),
+    )?;
+    // Creating the context here makes eframe reuse it when WebRunner starts.
+    // Browsers that do not implement a hint simply ignore that property.
+    let _ = canvas.get_context_with_context_options("webgl2", &options)?;
+    Ok(())
 }

@@ -52,7 +52,7 @@ cargo test -p openipc-core
 Run Nebulus on desktop:
 
 ```sh
-cargo run -p nebulus --bin nebulus-desktop --release
+cargo run -p nebulus --bin nebulus --release
 ```
 
 Run Nebulus in the browser:

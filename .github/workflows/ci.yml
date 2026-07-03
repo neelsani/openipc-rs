@@ -775,7 +775,7 @@ jobs:
           }
 
       - name: Build Nebulus
-        run: cargo build --release -p nebulus --bin nebulus-desktop --target ${{ matrix.rust_target }}
+        run: cargo build --release -p nebulus --bin nebulus --target ${{ matrix.rust_target }}
 
       - name: Package Linux release
         if: runner.os == 'Linux'
@@ -784,7 +784,7 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           NAME="nebulus-${{ matrix.label }}-$VERSION"
           mkdir -p release-assets
-          install -m 0755 "target/${{ matrix.rust_target }}/release/nebulus-desktop" "release-assets/$NAME"
+          install -m 0755 "target/${{ matrix.rust_target }}/release/nebulus" "release-assets/$NAME"
           (cd release-assets && sha256sum "$NAME" > "$NAME.sha256")
 
       - name: Package macOS release
@@ -797,7 +797,7 @@ jobs:
           ROOT="release-assets/dmg-root"
           APP="$ROOT/Nebulus.app"
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-          cp "target/${{ matrix.rust_target }}/release/nebulus-desktop" "$APP/Contents/MacOS/Nebulus"
+          cp "target/${{ matrix.rust_target }}/release/nebulus" "$APP/Contents/MacOS/Nebulus"
           cp LICENSE "$APP/Contents/Resources/LICENSE"
           cat > "$APP/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>

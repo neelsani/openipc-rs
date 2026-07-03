@@ -8,7 +8,7 @@ use std::{
 
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
-    FromSample, SampleFormat, SizedSample, Stream, StreamConfig,
+    BufferSize, FromSample, SampleFormat, SizedSample, Stream, StreamConfig, SupportedBufferSize,
 };
 use openipc_core::rtp::RtpHeader;
 use ropus::{Channels, DecodeMode, Decoder};
@@ -22,6 +22,8 @@ pub(crate) struct AudioPlayer {
     output_rate: u32,
     output_channels: usize,
     volume: f32,
+    decoded: Vec<f32>,
+    mixed: Vec<f32>,
     queue: Arc<Mutex<VecDeque<f32>>>,
     stream_errors: Arc<AtomicU64>,
     stats: AudioStats,
@@ -42,25 +44,39 @@ impl AudioPlayer {
             .map_err(|error| format!("audio output config unavailable: {error}"))?;
         let output_rate = supported.sample_rate();
         let output_channels = usize::from(supported.channels());
-        let config: StreamConfig = supported.into();
+        let mut config: StreamConfig = supported.into();
+        let requested_frames = match supported.buffer_size() {
+            SupportedBufferSize::Range { min, max } => 256_u32.clamp(*min, *max),
+            SupportedBufferSize::Unknown => 256,
+        };
+        // CPAL's `realtime` feature requests AAudio's low-latency mode. A
+        // fixed callback size also avoids oversized host defaults.
+        config.buffer_size = BufferSize::Fixed(requested_frames);
         let queue = Arc::new(Mutex::new(VecDeque::new()));
         let stream_errors = Arc::new(AtomicU64::new(0));
-        let stream = match supported.sample_format() {
-            SampleFormat::I8 => build_stream::<i8>(&device, &config, &queue, &stream_errors),
-            SampleFormat::I16 => build_stream::<i16>(&device, &config, &queue, &stream_errors),
-            SampleFormat::I24 => {
-                build_stream::<cpal::I24>(&device, &config, &queue, &stream_errors)
-            }
-            SampleFormat::I32 => build_stream::<i32>(&device, &config, &queue, &stream_errors),
-            SampleFormat::I64 => build_stream::<i64>(&device, &config, &queue, &stream_errors),
-            SampleFormat::U8 => build_stream::<u8>(&device, &config, &queue, &stream_errors),
-            SampleFormat::U16 => build_stream::<u16>(&device, &config, &queue, &stream_errors),
-            SampleFormat::U32 => build_stream::<u32>(&device, &config, &queue, &stream_errors),
-            SampleFormat::U64 => build_stream::<u64>(&device, &config, &queue, &stream_errors),
-            SampleFormat::F32 => build_stream::<f32>(&device, &config, &queue, &stream_errors),
-            SampleFormat::F64 => build_stream::<f64>(&device, &config, &queue, &stream_errors),
-            format => Err(format!("unsupported audio sample format {format}")),
-        }?;
+        let sample_format = supported.sample_format();
+        let stream = build_stream_for_format(
+            &device,
+            &config,
+            sample_format,
+            &queue,
+            &stream_errors,
+        )
+        .or_else(|low_latency_error| {
+            config.buffer_size = BufferSize::Default;
+            build_stream_for_format(
+                &device,
+                &config,
+                sample_format,
+                &queue,
+                &stream_errors,
+            )
+            .map_err(|fallback_error| {
+                format!(
+                    "low-latency audio output failed ({low_latency_error}); default buffer failed ({fallback_error})"
+                )
+            })
+        })?;
         stream
             .play()
             .map_err(|error| format!("audio output start failed: {error}"))?;
@@ -72,6 +88,8 @@ impl AudioPlayer {
             output_rate,
             output_channels,
             volume: f32::from(volume.min(100)) / 100.0,
+            decoded: Vec::new(),
+            mixed: Vec::new(),
             queue,
             stream_errors,
             stats: AudioStats {
@@ -91,31 +109,32 @@ impl AudioPlayer {
             RtpHeader::parse(packet).map_err(|error| format!("invalid audio RTP: {error:?}"))?;
         let payload = header.payload(packet);
         let max_frames = (self.source_rate as usize * 120) / 1_000;
-        let mut decoded = vec![0.0; max_frames * self.source_channels];
+        self.decoded.resize(max_frames * self.source_channels, 0.0);
         let frames = self
             .decoder
-            .decode_float(payload, &mut decoded, DecodeMode::Normal)
+            .decode_float(payload, &mut self.decoded, DecodeMode::Normal)
             .map_err(|error| format!("Opus decode failed: {error}"))?;
-        decoded.truncate(frames * self.source_channels);
-        let output = resample_and_remix(
-            &decoded,
+        self.decoded.truncate(frames * self.source_channels);
+        resample_and_remix_into(
+            &self.decoded,
             self.source_rate,
             self.source_channels,
             self.output_rate,
             self.output_channels,
             self.volume,
+            &mut self.mixed,
         );
         let mut queue = self.queue.lock().map_err(|_| "audio queue poisoned")?;
-        let max_samples = self.output_rate as usize * self.output_channels / 4;
+        let max_samples = self.output_rate as usize * self.output_channels * 40 / 1_000;
         let overflow = queue
             .len()
-            .saturating_add(output.len())
+            .saturating_add(self.mixed.len())
             .saturating_sub(max_samples);
         if overflow > 0 {
             let drop_count = overflow.min(queue.len());
             queue.drain(..drop_count);
         }
-        queue.extend(output);
+        queue.extend(self.mixed.iter().copied());
         self.stats.decoded_frames = self.stats.decoded_frames.saturating_add(1);
         self.stats.queued_ms =
             queue.len() as f64 * 1_000.0 / (self.output_rate as f64 * self.output_channels as f64);
@@ -140,6 +159,29 @@ impl AudioPlayer {
                 / (self.output_rate as f64 * self.output_channels as f64);
         }
         stats
+    }
+}
+
+fn build_stream_for_format(
+    device: &cpal::Device,
+    config: &StreamConfig,
+    format: SampleFormat,
+    queue: &Arc<Mutex<VecDeque<f32>>>,
+    errors: &Arc<AtomicU64>,
+) -> Result<Stream, String> {
+    match format {
+        SampleFormat::I8 => build_stream::<i8>(device, config, queue, errors),
+        SampleFormat::I16 => build_stream::<i16>(device, config, queue, errors),
+        SampleFormat::I24 => build_stream::<cpal::I24>(device, config, queue, errors),
+        SampleFormat::I32 => build_stream::<i32>(device, config, queue, errors),
+        SampleFormat::I64 => build_stream::<i64>(device, config, queue, errors),
+        SampleFormat::U8 => build_stream::<u8>(device, config, queue, errors),
+        SampleFormat::U16 => build_stream::<u16>(device, config, queue, errors),
+        SampleFormat::U32 => build_stream::<u32>(device, config, queue, errors),
+        SampleFormat::U64 => build_stream::<u64>(device, config, queue, errors),
+        SampleFormat::F32 => build_stream::<f32>(device, config, queue, errors),
+        SampleFormat::F64 => build_stream::<f64>(device, config, queue, errors),
+        format => Err(format!("unsupported audio sample format {format}")),
     }
 }
 
@@ -182,6 +224,7 @@ fn opus_channels(channels: usize) -> Channels {
     }
 }
 
+#[cfg(test)]
 fn resample_and_remix(
     input: &[f32],
     input_rate: u32,
@@ -190,13 +233,36 @@ fn resample_and_remix(
     output_channels: usize,
     volume: f32,
 ) -> Vec<f32> {
+    let mut output = Vec::new();
+    resample_and_remix_into(
+        input,
+        input_rate,
+        input_channels,
+        output_rate,
+        output_channels,
+        volume,
+        &mut output,
+    );
+    output
+}
+
+fn resample_and_remix_into(
+    input: &[f32],
+    input_rate: u32,
+    input_channels: usize,
+    output_rate: u32,
+    output_channels: usize,
+    volume: f32,
+    output: &mut Vec<f32>,
+) {
+    output.clear();
     let input_frames = input.len() / input_channels;
     if input_frames == 0 {
-        return Vec::new();
+        return;
     }
     let output_frames =
         (input_frames as u64 * u64::from(output_rate) / u64::from(input_rate)).max(1) as usize;
-    let mut output = Vec::with_capacity(output_frames * output_channels);
+    output.reserve(output_frames * output_channels);
     for output_frame in 0..output_frames {
         let source = output_frame as f64 * input_rate as f64 / output_rate as f64;
         let left = source.floor() as usize;
@@ -209,7 +275,6 @@ fn resample_and_remix(
             output.push((a + (b - a) * mix) * volume);
         }
     }
-    output
 }
 
 #[cfg(test)]

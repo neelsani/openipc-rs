@@ -36,6 +36,7 @@ fn queue_event(queue: &mut VecDeque<RuntimeEvent>, event: RuntimeEvent) {
         RuntimeEvent::NativeVideo {
             frame,
             decode_latency_ms,
+            ready_at,
         } => {
             if let Some(pending) = queue
                 .iter_mut()
@@ -46,11 +47,13 @@ fn queue_event(queue: &mut VecDeque<RuntimeEvent>, event: RuntimeEvent) {
                 *pending = RuntimeEvent::NativeVideo {
                     frame,
                     decode_latency_ms,
+                    ready_at,
                 };
             } else {
                 queue.push_back(RuntimeEvent::NativeVideo {
                     frame,
                     decode_latency_ms,
+                    ready_at,
                 });
             }
         }

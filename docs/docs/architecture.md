@@ -56,7 +56,9 @@ protocol details, then let each target own the APIs that make sense there.
 - Realtek TX descriptor construction for monitor-injection packets before USB
   bulk OUT.
 - CLI output as Annex-B or RTP-over-UDP.
-- Nebulus worker-thread ownership of USB and platform decoder state.
+- Nebulus RX-thread ownership of bulk-IN, protocol state, and decoder submit;
+  a lower-priority bounded radio worker owns auxiliary bulk-OUT and Jaguar3
+  maintenance.
 - Tauri commands/events for the legacy desktop station UI.
 
 ### Browser
@@ -72,6 +74,9 @@ protocol details, then let each target own the APIs that make sense there.
   same browser `VideoFrame` handles in Rust.
 - Nebulus drives `openipc_video::WebDecoder` directly and keeps WebUSB,
   protocol reconstruction, and WebCodecs orchestration in Rust/WASM.
+- Its persistent bounded WebUSB OUT queue and separately cancellable Jaguar3
+  maintenance task allow the receive future to continue while those promises
+  are pending.
 
 ### Desktop Applications
 
@@ -96,6 +101,12 @@ control in Rust, coalesces retained native decoder surfaces, uploads NV12
 planes to persistent GPU textures, and performs color conversion in a shader.
 CPU RGBA conversion is only a compatibility fallback. Direct IOSurface,
 DMA-BUF, and D3D11 imports could remove the remaining plane copy.
+
+The receive worker returns each bulk-IN buffer to `nusb` as soon as the parser
+and WFB runtime release their borrow. It then moves the completed Annex-B
+access unit into the decoder before processing audio, UDP, VPN, adaptive-link,
+or diagnostic output. This ordering keeps optional routes out of the video
+critical path.
 
 On Android MediaCodec renders into a SurfaceTexture-backed external GLES
 texture; the UI boundary carries only presentation metadata and the paint

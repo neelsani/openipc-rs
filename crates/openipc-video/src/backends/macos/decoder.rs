@@ -121,10 +121,8 @@ impl VideoDecoder for MacOsDecoder {
 
     fn submit(&mut self, mut frame: EncodedAccessUnit) -> Result<SubmitOutcome, VideoError> {
         self.stats.update(|stats| stats.access_units_received += 1);
-        let observed_keyframe = CodecConfigTracker::is_keyframe(frame.codec, &frame.data)?;
+        let (update, observed_keyframe) = self.tracker.inspect(frame.codec, &frame.data)?;
         frame.keyframe |= observed_keyframe;
-
-        let update = self.tracker.observe(frame.codec, &frame.data)?;
         let mut reconfigured = false;
         if let ConfigUpdate::Changed(config) = update {
             self.replace_session(config)?;
@@ -154,15 +152,17 @@ impl VideoDecoder for MacOsDecoder {
             return Ok(SubmitOutcome::WaitingForKeyframe);
         }
         if self.stats.snapshot().frames_in_flight >= self.options.max_frames_in_flight {
-            log::warn!(target: "openipc_video::videotoolbox", "decoder backpressure; dropping access unit");
+            log::warn!(target: "openipc_video::videotoolbox", "decoder backpressure; waiting for the next keyframe");
+            self.frames.clear();
+            self.waiting_for_keyframe = true;
             self.stats.update(|stats| stats.backpressure_drops += 1);
             return Ok(SubmitOutcome::DroppedForBackpressure);
         }
 
         self.session
-            .as_ref()
+            .as_mut()
             .expect("configured VideoToolbox session must exist")
-            .submit(&frame)?;
+            .submit(&mut frame)?;
         if frame.keyframe {
             self.waiting_for_keyframe = false;
         }

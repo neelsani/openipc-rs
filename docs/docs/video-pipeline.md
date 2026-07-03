@@ -116,6 +116,12 @@ VideoToolbox on macOS, VA-API on Linux, Media Foundation/D3D11 on Windows,
 MediaCodec on Android, or WebCodecs in the browser. H.265 profile support still
 depends on the operating system, browser, and decoder hardware.
 
+`ReceiverRuntime` appends completed access units directly into its batch. It
+does not allocate an empty temporary frame vector for each RTP packet, and
+Nebulus moves each completed frame into `openipc-video` rather than cloning its
+encoded bytes. Decoder input is bounded; once a backend cannot keep up it
+clears stale dependency state and waits for the next random-access frame.
+
 The primary render path is:
 
 ```mermaid

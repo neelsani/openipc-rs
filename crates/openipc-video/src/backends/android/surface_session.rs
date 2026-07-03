@@ -68,9 +68,13 @@ impl SurfaceMediaCodecSession {
         keyframe: bool,
     ) -> Result<SurfaceSessionSubmit, VideoError> {
         let before = self.poll()?;
+        // A very short wait avoids declaring overload during the normal handoff
+        // between MediaCodec input buffers. It is bounded well below one video
+        // frame and only blocks when every codec input slot is busy.
+        let input_wait = Duration::from_millis(2);
         let input = self
             .codec
-            .dequeue_input_buffer(Duration::ZERO)
+            .dequeue_input_buffer(input_wait)
             .map_err(|error| android_error("AMediaCodec_dequeueInputBuffer", error))?;
         let DequeuedInputBufferResult::Buffer(mut input) = input else {
             return Ok(SurfaceSessionSubmit::Backpressure(before));
@@ -87,9 +91,7 @@ impl SurfaceMediaCodecSession {
                 ),
             });
         }
-        for (destination, source) in destination.iter_mut().zip(bitstream) {
-            destination.write(*source);
-        }
+        destination[..bitstream.len()].write_copy_of_slice(bitstream);
         self.codec
             .queue_input_buffer(
                 input,

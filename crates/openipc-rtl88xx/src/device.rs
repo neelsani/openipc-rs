@@ -2,8 +2,8 @@
 use crate::tx::{build_usb_tx_frame, RealtekTxDescriptor, RealtekTxOptions};
 use nusb::descriptors::TransferType;
 #[cfg(not(target_arch = "wasm32"))]
-use nusb::transfer::{Buffer, Out, TransferError};
-use nusb::transfer::{Bulk, In};
+use nusb::transfer::{Buffer, TransferError};
+use nusb::transfer::{Bulk, In, Out};
 #[cfg(not(target_arch = "wasm32"))]
 use nusb::MaybeFuture;
 use openipc_core::realtek::{parse_rx_aggregate_with_kind, RealtekRxPacket, RxDescriptorKind};
@@ -80,6 +80,16 @@ impl RealtekDevice {
         self.interface
             .endpoint::<Bulk, In>(self.bulk_in_ep)
             .map_err(|err| DriverError::Nusb(format!("open bulk IN endpoint failed: {err}")))
+    }
+
+    /// Open the selected bulk-OUT endpoint without changing endpoint state.
+    ///
+    /// Long-running transmitters should retain this endpoint and drain
+    /// completions instead of reopening and clearing it for every packet.
+    pub fn open_bulk_out_endpoint(&self) -> Result<nusb::Endpoint<Bulk, Out>, DriverError> {
+        self.interface
+            .endpoint::<Bulk, Out>(self.bulk_out_ep)
+            .map_err(|err| DriverError::Nusb(format!("open bulk OUT endpoint failed: {err}")))
     }
 
     #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
@@ -270,10 +280,7 @@ impl RealtekDevice {
     #[cfg(not(target_arch = "wasm32"))]
     /// Open and clear the selected bulk-OUT endpoint.
     pub fn bulk_out_endpoint(&self) -> Result<nusb::Endpoint<Bulk, Out>, DriverError> {
-        let mut ep = self
-            .interface
-            .endpoint::<Bulk, Out>(self.bulk_out_ep)
-            .map_err(|err| DriverError::Nusb(format!("open bulk OUT endpoint failed: {err}")))?;
+        let mut ep = self.open_bulk_out_endpoint()?;
         ep.clear_halt()
             .wait()
             .map_err(|err| DriverError::Nusb(format!("clear halt on bulk OUT failed: {err}")))?;

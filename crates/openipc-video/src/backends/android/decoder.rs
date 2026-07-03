@@ -15,7 +15,7 @@ use super::{
     AndroidVideoFrame,
 };
 
-const STALL_RECOVERY_AFTER: Duration = Duration::from_secs(2);
+const STALL_RECOVERY_AFTER: Duration = Duration::from_millis(500);
 
 struct PendingFrame {
     timestamp: VideoTimestamp,
@@ -188,10 +188,11 @@ impl AndroidDecoder {
         if !self.backpressure_warning_emitted {
             log::warn!(
                 target: "openipc_video::mediacodec",
-                "decoder backpressure; dropping access units until MediaCodec catches up"
+                "decoder backpressure; dropping dependent access units until the next keyframe"
             );
             self.backpressure_warning_emitted = true;
         }
+        self.waiting_for_keyframe = true;
         let frames_in_flight = self.pending.len();
         self.stats.update(|stats| {
             stats.backpressure_drops += 1;
@@ -211,7 +212,7 @@ impl AndroidDecoder {
         }
         log::warn!(
             target: "openipc_video::mediacodec",
-            "MediaCodec made no output progress for two seconds; resetting decoder session"
+            "MediaCodec made no output progress for 500 ms; resetting decoder session"
         );
         self.session = None;
         self.frames.clear();
@@ -240,8 +241,8 @@ impl VideoDecoder for AndroidDecoder {
         self.stats.update(|stats| stats.access_units_received += 1);
         self.poll_output()?;
         self.recover_stalled_session();
-        frame.keyframe |= CodecConfigTracker::is_keyframe(frame.codec, &frame.data)?;
-        let update = self.tracker.observe(frame.codec, &frame.data)?;
+        let (update, observed_keyframe) = self.tracker.inspect(frame.codec, &frame.data)?;
+        frame.keyframe |= observed_keyframe;
         let mut reconfigured = false;
         if let ConfigUpdate::Changed(config) = update {
             self.replace_session(config)?;

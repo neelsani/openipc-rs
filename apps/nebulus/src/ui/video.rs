@@ -120,7 +120,7 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
                 x,
                 y,
                 HudIcon::Latency,
-                &format!("{:.0}ms", app.metrics.decode_latency_ms),
+                &format!("{:.0}ms", app.metrics.local_processing_latency_ms),
                 base_widths[3] + spacing,
             );
             x = compact_hud_item(
@@ -170,7 +170,7 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
                 x,
                 y,
                 HudIcon::Latency,
-                &format!("{:.1} ms", app.metrics.decode_latency_ms),
+                &format!("{:.1} ms", app.metrics.local_processing_latency_ms),
                 78.0,
             );
             x = hud_item(

@@ -42,7 +42,7 @@ CloseApplications=yes
 RestartApplications=no
 
 [Files]
-Source: "{#SourceDir}\nebulus-desktop.exe"; DestDir: "{app}"; DestName: "Nebulus.exe"; Flags: ignoreversion
+Source: "{#SourceDir}\nebulus.exe"; DestDir: "{app}"; DestName: "Nebulus.exe"; Flags: ignoreversion
 Source: "{#SourceDir}\wintun.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#RepoDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#RepoDir}\apps\nebulus\README.md"; DestDir: "{app}"; Flags: ignoreversion

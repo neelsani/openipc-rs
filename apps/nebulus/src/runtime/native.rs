@@ -67,21 +67,27 @@ impl Runtime {
         let audio_volume = Arc::clone(&self.audio_volume);
         let events = Arc::clone(&self.events);
         let recording = Arc::clone(&self.recording);
-        self.worker = Some(thread::spawn(move || {
-            queue(&events, RuntimeEvent::Connecting);
-            context.request_repaint();
-            if let Err(error) = super::native::worker::run(
-                request,
-                &stop,
-                &audio_volume,
-                &recording,
-                &events,
-                &context,
-            ) {
-                queue(&events, RuntimeEvent::Failed(error));
-                context.request_repaint();
-            }
-        }));
+        self.worker = Some(
+            thread::Builder::new()
+                .name("nebulus-receiver".to_owned())
+                .spawn(move || {
+                    crate::low_latency::tune_receiver_thread();
+                    queue(&events, RuntimeEvent::Connecting);
+                    context.request_repaint();
+                    if let Err(error) = super::native::worker::run(
+                        request,
+                        &stop,
+                        &audio_volume,
+                        &recording,
+                        &events,
+                        &context,
+                    ) {
+                        queue(&events, RuntimeEvent::Failed(error));
+                        context.request_repaint();
+                    }
+                })
+                .expect("spawn Nebulus receiver worker"),
+        );
     }
 
     #[cfg(debug_assertions)]
@@ -99,21 +105,27 @@ impl Runtime {
         let audio_volume = Arc::clone(&self.audio_volume);
         let events = Arc::clone(&self.events);
         let recording = Arc::clone(&self.recording);
-        self.worker = Some(thread::spawn(move || {
-            queue(&events, RuntimeEvent::Connecting);
-            context.request_repaint();
-            if let Err(error) = super::native::worker::run_codec_mock(
-                request,
-                &stop,
-                &audio_volume,
-                &recording,
-                &events,
-                &context,
-            ) {
-                queue(&events, RuntimeEvent::Failed(error));
-                context.request_repaint();
-            }
-        }));
+        self.worker = Some(
+            thread::Builder::new()
+                .name("nebulus-codec-mock".to_owned())
+                .spawn(move || {
+                    crate::low_latency::tune_receiver_thread();
+                    queue(&events, RuntimeEvent::Connecting);
+                    context.request_repaint();
+                    if let Err(error) = super::native::worker::run_codec_mock(
+                        request,
+                        &stop,
+                        &audio_volume,
+                        &recording,
+                        &events,
+                        &context,
+                    ) {
+                        queue(&events, RuntimeEvent::Failed(error));
+                        context.request_repaint();
+                    }
+                })
+                .expect("spawn Nebulus codec mock worker"),
+        );
     }
 
     pub(crate) fn stop(&mut self) {
@@ -231,7 +243,7 @@ mod worker {
         model::LogLevel,
         runtime::{
             route_runtime::{configure_receiver, RouteProcessor, VPN_ROUTE_ID},
-            BatchMetrics, RuntimeEvent, StartRequest, VpnMetrics,
+            BatchMetrics, MetricsThrottle, RuntimeEvent, StartRequest, VpnMetrics,
         },
     };
 
@@ -393,11 +405,16 @@ mod worker {
     fn decoder_options() -> DecoderOptions {
         #[cfg(target_os = "android")]
         {
-            // Goldfish advertises an eight-frame output delay. Keep enough
-            // encoded frames queued for that pipeline to produce output.
-            DecoderOptions {
-                max_frames_in_flight: 12,
-                ..DecoderOptions::default()
+            if crate::android::is_probably_emulator().unwrap_or(false) {
+                // Goldfish advertises an eight-frame output delay. This larger
+                // allowance is strictly an emulator compatibility policy; real
+                // devices retain the three-frame low-latency default.
+                DecoderOptions {
+                    max_frames_in_flight: 12,
+                    ..DecoderOptions::default()
+                }
+            } else {
+                DecoderOptions::default()
             }
         }
         #[cfg(not(target_os = "android"))]
@@ -432,6 +449,7 @@ mod worker {
                 RuntimeEvent::NativeVideo {
                     frame,
                     decode_latency_ms,
+                    ready_at: web_time::Instant::now(),
                 },
             );
         }
@@ -459,6 +477,114 @@ mod worker {
         sender: Option<AdaptiveLinkSender>,
         last_fec: FecCounters,
         tx_options: RealtekTxOptions,
+        last_tx_queue_warning_ms: Option<u64>,
+    }
+
+    enum RadioCommand {
+        Transmit {
+            frame: Vec<u8>,
+            options: RealtekTxOptions,
+        },
+    }
+
+    /// Keeps auxiliary USB OUT and Jaguar3 register work off the RX thread.
+    struct RadioWorker {
+        sender: Option<SyncSender<RadioCommand>>,
+        worker: Option<JoinHandle<()>>,
+    }
+
+    impl RadioWorker {
+        const QUEUE_CAPACITY: usize = 64;
+        const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(2);
+
+        fn start(
+            device: Arc<RealtekDevice>,
+            chip: ChipFamily,
+            transmit: bool,
+            events: &super::EventQueue,
+            context: &eframe::egui::Context,
+        ) -> Result<Option<Self>, String> {
+            if !transmit && !chip.is_jaguar3() {
+                return Ok(None);
+            }
+            let mut endpoint = transmit
+                .then(|| {
+                    device
+                        .bulk_out_endpoint()
+                        .map_err(|error| error.to_string())
+                })
+                .transpose()?;
+            let (sender, receiver) = mpsc::sync_channel(Self::QUEUE_CAPACITY);
+            let events = Arc::clone(events);
+            let context = context.clone();
+            let worker = std::thread::Builder::new()
+                .name("nebulus-radio-background".to_owned())
+                .spawn(move || {
+                    let mut power_tracking = Jaguar3PowerTrackingState::default();
+                    let mut last_maintenance = Instant::now();
+                    let mut last_tx_error_log = None;
+                    loop {
+                        let wait = if chip.is_jaguar3() {
+                            Self::MAINTENANCE_INTERVAL.saturating_sub(last_maintenance.elapsed())
+                        } else {
+                            Duration::from_secs(60)
+                        };
+                        match receiver.recv_timeout(wait) {
+                            Ok(RadioCommand::Transmit { frame, options }) => {
+                                let result = endpoint.as_mut().map_or_else(
+                                    || Err("radio TX endpoint is unavailable".to_owned()),
+                                    |endpoint| {
+                                        RealtekDevice::send_packet_on(endpoint, &frame, options)
+                                            .map(|_| ())
+                                            .map_err(|error| error.to_string())
+                                    },
+                                );
+                                if let Err(error) = result {
+                                    let now = Instant::now();
+                                    if last_tx_error_log.is_none_or(|last: Instant| {
+                                        now.duration_since(last) >= Duration::from_secs(1)
+                                    }) {
+                                        log(&events, &context, LogLevel::Warn, "radio-tx", error);
+                                        last_tx_error_log = Some(now);
+                                    }
+                                }
+                            }
+                            Err(mpsc::RecvTimeoutError::Timeout) => {}
+                            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        }
+                        if chip.is_jaguar3()
+                            && last_maintenance.elapsed() >= Self::MAINTENANCE_INTERVAL
+                        {
+                            last_maintenance = Instant::now();
+                            let _ = device.run_jaguar3_coex_keepalive();
+                            let _ = device.tick_jaguar3_power_tracking(&mut power_tracking);
+                        }
+                    }
+                })
+                .map_err(|error| format!("start radio background worker failed: {error}"))?;
+            Ok(Some(Self {
+                sender: Some(sender),
+                worker: Some(worker),
+            }))
+        }
+
+        fn enqueue(&self, frame: Vec<u8>, options: RealtekTxOptions) -> bool {
+            let Some(sender) = self.sender.as_ref() else {
+                return false;
+            };
+            sender
+                .try_send(RadioCommand::Transmit { frame, options })
+                .is_ok()
+        }
+    }
+
+    impl Drop for RadioWorker {
+        fn drop(&mut self) {
+            self.sender.take();
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+        }
     }
 
     struct TunRuntime {
@@ -513,17 +639,13 @@ mod worker {
             }
         }
 
-        fn tick(
-            &mut self,
-            now: u64,
-            endpoint: &mut nusb::Endpoint<nusb::transfer::Bulk, nusb::transfer::Out>,
-        ) {
+        fn tick(&mut self, now: u64, radio: &RadioWorker) {
             let session_due = self
                 .last_session_ms
                 .is_none_or(|last| now.saturating_sub(last) >= 1_000);
             if session_due {
                 let frame = self.transmitter.session_radio_packet(self.tx_params);
-                if RealtekDevice::send_packet_on(endpoint, &frame, self.tx_options).is_ok() {
+                if radio.enqueue(frame, self.tx_options) {
                     self.last_session_ms = Some(now);
                 } else {
                     self.metrics.errors += 1;
@@ -546,9 +668,7 @@ mod worker {
                     Ok(frames) => {
                         let mut sent = true;
                         for frame in frames {
-                            if RealtekDevice::send_packet_on(endpoint, &frame, self.tx_options)
-                                .is_err()
-                            {
+                            if !radio.enqueue(frame, self.tx_options) {
                                 sent = false;
                                 self.metrics.errors += 1;
                                 break;
@@ -674,13 +794,13 @@ mod worker {
         let mut ep_in = device
             .bulk_in_endpoint()
             .map_err(|error| error.to_string())?;
-        let mut ep_out = (link.sender.is_some() || tun.is_some())
-            .then(|| {
-                device
-                    .bulk_out_endpoint()
-                    .map_err(|error| error.to_string())
-            })
-            .transpose()?;
+        let radio = RadioWorker::start(
+            Arc::clone(&device),
+            chip,
+            link.sender.is_some() || tun.is_some(),
+            events,
+            context,
+        )?;
         while ep_in.pending() < RX_TRANSFERS_IN_FLIGHT {
             ep_in.submit(ep_in.allocate(request.transfer_size));
         }
@@ -688,14 +808,16 @@ mod worker {
         log(events, context, LogLevel::Info, "rx", "Receiver started");
 
         let descriptor = device.rx_descriptor_kind();
-        let mut last_coex_ms = 0;
-        let mut power_tracking = Jaguar3PowerTrackingState::default();
         let mut last_decode_errors = 0;
         let mut recorder: Option<EncodedRecorder> = None;
         let mut armed_path: Option<PathBuf> = None;
+        let mut metrics_throttle = MetricsThrottle::new();
         while !stop.load(Ordering::Relaxed) {
             let usb_start = Instant::now();
             let Some(completion) = ep_in.wait_next_complete(Duration::from_millis(250)) else {
+                if let Some(metrics) = metrics_throttle.flush() {
+                    send(events, context, RuntimeEvent::Batch(Box::new(metrics)));
+                }
                 update_recording(
                     &[],
                     recording_control,
@@ -705,10 +827,9 @@ mod worker {
                     events,
                     context,
                 );
-                tick_maintenance(&device, chip, &mut last_coex_ms, &mut power_tracking);
-                tick_adaptive(&mut link, ep_out.as_mut(), now_ms(), events, context);
-                if let (Some(tun), Some(endpoint)) = (tun.as_mut(), ep_out.as_mut()) {
-                    tun.tick(now_ms(), endpoint);
+                tick_adaptive(&mut link, radio.as_ref(), now_ms(), events, context);
+                if let (Some(tun), Some(radio)) = (tun.as_mut(), radio.as_ref()) {
+                    tun.tick(now_ms(), radio);
                 }
                 continue;
             };
@@ -757,15 +878,15 @@ mod worker {
                 }
             }
             let pipeline_start = Instant::now();
-            let batch = receiver.push_rx_packets(packets, &options);
+            let mut batch = receiver.push_rx_packets(packets, &options);
             let pipeline_latency_ms = pipeline_start.elapsed().as_secs_f64() * 1000.0;
-            if let Some(tun) = tun.as_mut() {
-                for payload in &batch.raw_payloads {
-                    if payload.route_id == VPN_ROUTE_ID {
-                        tun.write_downlink(&payload.data);
-                    }
-                }
-            }
+
+            // The parsed packets no longer borrow the transfer storage. Put
+            // the buffer back on the USB endpoint before any decode, audio,
+            // recording, diagnostics, or uplink work can delay capture.
+            ep_in.submit(completion.buffer);
+
+            let video_bytes = batch.frames.iter().map(|frame| frame.data.len()).sum();
             update_recording(
                 &batch.frames,
                 recording_control,
@@ -775,6 +896,41 @@ mod worker {
                 events,
                 context,
             );
+
+            // Move access-unit ownership into the decoder. The previous
+            // iter().cloned() path copied every encoded video frame even when
+            // recording was disabled.
+            let decode_submit_start = Instant::now();
+            for frame in std::mem::take(&mut batch.frames)
+                .into_iter()
+                .filter(|frame| request.codec_preference.accepts(frame.codec))
+            {
+                if let Err(error) = decoder.submit(frame.into()) {
+                    log(
+                        events,
+                        context,
+                        LogLevel::Warn,
+                        "decoder",
+                        format!("decode submit failed: {error}"),
+                    );
+                }
+            }
+            let decode_submit_latency_ms = decode_submit_start.elapsed().as_secs_f64() * 1000.0;
+            let video_submit_path_ms = batch_start.elapsed().as_secs_f64() * 1000.0;
+            if let Some(decoded) = decoder.latest_frame() {
+                presenter.submit(
+                    decoded,
+                    decoder.stats().last_decode_latency_us as f64 / 1_000.0,
+                );
+            }
+
+            if let Some(tun) = tun.as_mut() {
+                for payload in &batch.raw_payloads {
+                    if payload.route_id == VPN_ROUTE_ID {
+                        tun.write_downlink(&payload.data);
+                    }
+                }
+            }
             route_processor.set_audio_volume(audio_volume.load(Ordering::Relaxed));
             let route_start = Instant::now();
             let (route_updates, route_logs, recorded_audio) =
@@ -796,65 +952,38 @@ mod worker {
             }
             link.record_fec(now, batch.fec_counters);
             let quality = link.quality.quality(now);
-            let decode_submit_start = Instant::now();
-            for frame in batch
-                .frames
-                .iter()
-                .filter(|frame| request.codec_preference.accepts(frame.codec))
-                .cloned()
-            {
-                if let Err(error) = decoder.submit(frame.into()) {
-                    log(
-                        events,
-                        context,
-                        LogLevel::Warn,
-                        "decoder",
-                        format!("decode submit failed: {error}"),
-                    );
-                }
-            }
-            let decode_submit_latency_ms = decode_submit_start.elapsed().as_secs_f64() * 1000.0;
-            if let Some(decoded) = decoder.latest_frame() {
-                presenter.submit(
-                    decoded,
-                    decoder.stats().last_decode_latency_us as f64 / 1_000.0,
-                );
-            }
             let stats = decoder.stats();
-            send(
-                events,
-                context,
-                RuntimeEvent::Batch(Box::new(BatchMetrics {
-                    transfers: 1,
-                    transfer_bytes: actual_len,
-                    packets: batch.counters.packets,
-                    rtp_packets: batch.counters.rtp_packets,
-                    video_frames: batch.counters.video_frames,
-                    video_bytes: batch.frames.iter().map(|frame| frame.data.len()).sum(),
-                    usb_latency_ms,
-                    parse_latency_ms,
-                    pipeline_latency_ms,
-                    route_latency_ms,
-                    decode_submit_latency_ms,
-                    batch_latency_ms: batch_start.elapsed().as_secs_f64() * 1000.0,
-                    rssi: quality.rssi,
-                    snr: quality.snr,
-                    link_score: quality.link_score,
-                    decoder_drops: stats.waiting_drops
-                        + stats.backpressure_drops
-                        + stats.output_drops,
-                    decoder_errors: stats.decode_errors,
-                    fec: batch.fec_counters,
-                    counters: batch.counters,
-                    rtp: batch.rtp_status,
-                    reorder: batch.rtp_reorder_status,
-                    routes: route_updates,
-                    audio: route_processor.audio_stats(),
-                    vpn: tun
-                        .as_ref()
-                        .map_or_else(VpnMetrics::default, |tun| tun.metrics.clone()),
-                })),
-            );
+            if let Some(metrics) = metrics_throttle.push(BatchMetrics {
+                transfers: 1,
+                transfer_bytes: actual_len,
+                packets: batch.counters.packets,
+                rtp_packets: batch.counters.rtp_packets,
+                video_frames: batch.counters.video_frames,
+                video_bytes,
+                usb_latency_ms,
+                parse_latency_ms,
+                pipeline_latency_ms,
+                route_latency_ms,
+                decode_submit_latency_ms,
+                video_submit_path_ms,
+                batch_latency_ms: batch_start.elapsed().as_secs_f64() * 1000.0,
+                rssi: quality.rssi,
+                snr: quality.snr,
+                link_score: quality.link_score,
+                decoder_drops: stats.waiting_drops + stats.backpressure_drops + stats.output_drops,
+                decoder_errors: stats.decode_errors,
+                fec: batch.fec_counters,
+                counters: batch.counters,
+                rtp: batch.rtp_status,
+                reorder: batch.rtp_reorder_status,
+                routes: route_updates,
+                audio: route_processor.audio_stats(),
+                vpn: tun
+                    .as_ref()
+                    .map_or_else(VpnMetrics::default, |tun| tun.metrics.clone()),
+            }) {
+                send(events, context, RuntimeEvent::Batch(Box::new(metrics)));
+            }
             if stats.decode_errors > last_decode_errors {
                 last_decode_errors = stats.decode_errors;
                 log(
@@ -865,16 +994,17 @@ mod worker {
                     format!("decoder errors: {last_decode_errors}"),
                 );
             }
-            tick_maintenance(&device, chip, &mut last_coex_ms, &mut power_tracking);
-            tick_adaptive(&mut link, ep_out.as_mut(), now, events, context);
-            if let (Some(tun), Some(endpoint)) = (tun.as_mut(), ep_out.as_mut()) {
-                tun.tick(now, endpoint);
+            tick_adaptive(&mut link, radio.as_ref(), now, events, context);
+            if let (Some(tun), Some(radio)) = (tun.as_mut(), radio.as_ref()) {
+                tun.tick(now, radio);
             }
-            ep_in.submit(completion.buffer);
         }
 
+        if let Some(metrics) = metrics_throttle.flush() {
+            send(events, context, RuntimeEvent::Batch(Box::new(metrics)));
+        }
         drop(ep_in);
-        drop(ep_out);
+        drop(radio);
         finish_recording(&mut recorder, events, context);
         let _ = decoder.flush();
         drop(presenter);
@@ -1068,6 +1198,10 @@ mod worker {
             finish_recording(recorder, events, context);
         }
 
+        if armed_path.is_none() && recorder.is_none() {
+            return;
+        }
+
         for frame in frames {
             if recorder.is_none() && frame.is_keyframe {
                 let Some(path) = armed_path.take() else {
@@ -1215,33 +1349,41 @@ mod worker {
                 descriptor: RealtekTxDescriptor::for_chip_family(chip),
                 ..RealtekTxOptions::default()
             },
+            last_tx_queue_warning_ms: None,
         })
     }
 
     fn tick_adaptive(
         runtime: &mut LinkRuntime,
-        ep_out: Option<&mut nusb::Endpoint<nusb::transfer::Bulk, nusb::transfer::Out>>,
+        radio: Option<&RadioWorker>,
         now: u64,
         events: &super::EventQueue,
         context: &eframe::egui::Context,
     ) {
-        let (Some(sender), Some(ep_out)) = (runtime.sender.as_mut(), ep_out) else {
+        let (Some(sender), Some(radio)) = (runtime.sender.as_mut(), radio) else {
             return;
         };
         match sender.tick(now) {
             Ok(frames) => {
+                let mut dropped = false;
                 for frame in frames {
-                    if let Err(error) =
-                        RealtekDevice::send_packet_on(ep_out, &frame, runtime.tx_options)
-                    {
-                        log(
-                            events,
-                            context,
-                            LogLevel::Warn,
-                            "adaptive",
-                            error.to_string(),
-                        );
+                    if !radio.enqueue(frame, runtime.tx_options) {
+                        dropped = true;
                     }
+                }
+                if dropped
+                    && runtime
+                        .last_tx_queue_warning_ms
+                        .is_none_or(|last| now.saturating_sub(last) >= 1_000)
+                {
+                    runtime.last_tx_queue_warning_ms = Some(now);
+                    log(
+                        events,
+                        context,
+                        LogLevel::Warn,
+                        "adaptive",
+                        "radio TX queue full; dropped adaptive-link feedback",
+                    );
                 }
             }
             Err(error) => log(
@@ -1252,21 +1394,6 @@ mod worker {
                 error.to_string(),
             ),
         }
-    }
-
-    fn tick_maintenance(
-        device: &RealtekDevice,
-        chip: ChipFamily,
-        last_coex_ms: &mut u64,
-        power_tracking: &mut Jaguar3PowerTrackingState,
-    ) {
-        let now = now_ms();
-        if !chip.is_jaguar3() || now.saturating_sub(*last_coex_ms) < 2_000 {
-            return;
-        }
-        *last_coex_ms = now;
-        let _ = device.run_jaguar3_coex_keepalive();
-        let _ = device.tick_jaguar3_power_tracking(power_tracking);
     }
 
     fn channel_width(width: u16) -> Result<ChannelWidth, String> {

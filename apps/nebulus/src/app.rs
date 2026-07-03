@@ -294,6 +294,7 @@ impl NebulusApp {
                 RuntimeEvent::NativeVideo {
                     frame,
                     decode_latency_ms,
+                    ready_at,
                 } => {
                     let dimensions = frame.dimensions();
                     let uploaded = self
@@ -328,6 +329,13 @@ impl NebulusApp {
                             "Direct WebCodecs/WebGL frame upload failed",
                         );
                     }
+                    let presentation_queue_latency_ms = ready_at.elapsed().as_secs_f64() * 1_000.0;
+                    self.metrics.presentation_queue_latency_ms = presentation_queue_latency_ms;
+                    self.metrics.local_processing_latency_ms = self.metrics.video_submit_path_ms
+                        + self.metrics.decode_latency_ms
+                        + presentation_queue_latency_ms;
+                    self.diagnostics
+                        .observe("Decode to GPU upload", presentation_queue_latency_ms);
                 }
                 RuntimeEvent::Log {
                     level,
@@ -566,8 +574,10 @@ impl NebulusApp {
         self.metrics.usb_latency_ms = batch.usb_latency_ms;
         self.metrics.pipeline_latency_ms = batch.pipeline_latency_ms;
         self.metrics.batch_latency_ms = batch.batch_latency_ms;
-        self.metrics.local_processing_latency_ms =
-            batch.batch_latency_ms + self.metrics.decode_latency_ms;
+        self.metrics.video_submit_path_ms = batch.video_submit_path_ms;
+        self.metrics.local_processing_latency_ms = batch.video_submit_path_ms
+            + self.metrics.decode_latency_ms
+            + self.metrics.presentation_queue_latency_ms;
         accumulate_counters(&mut self.diagnostics.counters, batch.counters);
         self.diagnostics.rtp = batch.rtp;
         self.diagnostics.reorder = batch.reorder;
@@ -579,6 +589,10 @@ impl NebulusApp {
         self.diagnostics.observe("Routes", batch.route_latency_ms);
         self.diagnostics
             .observe("Decode submit", batch.decode_submit_latency_ms);
+        self.diagnostics.observe(
+            "USB completion to decode submit",
+            batch.video_submit_path_ms,
+        );
         self.diagnostics
             .observe("Receive batch", batch.batch_latency_ms);
         self.vpn.active = batch.vpn.active;
@@ -626,8 +640,9 @@ impl NebulusApp {
     fn record_presented_frame(&mut self, dimensions: [u32; 2], decode_latency_ms: f64) {
         self.metrics.resolution = Some(dimensions);
         self.metrics.decode_latency_ms = decode_latency_ms;
-        self.metrics.local_processing_latency_ms =
-            self.metrics.batch_latency_ms + decode_latency_ms;
+        self.metrics.local_processing_latency_ms = self.metrics.video_submit_path_ms
+            + decode_latency_ms
+            + self.metrics.presentation_queue_latency_ms;
         self.diagnostics
             .observe("Hardware decode", decode_latency_ms);
         self.metrics.decoded_frames += 1;
@@ -821,9 +836,9 @@ impl eframe::App for NebulusApp {
             self.process_tray(context);
             self.process_events(context);
         }
-        if self.state == ReceiverState::Receiving {
-            context.request_repaint_after(std::time::Duration::from_millis(16));
-        }
+        // Video frames and coalesced runtime events request repaints directly.
+        // A fixed 60 Hz wakeup wastes CPU/GPU time and competes with decode on
+        // mobile devices when no new frame is ready.
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

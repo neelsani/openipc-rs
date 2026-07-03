@@ -94,9 +94,31 @@ impl VideoToolboxSession {
         })
     }
 
-    pub(crate) fn submit(&self, frame: &EncodedAccessUnit) -> Result<(), VideoError> {
-        let data = annex_b::to_length_prefixed(&frame.data)?;
-        let sample = ffi::sample_buffer(&data, &self.format, frame.timestamp)?;
+    pub(crate) fn submit(&self, frame: &mut EncodedAccessUnit) -> Result<(), VideoError> {
+        let source = std::mem::take(&mut frame.data);
+        let mut in_place = None;
+        match source.try_into_mut() {
+            Ok(mut data) => {
+                if annex_b::to_length_prefixed_in_place(&mut data)? {
+                    in_place = Some(data);
+                } else {
+                    frame.data = data.freeze();
+                }
+            }
+            Err(data) => frame.data = data,
+        }
+        let converted = in_place
+            .is_none()
+            .then(|| annex_b::to_length_prefixed(&frame.data))
+            .transpose()?;
+        let data =
+            in_place
+                .as_deref()
+                .or(converted.as_deref())
+                .ok_or(VideoError::InvalidAnnexB(
+                    "access unit contains no NAL data",
+                ))?;
+        let sample = ffi::sample_buffer(data, &self.format, frame.timestamp)?;
         self.callback.submitted(frame.timestamp);
         // Asynchronous decode without temporal processing minimizes latency.
         // The 1x-real-time flag is intentionally omitted because it permits a

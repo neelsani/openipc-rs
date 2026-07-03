@@ -96,9 +96,12 @@ impl MediaCodecSession {
         keyframe: bool,
     ) -> Result<SessionSubmit, VideoError> {
         let before = self.poll()?;
+        // A very short wait avoids a false backpressure event while MediaCodec
+        // returns an input slot, without permitting an encoded queue to grow.
+        let input_wait = Duration::from_millis(2);
         let input = self
             .codec
-            .dequeue_input_buffer(Duration::ZERO)
+            .dequeue_input_buffer(input_wait)
             .map_err(|error| android_error("AMediaCodec_dequeueInputBuffer", error))?;
         let DequeuedInputBufferResult::Buffer(mut input) = input else {
             return Ok(SessionSubmit::Backpressure(before));
@@ -115,9 +118,7 @@ impl MediaCodecSession {
                 ),
             });
         }
-        for (destination, source) in destination.iter_mut().zip(bitstream) {
-            destination.write(*source);
-        }
+        destination[..bitstream.len()].write_copy_of_slice(bitstream);
         self.codec
             .queue_input_buffer(
                 input,
@@ -200,6 +201,8 @@ pub(super) fn media_format(
     format.set_i32("max-input-size", maximum_input_size(stream));
     if low_latency {
         format.set_i32("low-latency", 1);
+        // Android defines zero as realtime priority for codec components.
+        format.set_i32("priority", 0);
     }
     match config {
         CodecConfig::H264(config) => {

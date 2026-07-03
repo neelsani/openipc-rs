@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use openipc_core::rtp::{RTP_PAYLOAD_TYPE_H264, RTP_PAYLOAD_TYPE_OPUS};
 
-pub(crate) const MOCK_FPS: u32 = 60;
+pub(crate) const MOCK_FPS: u32 = 240;
 
 const CLOCK_RATE: u32 = 90_000;
 const AUDIO_CLOCK_RATE: u32 = 48_000;

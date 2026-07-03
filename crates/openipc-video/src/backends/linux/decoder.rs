@@ -194,9 +194,8 @@ impl VideoDecoder for LinuxDecoder {
 
     fn submit(&mut self, mut frame: EncodedAccessUnit) -> Result<SubmitOutcome, VideoError> {
         self.stats.update(|stats| stats.access_units_received += 1);
-        frame.keyframe |= CodecConfigTracker::is_keyframe(frame.codec, &frame.data)?;
-
-        let update = self.tracker.observe(frame.codec, &frame.data)?;
+        let (update, observed_keyframe) = self.tracker.inspect(frame.codec, &frame.data)?;
+        frame.keyframe |= observed_keyframe;
         let mut reconfigured = false;
         if let ConfigUpdate::Changed(config) = update {
             self.replace_session(config)?;
@@ -226,8 +225,8 @@ impl VideoDecoder for LinuxDecoder {
             return Ok(SubmitOutcome::WaitingForKeyframe);
         }
         if self.pending.len() >= self.options.max_frames_in_flight {
-            log::warn!(target: "openipc_video::vaapi", "decoder backpressure; dropping access unit");
-            self.stats.update(|stats| stats.backpressure_drops += 1);
+            log::warn!(target: "openipc_video::vaapi", "decoder backpressure; flushing and waiting for the next keyframe");
+            self.recover_from_backpressure();
             return Ok(SubmitOutcome::DroppedForBackpressure);
         }
 

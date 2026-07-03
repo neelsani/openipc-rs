@@ -1,4 +1,6 @@
 use openipc_core::{FecCounters, ReceiverBatchCounters, RtpDepacketizerStatus, RtpReorderStatus};
+use std::time::Duration;
+use web_time::Instant;
 
 use crate::{
     model::LogLevel,
@@ -165,6 +167,7 @@ pub(crate) struct BatchMetrics {
     pub(crate) pipeline_latency_ms: f64,
     pub(crate) route_latency_ms: f64,
     pub(crate) decode_submit_latency_ms: f64,
+    pub(crate) video_submit_path_ms: f64,
     pub(crate) batch_latency_ms: f64,
     pub(crate) rssi: [i32; 2],
     pub(crate) snr: [i32; 2],
@@ -193,6 +196,7 @@ impl BatchMetrics {
         self.pipeline_latency_ms = newer.pipeline_latency_ms;
         self.route_latency_ms = newer.route_latency_ms;
         self.decode_submit_latency_ms = newer.decode_submit_latency_ms;
+        self.video_submit_path_ms = newer.video_submit_path_ms;
         self.batch_latency_ms = newer.batch_latency_ms;
         self.rssi = newer.rssi;
         self.snr = newer.snr;
@@ -222,6 +226,49 @@ impl BatchMetrics {
     }
 }
 
+/// Coalesces high-rate receiver statistics into a UI-friendly cadence.
+///
+/// Video presentation is never throttled. Only diagnostics use this path, so
+/// USB completion rates cannot force an egui redraw for every transfer.
+pub(crate) struct MetricsThrottle {
+    pending: Option<BatchMetrics>,
+    last_emit: Instant,
+    interval: Duration,
+}
+
+impl MetricsThrottle {
+    pub(crate) fn new() -> Self {
+        Self {
+            pending: None,
+            last_emit: Instant::now(),
+            interval: Duration::from_millis(50),
+        }
+    }
+
+    pub(crate) fn push(&mut self, metrics: BatchMetrics) -> Option<BatchMetrics> {
+        if let Some(pending) = self.pending.as_mut() {
+            pending.merge(metrics);
+        } else {
+            self.pending = Some(metrics);
+        }
+        (self.last_emit.elapsed() >= self.interval)
+            .then(|| self.take())
+            .flatten()
+    }
+
+    pub(crate) fn flush(&mut self) -> Option<BatchMetrics> {
+        self.take()
+    }
+
+    fn take(&mut self) -> Option<BatchMetrics> {
+        let pending = self.pending.take();
+        if pending.is_some() {
+            self.last_emit = Instant::now();
+        }
+        pending
+    }
+}
+
 fn merge_counters(current: &mut ReceiverBatchCounters, newer: ReceiverBatchCounters) {
     current.packets = current.packets.saturating_add(newer.packets);
     current.accepted_packets = current
@@ -247,6 +294,38 @@ fn merge_counters(current: &mut ReceiverBatchCounters, newer: ReceiverBatchCount
     current.route_errors = current.route_errors.saturating_add(newer.route_errors);
 }
 
+#[cfg(test)]
+mod metrics_throttle_tests {
+    use std::time::Duration;
+
+    use super::{BatchMetrics, MetricsThrottle};
+
+    #[test]
+    fn flush_preserves_all_coalesced_counts() {
+        let mut throttle = MetricsThrottle::new();
+        throttle.interval = Duration::from_secs(60);
+        assert!(throttle
+            .push(BatchMetrics {
+                transfers: 1,
+                packets: 2,
+                ..BatchMetrics::default()
+            })
+            .is_none());
+        assert!(throttle
+            .push(BatchMetrics {
+                transfers: 3,
+                packets: 5,
+                ..BatchMetrics::default()
+            })
+            .is_none());
+
+        let merged = throttle.flush().expect("pending metrics");
+        assert_eq!(merged.transfers, 4);
+        assert_eq!(merged.packets, 7);
+        assert!(throttle.flush().is_none());
+    }
+}
+
 /// Event sent from a target runtime to the egui application.
 #[derive(Debug)]
 pub(crate) enum RuntimeEvent {
@@ -262,6 +341,7 @@ pub(crate) enum RuntimeEvent {
     NativeVideo {
         frame: openipc_video::DecodedFrame<NativeVideoSurface>,
         decode_latency_ms: f64,
+        ready_at: Instant,
     },
     Log {
         level: LogLevel,

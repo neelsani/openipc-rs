@@ -40,36 +40,35 @@ impl Runtime {
         let events = Rc::clone(&self.events);
         let context = self.context.clone();
         spawn_local(async move {
-            let event = match nusb::list_devices().await {
-                Ok(devices) => RuntimeEvent::Devices(
-                    devices
-                        .filter(|device| {
-                            openipc_rtl88xx::is_supported_id(
-                                device.vendor_id(),
-                                device.product_id(),
-                            )
-                        })
-                        .map(|device| UsbDeviceInfo {
-                            id: format!("{:04x}:{:04x}", device.vendor_id(), device.product_id()),
-                            label: device
-                                .product_string()
-                                .or(device.manufacturer_string())
-                                .map(str::to_owned)
-                                .unwrap_or_else(|| {
-                                    format!(
-                                        "{:04x}:{:04x}",
-                                        device.vendor_id(),
-                                        device.product_id()
-                                    )
-                                }),
-                            vendor_id: device.vendor_id(),
-                            product_id: device.product_id(),
-                        })
-                        .collect(),
-                ),
-                Err(error) => {
-                    RuntimeEvent::DiscoveryFailed(format!("WebUSB discovery failed: {error}"))
-                }
+            let event = match discover_web_devices().await {
+                Ok(devices) => RuntimeEvent::Devices(devices),
+                Err(error) => RuntimeEvent::DiscoveryFailed(error),
+            };
+            emit(&events, &context, event);
+        });
+    }
+
+    pub(crate) fn authorize_device(&self) {
+        let promise = match request_device(None) {
+            Ok(promise) => promise,
+            Err(error) => {
+                emit(
+                    &self.events,
+                    &self.context,
+                    RuntimeEvent::DiscoveryFailed(js_error(error)),
+                );
+                return;
+            }
+        };
+        let events = Rc::clone(&self.events);
+        let context = self.context.clone();
+        spawn_local(async move {
+            let event = match wasm_bindgen_futures::JsFuture::from(promise).await {
+                Ok(_) => discover_web_devices()
+                    .await
+                    .map(RuntimeEvent::Devices)
+                    .unwrap_or_else(RuntimeEvent::DiscoveryFailed),
+                Err(error) => RuntimeEvent::DiscoveryFailed(js_error(error)),
             };
             emit(&events, &context, event);
         });
@@ -96,15 +95,19 @@ impl Runtime {
         // the button event so browser user-gesture requirements remain valid.
         // The requestDevice call itself must happen synchronously inside the
         // button event so the browser still considers it a user gesture.
-        let promise = match request_device(request.device_id.as_deref()) {
-            Ok(promise) => promise,
-            Err(error) => {
-                self.events
-                    .borrow_mut()
-                    .push_back(RuntimeEvent::Failed(js_error(error)));
-                context.request_repaint();
-                return;
+        let permission = if request.device_ids.is_empty() {
+            match request_device(request.primary_device_id.as_deref()) {
+                Ok(promise) => Some(promise),
+                Err(error) => {
+                    self.events
+                        .borrow_mut()
+                        .push_back(RuntimeEvent::Failed(js_error(error)));
+                    context.request_repaint();
+                    return;
+                }
             }
+        } else {
+            None
         };
         let cancel = Rc::new(Cell::new(false));
         self.cancel = Some(Rc::clone(&cancel));
@@ -124,7 +127,7 @@ impl Runtime {
                 events,
                 context,
             };
-            let result = worker::run(promise, request, route_processor, handles).await;
+            let result = worker::run(permission, request, route_processor, handles).await;
             if let Err(error) = result {
                 emit(
                     &completion_events,
@@ -258,6 +261,32 @@ impl Runtime {
     }
 }
 
+async fn discover_web_devices() -> Result<Vec<UsbDeviceInfo>, String> {
+    let devices = nusb::list_devices()
+        .await
+        .map_err(|error| format!("WebUSB discovery failed: {error}"))?;
+    Ok(devices
+        .filter(|device| openipc_rtl88xx::is_supported_id(device.vendor_id(), device.product_id()))
+        .enumerate()
+        .map(|(index, device)| UsbDeviceInfo {
+            id: web_device_info_id(&device, index),
+            label: device
+                .product_string()
+                .or(device.manufacturer_string())
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    format!("{:04x}:{:04x}", device.vendor_id(), device.product_id())
+                }),
+            vendor_id: device.vendor_id(),
+            product_id: device.product_id(),
+            location: device
+                .serial_number()
+                .map(|serial| format!("serial {serial}"))
+                .unwrap_or_else(|| format!("WebUSB device {}", index + 1)),
+        })
+        .collect())
+}
+
 fn request_device(selected: Option<&str>) -> Result<js_sys::Promise<web_sys::UsbDevice>, JsValue> {
     let filters = selected
         .and_then(parse_device_id)
@@ -284,8 +313,29 @@ fn request_device(selected: Option<&str>) -> Result<js_sys::Promise<web_sys::Usb
     Ok(usb.request_device(&options))
 }
 
+fn web_device_info_id(device: &nusb::DeviceInfo, index: usize) -> String {
+    web_device_id(
+        device.vendor_id(),
+        device.product_id(),
+        device.serial_number(),
+        index,
+    )
+}
+
+fn web_device_id(
+    vendor_id: u16,
+    product_id: u16,
+    serial_number: Option<&str>,
+    index: usize,
+) -> String {
+    serial_number.map_or_else(
+        || format!("{vendor_id:04x}:{product_id:04x}@web-{index}"),
+        |serial| format!("{vendor_id:04x}:{product_id:04x}@serial-{serial}"),
+    )
+}
+
 fn parse_device_id(value: &str) -> Option<(u16, u16)> {
-    let (vendor, product) = value.split_once(':')?;
+    let (vendor, product) = value.split('@').next()?.split_once(':')?;
     Some((
         u16::from_str_radix(vendor, 16).ok()?,
         u16::from_str_radix(product, 16).ok()?,
@@ -316,18 +366,19 @@ mod worker {
 
     use futures_channel::oneshot;
     use futures_util::{
-        future::{select, Either},
+        future::{select, select_all, Either, LocalBoxFuture},
         FutureExt as _,
     };
     use nusb::transfer::{Buffer, Bulk, Completion, In, Out, TransferError};
     use openipc_core::{
         realtek::{parse_rx_aggregate_with_kind, RxPacketType},
-        AdaptiveLink, AdaptiveLinkSender, ChannelId, FecCounters, FrameLayout, PayloadRouteId,
-        ReceiverRuntime, WfbKeypair, WfbTxKeypair,
+        AdaptiveLink, AdaptiveLinkSender, ChannelId, DiversityCombiner, DiversityDecision,
+        DiversitySourceId, FecCounters, FrameLayout, PayloadRouteId, ReceiverRuntime, WfbKeypair,
+        WfbTxKeypair,
     };
     use openipc_rtl88xx::{
-        build_usb_tx_frame, ChannelWidth, ChipFamily, Jaguar3PowerTrackingState, RadioConfig,
-        RealtekDevice, RealtekTxDescriptor, RealtekTxOptions,
+        build_usb_tx_frame, ChannelWidth, ChipFamily, DriverOptions, Jaguar3PowerTrackingState,
+        RadioConfig, RealtekDevice, RealtekTxDescriptor, RealtekTxOptions,
     };
     use openipc_video::{DecoderOptions, PlatformDecoder, VideoDecoder as _};
     use wasm_bindgen::JsValue;
@@ -338,8 +389,8 @@ mod worker {
         model::LogLevel,
         runtime::{
             route_runtime::{configure_receiver, RouteProcessor},
-            BatchMetrics, ChannelScanAccumulator, MetricsThrottle, RuntimeEvent, ScanRequest,
-            StartRequest,
+            AdapterRuntimeMetrics, BatchMetrics, ChannelScanAccumulator, MetricsThrottle,
+            RuntimeEvent, ScanRequest, StartRequest,
         },
     };
 
@@ -347,6 +398,27 @@ mod worker {
     const RX_TRANSFERS_IN_FLIGHT: usize = 4;
     const TX_TRANSFERS_IN_FLIGHT: usize = 8;
     const MAX_BROWSER_RECORDING_BYTES: usize = 512 * 1024 * 1024;
+
+    struct WebRadio {
+        source_id: u16,
+        descriptor: openipc_core::RxDescriptorKind,
+        endpoint: nusb::Endpoint<Bulk, In>,
+        consecutive_errors: u8,
+        metrics: Rc<RefCell<AdapterRuntimeMetrics>>,
+    }
+
+    type WebRadioCompletion = (WebRadio, Option<Completion>, f64);
+
+    fn wait_for_radio(radio: WebRadio) -> LocalBoxFuture<'static, WebRadioCompletion> {
+        async move {
+            let mut radio = radio;
+            let started = Instant::now();
+            let completion = next_with_timeout(&mut radio.endpoint).await;
+            let latency_ms = started.elapsed().as_secs_f64() * 1_000.0;
+            (radio, completion, latency_ms)
+        }
+        .boxed_local()
+    }
 
     pub(super) async fn scan(
         permission: js_sys::Promise<web_sys::UsbDevice>,
@@ -685,7 +757,7 @@ mod worker {
     }
 
     pub(super) async fn run(
-        permission: js_sys::Promise<web_sys::UsbDevice>,
+        permission: Option<js_sys::Promise<web_sys::UsbDevice>>,
         request: StartRequest,
         mut route_processor: RouteProcessor,
         handles: WorkerHandles,
@@ -696,39 +768,130 @@ mod worker {
         let events = &handles.events;
         let context = &handles.context;
         let recording_audio_config = route_processor.recording_audio_config();
-        let web_device = JsFuture::from(permission).await.map_err(super::js_error)?;
-        let label = web_device.product_name().unwrap_or_else(|| {
-            format!(
-                "{:04x}:{:04x}",
-                web_device.vendor_id(),
-                web_device.product_id()
-            )
-        });
-        let device = Rc::new(
-            RealtekDevice::from_web_usb_device(web_device)
-                .await
-                .map_err(|error| error.to_string())?,
-        );
-        let report = device
-            .initialize_monitor_async(
-                RadioConfig {
-                    channel: request.channel,
-                    channel_width: channel_width(request.channel_width_mhz)?,
-                    channel_offset: request.channel_offset,
-                },
-                false,
-            )
+        if let Some(permission) = permission {
+            JsFuture::from(permission).await.map_err(super::js_error)?;
+        }
+        let mut discovered = nusb::list_devices()
             .await
-            .map_err(|error| error.to_string())?;
-        let chip = report.chip.family;
-        let receiver_info = crate::runtime::ReceiverInfo::initialized(label, &device, &report);
+            .map_err(|error| format!("WebUSB discovery failed: {error}"))?
+            .filter(|info| openipc_rtl88xx::is_supported_id(info.vendor_id(), info.product_id()))
+            .enumerate()
+            .map(|(index, info)| {
+                let id = super::web_device_info_id(&info, index);
+                let label = info
+                    .product_string()
+                    .or(info.manufacturer_string())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| {
+                        format!("{:04x}:{:04x}", info.vendor_id(), info.product_id())
+                    });
+                (id, label, info)
+            })
+            .collect::<Vec<_>>();
+        if request.device_ids.is_empty() {
+            discovered.truncate(1);
+        } else {
+            let mut selected = Vec::with_capacity(request.device_ids.len());
+            for requested in &request.device_ids {
+                if let Some(index) = discovered.iter().position(|(id, _, _)| {
+                    id == requested || (!requested.contains('@') && id.starts_with(requested))
+                }) {
+                    selected.push(discovered.remove(index));
+                }
+            }
+            discovered = selected;
+        }
+        if discovered.is_empty() {
+            return Err(
+                "No selected WebUSB adapter is authorized. Use Add adapter, then select it."
+                    .to_owned(),
+            );
+        }
+
+        let radio_config = RadioConfig {
+            channel: request.channel,
+            channel_width: channel_width(request.channel_width_mhz)?,
+            channel_offset: request.channel_offset,
+        };
+        let mut devices = Vec::new();
+        let mut radios = Vec::new();
+        let mut receiver_infos = Vec::new();
+        let mut metric_handles = Vec::new();
+        let mut adapter_errors = Vec::new();
+        for (id, label, info) in discovered {
+            let opened = match info.open().await {
+                Ok(opened) => opened,
+                Err(error) => {
+                    adapter_errors.push(format!("{id}: open failed: {error}"));
+                    continue;
+                }
+            };
+            let device =
+                match RealtekDevice::from_nusb_device_async(opened, DriverOptions::default()).await
+                {
+                    Ok(device) => Rc::new(device),
+                    Err(error) => {
+                        adapter_errors.push(format!("{id}: claim failed: {error}"));
+                        continue;
+                    }
+                };
+            let report = match device.initialize_monitor_async(radio_config, false).await {
+                Ok(report) => report,
+                Err(error) => {
+                    adapter_errors.push(format!("{id}: initialization failed: {error}"));
+                    continue;
+                }
+            };
+            let source_id = u16::try_from(devices.len())
+                .map_err(|_| "too many diversity adapters selected".to_owned())?;
+            let mut endpoint = device
+                .open_bulk_in_endpoint()
+                .map_err(|error| error.to_string())?;
+            endpoint
+                .clear_halt()
+                .await
+                .map_err(|error| format!("clear {id} bulk-IN halt failed: {error}"))?;
+            while endpoint.pending() < RX_TRANSFERS_IN_FLIGHT {
+                endpoint.submit(endpoint.allocate(request.transfer_size));
+            }
+            let metrics = Rc::new(RefCell::new(AdapterRuntimeMetrics {
+                source_id,
+                device_id: id.clone(),
+                label: label.clone(),
+                online: true,
+                ..AdapterRuntimeMetrics::default()
+            }));
+            receiver_infos.push(crate::runtime::ReceiverInfo::initialized(
+                id, source_id, label, &device, &report,
+            ));
+            radios.push(WebRadio {
+                source_id,
+                descriptor: device.rx_descriptor_kind(),
+                endpoint,
+                consecutive_errors: 0,
+                metrics: Rc::clone(&metrics),
+            });
+            metric_handles.push(metrics);
+            devices.push((device, report.chip.family));
+        }
+        if devices.is_empty() {
+            return Err(format!(
+                "No WebUSB adapter could be initialized: {}",
+                adapter_errors.join("; ")
+            ));
+        }
+        for error in adapter_errors {
+            log(events, context, LogLevel::Warn, "diversity", error);
+        }
+        let device = Rc::clone(&devices[0].0);
+        let chip = devices[0].1;
         let mut decoder = PlatformDecoder::new(DecoderOptions::default())
             .map_err(|error| format!("WebCodecs decoder unavailable: {error}"))?;
         super::emit(
             events,
             context,
             RuntimeEvent::Connected {
-                receiver: receiver_info,
+                receivers: receiver_infos,
                 decoder: decoder_environment(decoder.capabilities()),
             },
         );
@@ -765,37 +928,47 @@ mod worker {
         } else {
             None
         };
-        let mut endpoint = device
-            .open_bulk_in_endpoint()
-            .map_err(|error| error.to_string())?;
-        endpoint
-            .clear_halt()
-            .await
-            .map_err(|error| format!("clear bulk-IN halt failed: {error}"))?;
-        while endpoint.pending() < RX_TRANSFERS_IN_FLIGHT {
-            endpoint.submit(endpoint.allocate(request.transfer_size));
-        }
-        let maintenance = WebMaintenance::start(Rc::clone(&device), chip);
+        let mut maintenance = devices
+            .iter()
+            .filter_map(|(device, chip)| WebMaintenance::start(Rc::clone(device), *chip))
+            .collect::<Vec<_>>();
+        let mut radio_futures = radios.into_iter().map(wait_for_radio).collect::<Vec<_>>();
         super::emit(events, context, RuntimeEvent::Started);
         log(
             events,
             context,
             LogLevel::Info,
             "rx",
-            "WebUSB receiver started",
+            format!("WebUSB receiver started with {} adapter(s)", devices.len()),
         );
 
-        let descriptor = device.rx_descriptor_kind();
         let mut last_decode_errors = 0;
-        let mut consecutive_usb_errors = 0u8;
         let mut recorder: Option<BrowserRecorder> = None;
         let mut recording_armed = false;
         let mut metrics_throttle = MetricsThrottle::new();
+        let mut diversity = DiversityCombiner::default();
+        let diversity_enabled = devices.len() > 1;
+        let mut source_quality = (0..devices.len())
+            .map(|_| AdaptiveLink::new())
+            .collect::<Vec<_>>();
         while !cancel.get() {
-            let usb_start = Instant::now();
-            let Some(completion) = next_with_timeout(&mut endpoint).await else {
+            if radio_futures.is_empty() {
+                return Err("all WebUSB receive adapters disconnected".to_owned());
+            }
+            let ((mut radio, completion, usb_latency_ms), _, remaining) =
+                select_all(radio_futures).await;
+            radio_futures = remaining;
+            let Some(completion) = completion else {
+                radio_futures.push(wait_for_radio(radio));
                 if let Some(metrics) = metrics_throttle.flush() {
-                    super::emit(events, context, RuntimeEvent::Batch(Box::new(metrics)));
+                    emit_metrics(
+                        events,
+                        context,
+                        metrics,
+                        &diversity,
+                        &metric_handles,
+                        &mut source_quality,
+                    );
                 }
                 update_recording(
                     &[],
@@ -814,71 +987,147 @@ mod worker {
                 }
                 continue;
             };
-            let usb_latency_ms = usb_start.elapsed().as_secs_f64() * 1_000.0;
             let actual_len = completion.actual_len;
             if let Err(error) = completion.status {
+                radio.metrics.borrow_mut().usb_errors += 1;
                 if error == TransferError::Disconnected {
-                    return Err("USB adapter disconnected".to_owned());
-                }
-                if error == TransferError::Stall {
-                    let _ = endpoint.clear_halt().await;
-                    consecutive_usb_errors = 0;
-                } else {
-                    consecutive_usb_errors = consecutive_usb_errors.saturating_add(1);
+                    radio.metrics.borrow_mut().online = false;
+                    log(
+                        events,
+                        context,
+                        LogLevel::Warn,
+                        "diversity",
+                        format!(
+                            "Radio {} disconnected; {}/{} WebUSB adapters remain",
+                            radio.source_id + 1,
+                            radio_futures.len(),
+                            devices.len()
+                        ),
+                    );
+                    emit_diversity_update(
+                        events,
+                        context,
+                        &diversity,
+                        &metric_handles,
+                        &mut source_quality,
+                    );
+                    continue;
                 }
                 log(
                     events,
                     context,
                     LogLevel::Warn,
                     "usb",
-                    format!("bulk IN failed: {error}"),
+                    format!("radio {} bulk IN failed: {error}", radio.source_id + 1),
                 );
-                endpoint.submit(completion.buffer);
-                if consecutive_usb_errors >= 8 {
-                    return Err(format!(
-                        "WebUSB receive failed {consecutive_usb_errors} times consecutively: {error}"
-                    ));
+                if error == TransferError::Stall {
+                    let _ = radio.endpoint.clear_halt().await;
+                    radio.consecutive_errors = 0;
+                } else {
+                    radio.consecutive_errors = radio.consecutive_errors.saturating_add(1);
+                }
+                radio.endpoint.submit(completion.buffer);
+                if radio.consecutive_errors < 8 {
+                    radio_futures.push(wait_for_radio(radio));
+                } else {
+                    radio.metrics.borrow_mut().online = false;
+                    log(
+                        events,
+                        context,
+                        LogLevel::Warn,
+                        "diversity",
+                        format!(
+                            "Radio {} stopped after repeated USB errors",
+                            radio.source_id + 1
+                        ),
+                    );
+                    emit_diversity_update(
+                        events,
+                        context,
+                        &diversity,
+                        &metric_handles,
+                        &mut source_quality,
+                    );
                 }
                 continue;
             }
-            consecutive_usb_errors = 0;
+            radio.consecutive_errors = 0;
+            {
+                let mut metrics = radio.metrics.borrow_mut();
+                metrics.transfers = metrics.transfers.saturating_add(1);
+                metrics.transfer_bytes = metrics.transfer_bytes.saturating_add(actual_len as u64);
+            }
 
             let batch_start = Instant::now();
             let parse_start = Instant::now();
-            let packets =
-                match parse_rx_aggregate_with_kind(&completion.buffer[..actual_len], descriptor) {
-                    Ok(packets) => packets,
-                    Err(error) => {
-                        log(
-                            events,
-                            context,
-                            LogLevel::Warn,
-                            "usb",
-                            format!("RX aggregate rejected: {error}"),
-                        );
-                        endpoint.submit(completion.buffer);
-                        continue;
-                    }
-                };
+            let packets = match parse_rx_aggregate_with_kind(
+                &completion.buffer[..actual_len],
+                radio.descriptor,
+            ) {
+                Ok(packets) => packets,
+                Err(error) => {
+                    log(
+                        events,
+                        context,
+                        LogLevel::Warn,
+                        "usb",
+                        format!(
+                            "radio {} RX aggregate rejected: {error}",
+                            radio.source_id + 1
+                        ),
+                    );
+                    radio.endpoint.submit(completion.buffer);
+                    radio_futures.push(wait_for_radio(radio));
+                    continue;
+                }
+            };
             let parse_latency_ms = parse_start.elapsed().as_secs_f64() * 1_000.0;
             let now = now_ms();
+            let source_index = usize::from(radio.source_id);
             for packet in &packets {
                 if !packet.attrib.crc_err
                     && !packet.attrib.icv_err
                     && packet.attrib.pkt_rpt_type == RxPacketType::NormalRx
                     && receiver.accepts_video_frame(packet.data)
                 {
-                    link.record_rx(now, packet.attrib.rssi, packet.attrib.snr);
+                    source_quality[source_index].record_rx_paths(
+                        now,
+                        packet.attrib.rssi,
+                        packet.attrib.snr,
+                    );
                 }
             }
+            let source = DiversitySourceId::new(radio.source_id);
+            let selected_packets = packets.into_iter().filter(|packet| {
+                if packet.attrib.crc_err
+                    || packet.attrib.icv_err
+                    || packet.attrib.pkt_rpt_type != RxPacketType::NormalRx
+                {
+                    return true;
+                }
+                let decision = if diversity_enabled {
+                    diversity.observe_frame(source, packet.data, FrameLayout::WithFcs)
+                } else {
+                    DiversityDecision::Passthrough
+                };
+                let is_video = openipc_core::WifiFrame::parse(packet.data, FrameLayout::WithFcs)
+                    .is_ok_and(|frame| {
+                        frame.matches_channel_id(ChannelId::new(request.channel_id))
+                    });
+                if decision != DiversityDecision::Duplicate && is_video {
+                    link.record_rx(now, packet.attrib.rssi, packet.attrib.snr);
+                }
+                decision.should_forward()
+            });
             let pipeline_start = Instant::now();
-            let mut batch = receiver.push_rx_packets(packets, &options);
+            let mut batch = receiver.push_rx_packets(selected_packets, &options);
             let pipeline_latency_ms = pipeline_start.elapsed().as_secs_f64() * 1_000.0;
 
             // Re-arm WebUSB as soon as parsing and WFB recovery no longer
             // borrow this transfer. Browser rendering and route work must not
             // create a gap in the USB receive queue.
-            endpoint.submit(completion.buffer);
+            radio.endpoint.submit(completion.buffer);
+            radio_futures.push(wait_for_radio(radio));
 
             let video_bytes = batch.frames.iter().map(|frame| frame.data.len()).sum();
             update_recording(
@@ -970,7 +1219,14 @@ mod worker {
                 audio: route_processor.audio_stats(),
                 ..BatchMetrics::default()
             }) {
-                super::emit(events, context, RuntimeEvent::Batch(Box::new(metrics)));
+                emit_metrics(
+                    events,
+                    context,
+                    metrics,
+                    &diversity,
+                    &metric_handles,
+                    &mut source_quality,
+                );
             }
             if stats.decode_errors > last_decode_errors {
                 last_decode_errors = stats.decode_errors;
@@ -991,20 +1247,91 @@ mod worker {
         }
 
         if let Some(metrics) = metrics_throttle.flush() {
-            super::emit(events, context, RuntimeEvent::Batch(Box::new(metrics)));
+            emit_metrics(
+                events,
+                context,
+                metrics,
+                &diversity,
+                &metric_handles,
+                &mut source_quality,
+            );
         }
-        drop(endpoint);
+        drop(radio_futures);
         drop(tx_queue);
-        if let Some(maintenance) = maintenance {
-            maintenance.stop().await;
+        for task in maintenance.drain(..) {
+            task.stop().await;
         }
         finish_recording(&mut recorder, events, context);
         let _ = decoder.flush();
-        device
-            .shutdown_monitor_async()
-            .await
-            .map_err(|error| format!("monitor shutdown failed: {error}"))?;
+        let mut shutdown_errors = Vec::new();
+        for (device, _) in devices {
+            if let Err(error) = device.shutdown_monitor_async().await {
+                shutdown_errors.push(error.to_string());
+            }
+        }
+        if !shutdown_errors.is_empty() {
+            return Err(format!(
+                "monitor shutdown failed: {}",
+                shutdown_errors.join("; ")
+            ));
+        }
         Ok(())
+    }
+
+    fn emit_diversity_update(
+        events: &Rc<RefCell<VecDeque<RuntimeEvent>>>,
+        context: &eframe::egui::Context,
+        diversity: &DiversityCombiner,
+        metric_handles: &[Rc<RefCell<AdapterRuntimeMetrics>>],
+        source_quality: &mut [AdaptiveLink],
+    ) {
+        let (stats, adapters) = diversity_snapshot(diversity, metric_handles, source_quality);
+        super::emit(
+            events,
+            context,
+            RuntimeEvent::DiversityUpdate { stats, adapters },
+        );
+    }
+
+    fn emit_metrics(
+        events: &Rc<RefCell<VecDeque<RuntimeEvent>>>,
+        context: &eframe::egui::Context,
+        mut metrics: BatchMetrics,
+        diversity: &DiversityCombiner,
+        metric_handles: &[Rc<RefCell<AdapterRuntimeMetrics>>],
+        source_quality: &mut [AdaptiveLink],
+    ) {
+        (metrics.diversity, metrics.adapters) =
+            diversity_snapshot(diversity, metric_handles, source_quality);
+        super::emit(events, context, RuntimeEvent::Batch(Box::new(metrics)));
+    }
+
+    fn diversity_snapshot(
+        diversity: &DiversityCombiner,
+        metric_handles: &[Rc<RefCell<AdapterRuntimeMetrics>>],
+        source_quality: &mut [AdaptiveLink],
+    ) -> (openipc_core::DiversityStats, Vec<AdapterRuntimeMetrics>) {
+        let now = now_ms();
+        let stats = diversity.stats();
+        let mut adapters = metric_handles
+            .iter()
+            .map(|metrics| metrics.borrow().clone())
+            .collect::<Vec<_>>();
+        for (snapshot, quality_tracker) in adapters.iter_mut().zip(source_quality) {
+            if let Some(source) = stats
+                .sources
+                .get(&DiversitySourceId::new(snapshot.source_id))
+            {
+                snapshot.accepted = source.accepted;
+                snapshot.duplicates = source.duplicates;
+            }
+            let quality = quality_tracker.quality(now);
+            snapshot.rssi[0] = quality.rssi[0];
+            snapshot.rssi[1] = quality.rssi[1];
+            snapshot.snr[0] = quality.snr[0];
+            snapshot.snr[1] = quality.snr[1];
+        }
+        (stats, adapters)
     }
 
     #[cfg(debug_assertions)]
@@ -1041,7 +1368,7 @@ mod worker {
             events,
             context,
             RuntimeEvent::Connected {
-                receiver: crate::runtime::ReceiverInfo::codec_mock(),
+                receivers: vec![crate::runtime::ReceiverInfo::codec_mock()],
                 decoder: decoder_environment(decoder.capabilities()),
             },
         );

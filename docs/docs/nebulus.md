@@ -25,8 +25,11 @@ tag and short commit hash from the same `OPENIPC_*` metadata used by Station.
 
 ```mermaid
 flowchart LR
-    USB["Realtek USB adapter"] --> RTL["openipc-rtl88xx<br/>monitor mode and RX aggregates"]
-    RTL --> Core["openipc-core<br/>WFB, crypto, FEC, RTP"]
+    USB1["Realtek USB adapter A"] --> RTL1["RX aggregate parser A"]
+    USB2["Realtek USB adapter B"] --> RTL2["RX aggregate parser B"]
+    RTL1 --> Diversity["first-valid-copy selector"]
+    RTL2 --> Diversity
+    Diversity --> Core["openipc-core<br/>WFB, crypto, FEC, RTP"]
     Core --> Video["openipc-video<br/>platform H.264/H.265 decoder"]
     Core --> Routes["route fanout<br/>inspect, log, UDP, audio"]
     Core --> Record["keyframe-aligned<br/>MP4 recorder"]
@@ -36,16 +39,17 @@ flowchart LR
     Video --> Latest["single latest-frame slot"]
     Latest --> Egui["Nebulus egui renderer"]
     Core --> Link["adaptive-link quality and feedback"]
-    Link --> RTL
+    Link --> USB1
 ```
 
-The desktop and Android app keep the blocking USB receive loop on a dedicated
-worker thread. It initializes the radio, keeps four bulk-IN transfers in
-flight, parses each Realtek aggregate, advances the receiver state machine,
+The desktop and Android app keep one blocking USB capture worker per selected
+adapter and one shared protocol/decode worker. Each radio keeps four bulk-IN
+transfers in flight. The shared worker selects unique WFB packets, advances the receiver state machine,
 submits complete access units to the decoder, and sends compact state updates
 to egui. The UI thread never waits on USB or codec work.
 
-The browser follows the same stages on the browser's local async executor.
+The browser follows the same stages and races one completion future per
+authorized adapter on the browser's local async executor.
 WebUSB and WebCodecs objects cannot cross Rust threads, so Nebulus polls them
 without a Web Worker. Every asynchronous completion requests an egui repaint;
 the UI does not busy-loop while idle.
@@ -103,7 +107,7 @@ RX, enable VPN from either the tray or VPN panel, then start RX again. Linux
 does not currently build the tray integration, avoiding additional
 AppIndicator/GTK runtime dependencies.
 
-Select a supported adapter, set the radio channel and width to match the VTX,
+Select a primary adapter and optional diversity receivers, set the radio channel and width to match the VTX,
 confirm the WFB key, and press **Start RX**. The default OpenIPC `gs.key` is
 embedded. **Open file** uses the native desktop dialog, browser picker, or
 Android Storage Access Framework to load another key. The key is never text
@@ -114,10 +118,20 @@ with individual buttons that restore OpenIPC defaults.
 ### Profiles
 
 The Profiles section stores named receiver configurations. Each profile
-contains the selected adapter, RF channel/width/offset, Link ID, minimum epoch,
+contains the primary and diversity adapters, RF channel/width/offset, Link ID, minimum epoch,
 WFB key, decoder preference, RTP reorder setting, adaptive-link settings,
 payload routes, audio volume, transfer size, and VPN state. Theme, UI scale,
 log verbosity, sidebar visibility, and HUD layout remain global.
+
+### Receive Diversity
+
+Every selected adapter is tuned identically. CRC/ICV-valid packets are merged
+before WFB decryption and FEC, with the first copy forwarded immediately. The
+primary adapter alone handles adaptive-link and VPN uplink. Diagnostics reports
+per-radio signal, USB health, first-copy wins, and duplicates. Browser users
+must press **Add adapter** once per radio to grant WebUSB permission. See
+[Receive Diversity](./receive-diversity.md) for topology guidance and library
+integration details.
 
 Selecting a profile applies its saved snapshot. Editing controls does not
 silently overwrite that snapshot; use **Save current** when the new values
@@ -178,10 +192,11 @@ cd apps/nebulus
 trunk serve --release --open
 ```
 
-WebUSB requires localhost or HTTPS. Pressing **Start RX** directly opens the
-device picker inside the click handler, preserving the browser's required user
-gesture. The selected device is initialized into monitor mode by the same Rust
-HAL used by native targets.
+WebUSB requires localhost or HTTPS. **Start RX** opens the picker for an empty
+configuration, while **Add adapter** authorizes additional radios one at a
+time. Both calls happen directly inside the click handler to preserve the
+browser's user gesture. Every selected device is initialized into monitor mode
+by the same Rust HAL used by native targets.
 
 To build static deployment files:
 

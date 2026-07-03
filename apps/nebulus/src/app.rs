@@ -14,7 +14,9 @@ use crate::{
         MetricHistory, ReceiverState, RecordingState, RecordingStatus, RecoveryStatus, RouteStats,
         VpnStatus,
     },
-    runtime::{ReceiverInfo, Runtime, RuntimeEvent, StartRequest, UsbDeviceInfo},
+    runtime::{
+        AdapterRuntimeMetrics, ReceiverInfo, Runtime, RuntimeEvent, StartRequest, UsbDeviceInfo,
+    },
     settings::Settings,
 };
 
@@ -24,6 +26,8 @@ pub struct NebulusApp {
     pub(crate) state: ReceiverState,
     pub(crate) devices: Vec<UsbDeviceInfo>,
     pub(crate) receiver_info: Option<ReceiverInfo>,
+    pub(crate) receiver_infos: Vec<ReceiverInfo>,
+    pub(crate) adapter_metrics: Vec<AdapterRuntimeMetrics>,
     pub(crate) metrics: LiveMetrics,
     pub(crate) history: MetricHistory,
     pub(crate) logs: Vec<LogEntry>,
@@ -96,6 +100,8 @@ impl NebulusApp {
             state: ReceiverState::Idle,
             devices: Vec::new(),
             receiver_info: None,
+            receiver_infos: Vec::new(),
+            adapter_metrics: Vec::new(),
             metrics: LiveMetrics::default(),
             history: MetricHistory::default(),
             logs: Vec::new(),
@@ -207,7 +213,8 @@ impl NebulusApp {
                 .video_renderer
                 .as_ref()
                 .map(crate::video::PlatformVideoRenderer::output_window),
-            device_id: self.settings.device_id.clone(),
+            primary_device_id: self.settings.device_id.clone(),
+            device_ids: self.settings.selected_device_ids(),
             channel: self.settings.channel,
             channel_width_mhz: self.settings.channel_width_mhz,
             channel_offset: self.settings.channel_offset,
@@ -238,6 +245,7 @@ impl NebulusApp {
         self.route_stats.clear();
         self.audio = AudioStats::default();
         self.diagnostics = DiagnosticsState::default();
+        self.adapter_metrics.clear();
         self.vpn = VpnStatus::default();
     }
 
@@ -291,6 +299,11 @@ impl NebulusApp {
 
     pub(crate) fn refresh_devices(&mut self) {
         self.runtime.refresh_devices();
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn authorize_webusb_adapter(&self) {
+        self.runtime.authorize_device();
     }
 
     pub(crate) fn run_preflight(&mut self) {
@@ -486,6 +499,7 @@ impl NebulusApp {
             match event {
                 RuntimeEvent::Devices(devices) => {
                     self.devices = devices;
+                    self.reconcile_legacy_device_ids();
                     if self.settings.device_id.is_none() {
                         self.settings.device_id =
                             self.devices.first().map(|device| device.id.clone());
@@ -496,11 +510,18 @@ impl NebulusApp {
                 }
                 RuntimeEvent::Connecting => {
                     self.receiver_info = None;
+                    self.receiver_infos.clear();
+                    self.adapter_metrics.clear();
                     self.state = ReceiverState::Connecting;
                 }
-                RuntimeEvent::Connected { receiver, decoder } => {
-                    let label = receiver.label.clone();
-                    self.receiver_info = Some(receiver);
+                RuntimeEvent::Connected { receivers, decoder } => {
+                    let label = receivers
+                        .iter()
+                        .map(|receiver| receiver.label.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" + ");
+                    self.receiver_info = receivers.first().cloned();
+                    self.receiver_infos = receivers;
                     self.metrics.decoder_name = decoder.backend.clone();
                     self.environment.decoder_backend = decoder.backend;
                     self.environment.h264 =
@@ -509,7 +530,14 @@ impl NebulusApp {
                         capability_label(decoder.h265_supported, decoder.h265_hardware);
                     self.environment.native_surfaces = decoder.native_surfaces;
                     self.state = ReceiverState::Ready;
-                    self.log(LogLevel::Info, "usb", format!("Connected to {label}"));
+                    self.log(
+                        LogLevel::Info,
+                        "usb",
+                        format!(
+                            "Connected {} receive adapter(s): {label}",
+                            self.receiver_infos.len()
+                        ),
+                    );
                 }
                 RuntimeEvent::Started => {
                     self.state = ReceiverState::Receiving;
@@ -552,6 +580,10 @@ impl NebulusApp {
                     self.log(LogLevel::Error, "scanner", error);
                 }
                 RuntimeEvent::Batch(batch) => self.apply_batch(*batch),
+                RuntimeEvent::DiversityUpdate { stats, adapters } => {
+                    self.diagnostics.diversity = stats;
+                    self.adapter_metrics = adapters;
+                }
                 RuntimeEvent::NativeVideo {
                     frame,
                     decode_latency_ms,
@@ -634,6 +666,8 @@ impl NebulusApp {
                 }
                 RuntimeEvent::Stopped => {
                     self.receiver_info = None;
+                    self.receiver_infos.clear();
+                    self.adapter_metrics.clear();
                     self.state = ReceiverState::Idle;
                     self.recording.state = RecordingState::Idle;
                     self.vpn.active = false;
@@ -644,6 +678,8 @@ impl NebulusApp {
                         matches!(self.state, ReceiverState::Ready | ReceiverState::Receiving)
                             || self.recovery.active;
                     self.receiver_info = None;
+                    self.receiver_infos.clear();
+                    self.adapter_metrics.clear();
                     self.state = ReceiverState::Failed;
                     self.recording.state = RecordingState::Idle;
                     self.vpn.active = false;
@@ -1013,6 +1049,29 @@ impl NebulusApp {
             stats.errors = stats.errors.saturating_add(update.errors);
         }
         self.audio = batch.audio;
+        self.diagnostics.diversity = batch.diversity;
+        self.adapter_metrics = batch.adapters;
+    }
+
+    fn reconcile_legacy_device_ids(&mut self) {
+        let resolve = |saved: &str| {
+            if self.devices.iter().any(|device| device.id == saved) {
+                return Some(saved.to_owned());
+            }
+            self.devices
+                .iter()
+                .find(|device| device.id.starts_with(saved))
+                .map(|device| device.id.clone())
+        };
+        if let Some(saved) = self.settings.device_id.clone() {
+            self.settings.device_id = resolve(&saved).or(Some(saved));
+        }
+        for id in &mut self.settings.diversity_device_ids {
+            if let Some(resolved) = resolve(id) {
+                *id = resolved;
+            }
+        }
+        self.settings.normalize();
     }
 
     #[cfg(not(target_arch = "wasm32"))]

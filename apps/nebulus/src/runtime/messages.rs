@@ -1,4 +1,6 @@
-use openipc_core::{FecCounters, ReceiverBatchCounters, RtpDepacketizerStatus, RtpReorderStatus};
+use openipc_core::{
+    DiversityStats, FecCounters, ReceiverBatchCounters, RtpDepacketizerStatus, RtpReorderStatus,
+};
 use std::time::Duration;
 use web_time::Instant;
 
@@ -10,6 +12,8 @@ use crate::{
 /// Hardware and initialization details captured when a receiver connects.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReceiverInfo {
+    pub(crate) id: String,
+    pub(crate) source_id: u16,
     pub(crate) label: String,
     pub(crate) vendor_id: Option<u16>,
     pub(crate) product_id: Option<u16>,
@@ -25,6 +29,8 @@ pub(crate) struct ReceiverInfo {
 
 impl ReceiverInfo {
     pub(crate) fn initialized(
+        id: String,
+        source_id: u16,
         label: String,
         device: &openipc_rtl88xx::RealtekDevice,
         report: &openipc_rtl88xx::InitReport,
@@ -45,6 +51,8 @@ impl ReceiverInfo {
             Some(_) | None => "Not reported",
         };
         Self {
+            id,
+            source_id,
             label,
             vendor_id: Some(device.vendor_id()),
             product_id: Some(device.product_id()),
@@ -66,6 +74,8 @@ impl ReceiverInfo {
     #[cfg(debug_assertions)]
     pub(crate) fn codec_mock() -> Self {
         Self {
+            id: "codec-mock".to_owned(),
+            source_id: 0,
             label: "Pre-recorded 1080p H.264 + Opus".to_owned(),
             vendor_id: None,
             product_id: None,
@@ -99,6 +109,7 @@ pub(crate) struct UsbDeviceInfo {
     pub(crate) label: String,
     pub(crate) vendor_id: u16,
     pub(crate) product_id: u16,
+    pub(crate) location: String,
 }
 
 /// Configuration sent from the UI to a receive worker.
@@ -106,7 +117,8 @@ pub(crate) struct UsbDeviceInfo {
 pub(crate) struct StartRequest {
     #[cfg(target_os = "android")]
     pub(crate) video_output: Option<ndk::native_window::NativeWindow>,
-    pub(crate) device_id: Option<String>,
+    pub(crate) primary_device_id: Option<String>,
+    pub(crate) device_ids: Vec<String>,
     pub(crate) channel: u8,
     pub(crate) channel_width_mhz: u16,
     pub(crate) channel_offset: u8,
@@ -176,6 +188,23 @@ pub(crate) struct RouteMetricDelta {
     pub(crate) errors: u64,
 }
 
+/// Latest health and contribution snapshot for one receive adapter.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AdapterRuntimeMetrics {
+    pub(crate) source_id: u16,
+    pub(crate) device_id: String,
+    pub(crate) label: String,
+    pub(crate) online: bool,
+    pub(crate) transfers: u64,
+    pub(crate) transfer_bytes: u64,
+    pub(crate) usb_errors: u64,
+    pub(crate) queue_drops: u64,
+    pub(crate) rssi: [i32; 4],
+    pub(crate) snr: [i32; 4],
+    pub(crate) accepted: u64,
+    pub(crate) duplicates: u64,
+}
+
 /// Metrics emitted for one processed USB batch.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct BatchMetrics {
@@ -204,6 +233,8 @@ pub(crate) struct BatchMetrics {
     pub(crate) vpn: VpnMetrics,
     pub(crate) routes: Vec<RouteMetricDelta>,
     pub(crate) audio: crate::model::AudioStats,
+    pub(crate) diversity: DiversityStats,
+    pub(crate) adapters: Vec<AdapterRuntimeMetrics>,
 }
 
 impl BatchMetrics {
@@ -246,6 +277,8 @@ impl BatchMetrics {
             }
         }
         self.audio = newer.audio;
+        self.diversity = newer.diversity;
+        self.adapters = newer.adapters;
     }
 }
 
@@ -356,7 +389,7 @@ pub(crate) enum RuntimeEvent {
     DiscoveryFailed(String),
     Connecting,
     Connected {
-        receiver: ReceiverInfo,
+        receivers: Vec<ReceiverInfo>,
         decoder: DecoderEnvironment,
     },
     Started,
@@ -371,6 +404,10 @@ pub(crate) enum RuntimeEvent {
     ScanCompleted,
     ScanFailed(String),
     Batch(Box<BatchMetrics>),
+    DiversityUpdate {
+        stats: DiversityStats,
+        adapters: Vec<AdapterRuntimeMetrics>,
+    },
     NativeVideo {
         frame: openipc_video::DecodedFrame<NativeVideoSurface>,
         decode_latency_ms: f64,

@@ -256,6 +256,7 @@ pub(crate) struct ReceiverProfile {
     pub(crate) id: u64,
     pub(crate) name: String,
     pub(crate) device_id: Option<String>,
+    pub(crate) diversity_device_ids: Vec<String>,
     pub(crate) channel: u8,
     pub(crate) channel_width_mhz: u16,
     pub(crate) channel_offset: u8,
@@ -278,6 +279,7 @@ impl ReceiverProfile {
             id,
             name,
             device_id: settings.device_id.clone(),
+            diversity_device_ids: settings.diversity_device_ids.clone(),
             channel: settings.channel,
             channel_width_mhz: settings.channel_width_mhz,
             channel_offset: settings.channel_offset,
@@ -297,6 +299,9 @@ impl ReceiverProfile {
 
     pub(crate) fn apply(&self, settings: &mut Settings) {
         settings.device_id.clone_from(&self.device_id);
+        settings
+            .diversity_device_ids
+            .clone_from(&self.diversity_device_ids);
         settings.channel = self.channel;
         settings.channel_width_mhz = self.channel_width_mhz;
         settings.channel_offset = self.channel_offset;
@@ -321,6 +326,7 @@ impl Default for ReceiverProfile {
             id: 1,
             name: "Default FPV".to_owned(),
             device_id: None,
+            diversity_device_ids: Vec::new(),
             channel: DEFAULT_CHANNEL,
             channel_width_mhz: 20,
             channel_offset: DEFAULT_CHANNEL_OFFSET,
@@ -388,6 +394,8 @@ fn default_routes() -> Vec<PayloadRouteSettings> {
 #[serde(default)]
 pub(crate) struct Settings {
     pub(crate) device_id: Option<String>,
+    /// Additional receive adapters combined with the primary adapter.
+    pub(crate) diversity_device_ids: Vec<String>,
     pub(crate) channel: u8,
     pub(crate) channel_width_mhz: u16,
     pub(crate) channel_offset: u8,
@@ -429,8 +437,31 @@ impl Settings {
             .saturating_add(1)
     }
 
+    pub(crate) fn selected_device_ids(&self) -> Vec<String> {
+        let mut selected = Vec::with_capacity(1 + self.diversity_device_ids.len());
+        if let Some(primary) = self.device_id.as_ref() {
+            selected.push(primary.clone());
+        }
+        for id in &self.diversity_device_ids {
+            if !selected.contains(id) {
+                selected.push(id.clone());
+            }
+        }
+        selected
+    }
+
     pub(crate) fn normalize(&mut self) {
         self.hud.normalize();
+        if let Some(primary) = self.device_id.as_ref() {
+            self.diversity_device_ids.retain(|id| id != primary);
+        }
+        let mut unique = Vec::with_capacity(self.diversity_device_ids.len());
+        self.diversity_device_ids.retain(|id| {
+            !id.is_empty() && !unique.contains(id) && {
+                unique.push(id.clone());
+                true
+            }
+        });
         if self.profiles.is_empty() {
             let profile = ReceiverProfile::capture(1, "Default FPV".to_owned(), self);
             self.profiles.push(profile);
@@ -448,6 +479,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             device_id: None,
+            diversity_device_ids: Vec::new(),
             channel: DEFAULT_CHANNEL,
             channel_width_mhz: 20,
             channel_offset: DEFAULT_CHANNEL_OFFSET,
@@ -484,6 +516,8 @@ mod tests {
         let mut settings = Settings {
             channel: 149,
             link_id: 0x12_34_56,
+            device_id: Some("0bda:8812@bus/1".to_owned()),
+            diversity_device_ids: vec!["0bda:8812@bus/2".to_owned()],
             gui_theme: GuiTheme::Latte,
             ..Settings::default()
         };
@@ -491,12 +525,17 @@ mod tests {
         settings.channel = 36;
         settings.link_id = 1;
         settings.gui_theme = GuiTheme::Mocha;
+        settings.diversity_device_ids.clear();
 
         profile.apply(&mut settings);
 
         assert_eq!(settings.channel, 149);
         assert_eq!(settings.link_id, 0x12_34_56);
         assert_eq!(settings.gui_theme, GuiTheme::Mocha);
+        assert_eq!(
+            settings.diversity_device_ids,
+            ["0bda:8812@bus/2".to_owned()]
+        );
         assert_eq!(settings.active_profile_id, Some(42));
     }
 
@@ -522,5 +561,25 @@ mod tests {
         assert_eq!(settings.hud.items.len(), HudMetric::ALL.len());
         assert_eq!(settings.hud.items[0].x, 0.03);
         assert_eq!(settings.hud.items[0].y, 0.97);
+    }
+
+    #[test]
+    fn diversity_selection_is_unique_and_excludes_the_primary() {
+        let mut settings = Settings {
+            device_id: Some("primary".to_owned()),
+            diversity_device_ids: vec![
+                "primary".to_owned(),
+                "secondary".to_owned(),
+                "secondary".to_owned(),
+            ],
+            ..Settings::default()
+        };
+        settings.normalize();
+
+        assert_eq!(settings.diversity_device_ids, ["secondary".to_owned()]);
+        assert_eq!(
+            settings.selected_device_ids(),
+            ["primary".to_owned(), "secondary".to_owned()]
+        );
     }
 }

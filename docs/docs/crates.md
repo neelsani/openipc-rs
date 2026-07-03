@@ -10,7 +10,7 @@ two crates.
 
 | Name                       | Published As                                                                                                         | Use It For                                                                                                                                                                                                           |
 | -------------------------- | -------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `openipc-core`             | [crates.io](https://crates.io/crates/openipc-core)                                                                   | Parsing Realtek RX aggregates, filtering OpenIPC/WFB frames, decrypting WFB packets, recovering FEC blocks, routing raw payloads, depacketizing RTP into Annex-B frames, and creating adaptive-link uplink payloads. |
+| `openipc-core`             | [crates.io](https://crates.io/crates/openipc-core)                                                                   | Parsing Realtek RX aggregates, combining duplicate packets from multiple radios, decrypting WFB packets, recovering FEC blocks, routing raw payloads, depacketizing RTP into Annex-B frames, and creating adaptive-link uplink payloads. |
 | `openipc-rtl88xx`          | [crates.io](https://crates.io/crates/openipc-rtl88xx)                                                                | Opening supported Realtek USB WiFi adapters, running monitor-mode initialization, reading bulk-IN transfers, sending adaptive-link bulk-OUT packets, and setting TX power overrides.                                 |
 | `openipc-video`            | [crates.io](https://crates.io/crates/openipc-video)                                                                  | Turning Annex-B H.264/H.265 access units into retained decoder surfaces through VideoToolbox, VA-API, Media Foundation/D3D11, Android MediaCodec, or browser WebCodecs.                                              |
 | `openipc-web`              | [crates.io](https://crates.io/crates/openipc-web)                                                                    | Rust/WASM bindings. Downstream Rust users normally do not call this directly unless they are building the npm package from source.                                                                                   |
@@ -33,6 +33,8 @@ for you.
 
 Use `openipc-core` plus `openipc-rtl88xx` if you are writing a native Rust
 receiver, recorder, diagnostic app, or hardware validation tool.
+`DiversityCombiner` can merge valid copies from several adapters before one
+shared `ReceiverRuntime`; see [Receive Diversity](./receive-diversity.md).
 
 Add `openipc-video` when an app also needs local playback. It consumes
 the `DepacketizedFrame` values emitted by `openipc-core` and returns retained

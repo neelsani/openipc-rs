@@ -28,27 +28,49 @@ pub(crate) struct PreflightReport {
 impl PreflightReport {
     pub(crate) fn run(app: &NebulusApp) -> Self {
         let mut checks = Vec::new();
-        let selected = app.settings.device_id.as_deref();
-        checks.push(match selected {
-            Some(id) if app.devices.iter().any(|device| device.id == id) => {
-                pass("Receiver", format!("Selected adapter {id} is available"))
-            }
-            Some(id) => warning(
-                "Receiver",
-                format!(
-                    "Adapter {id} is not in the current discovery list; refresh or reconnect it"
-                ),
-            ),
-            None if cfg!(target_arch = "wasm32") => warning(
+        let selected = app.settings.selected_device_ids();
+        let missing = selected
+            .iter()
+            .filter(|id| !app.devices.iter().any(|device| &device.id == *id))
+            .cloned()
+            .collect::<Vec<_>>();
+        checks.push(if selected.is_empty() && cfg!(target_arch = "wasm32") {
+            warning(
                 "Receiver",
                 "The browser will open its WebUSB device picker when RX starts".to_owned(),
-            ),
-            None if app.devices.is_empty() => fail(
+            )
+        } else if selected.is_empty() && app.devices.is_empty() {
+            fail(
                 "Receiver",
                 "No supported USB adapter is selected or visible".to_owned(),
-            ),
-            None => fail("Receiver", "Select a USB adapter".to_owned()),
+            )
+        } else if selected.is_empty() {
+            fail("Receiver", "Select a USB adapter".to_owned())
+        } else if missing.is_empty() {
+            pass(
+                "Receiver",
+                format!("All {} selected adapter(s) are available", selected.len()),
+            )
+        } else {
+            warning(
+                "Receiver",
+                format!(
+                    "{} selected adapter(s) are unavailable: {}",
+                    missing.len(),
+                    missing.join(", ")
+                ),
+            )
         });
+
+        if selected.len() > 1 {
+            checks.push(pass(
+                "Receive diversity",
+                format!(
+                    "{} radios will use first-valid-copy selection; the primary handles uplink",
+                    selected.len()
+                ),
+            ));
+        }
 
         checks.push(
             match openipc_core::WfbKeypair::from_bytes(&app.settings.key_bytes) {

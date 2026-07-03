@@ -713,6 +713,54 @@ pub struct UsbDeviceSummary {
     pub supported: bool,
 }
 
+impl UsbDeviceSummary {
+    /// Return a stable, user-facing identity for this physical USB port.
+    ///
+    /// VID/PID alone cannot distinguish two adapters of the same model. The
+    /// bus and hub-port path remain stable across ordinary USB resets, while
+    /// the device address is used only on platforms that do not expose a port
+    /// chain.
+    pub fn stable_id(&self) -> String {
+        desktop_usb_device_id(
+            self.vendor_id,
+            self.product_id,
+            &self.bus_id,
+            self.device_address,
+            &self.port_chain,
+        )
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+pub(crate) fn nusb_device_id(device: &nusb::DeviceInfo) -> String {
+    desktop_usb_device_id(
+        device.vendor_id(),
+        device.product_id(),
+        device.bus_id(),
+        device.device_address(),
+        device.port_chain(),
+    )
+}
+
+fn desktop_usb_device_id(
+    vendor_id: u16,
+    product_id: u16,
+    bus_id: &str,
+    device_address: u8,
+    port_chain: &[u8],
+) -> String {
+    let location = if port_chain.is_empty() {
+        format!("address-{device_address}")
+    } else {
+        port_chain
+            .iter()
+            .map(u8::to_string)
+            .collect::<Vec<_>>()
+            .join(".")
+    };
+    format!("{vendor_id:04x}:{product_id:04x}@{bus_id}/{location}")
+}
+
 pub(crate) fn is_rtl8821a_pid(vid: u16, pid: u16) -> bool {
     matches!(
         ((vid as u32) << 16) | pid as u32,
@@ -755,4 +803,46 @@ pub(crate) fn is_rtl8822e_pid(vid: u16, pid: u16) -> bool {
         ((vid as u32) << 16) | pid as u32,
         0x0BDA881C | 0x0BDAA81A | 0x0BDAE822 | 0x0BDAA82A
     )
+}
+
+#[cfg(test)]
+mod usb_identity_tests {
+    use super::UsbDeviceSummary;
+
+    #[test]
+    fn stable_id_distinguishes_identical_adapters_by_port() {
+        let first = UsbDeviceSummary {
+            vendor_id: 0x0bda,
+            product_id: 0x8812,
+            product: None,
+            manufacturer: None,
+            bus_id: "usb-0".to_owned(),
+            device_address: 4,
+            port_chain: vec![1, 2],
+            supported: true,
+        };
+        let mut second = first.clone();
+        second.device_address = 7;
+        second.port_chain = vec![1, 3];
+
+        assert_eq!(first.stable_id(), "0bda:8812@usb-0/1.2");
+        assert_eq!(second.stable_id(), "0bda:8812@usb-0/1.3");
+        assert_ne!(first.stable_id(), second.stable_id());
+    }
+
+    #[test]
+    fn stable_id_uses_address_without_a_port_chain() {
+        let summary = UsbDeviceSummary {
+            vendor_id: 0x0bda,
+            product_id: 0x8812,
+            product: None,
+            manufacturer: None,
+            bus_id: "usb-1".to_owned(),
+            device_address: 9,
+            port_chain: Vec::new(),
+            supported: true,
+        };
+
+        assert_eq!(summary.stable_id(), "0bda:8812@usb-1/address-9");
+    }
 }

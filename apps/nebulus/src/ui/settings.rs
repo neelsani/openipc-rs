@@ -16,21 +16,37 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
         section(ui, "Profiles", |ui| profile_editor(app, ui));
 
         section(ui, "Receiver", |ui| {
+            ui.label(
+                egui::RichText::new("Primary receiver and uplink")
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+            );
             ui.horizontal(|ui| {
                 egui::ComboBox::from_id_salt("usb-device")
                     .selected_text(selected_device_label(app))
                     .width(230.0)
                     .show_ui(ui, |ui| {
                         for device in &app.devices {
-                            ui.selectable_value(
-                                &mut app.settings.device_id,
-                                Some(device.id.clone()),
-                                format!("{} ({})", device.label, device.id),
-                            );
+                            let changed = ui
+                                .selectable_value(
+                                    &mut app.settings.device_id,
+                                    Some(device.id.clone()),
+                                    format!("{} — {}", device.label, device.location),
+                                )
+                                .changed();
+                            if changed {
+                                app.settings
+                                    .diversity_device_ids
+                                    .retain(|id| Some(id) != app.settings.device_id.as_ref());
+                            }
                         }
                     });
                 if ui.button("Refresh").clicked() {
                     app.refresh_devices();
+                }
+                #[cfg(target_arch = "wasm32")]
+                if ui.button("Add adapter").clicked() {
+                    app.authorize_webusb_adapter();
                 }
             });
             if app.devices.is_empty() {
@@ -38,6 +54,48 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
                     egui::RichText::new("No supported USB adapter found")
                         .small()
                         .color(ui.visuals().weak_text_color()),
+                );
+            }
+            if app.devices.len() > 1 {
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new("Diversity receivers")
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                );
+                for device in &app.devices {
+                    if app.settings.device_id.as_deref() == Some(device.id.as_str()) {
+                        continue;
+                    }
+                    let mut selected = app
+                        .settings
+                        .diversity_device_ids
+                        .iter()
+                        .any(|id| id == &device.id);
+                    if ui
+                        .checkbox(
+                            &mut selected,
+                            format!("{} — {}", device.label, device.location),
+                        )
+                        .changed()
+                    {
+                        if selected {
+                            app.settings.diversity_device_ids.push(device.id.clone());
+                        } else {
+                            app.settings
+                                .diversity_device_ids
+                                .retain(|id| id != &device.id);
+                        }
+                        app.settings.normalize();
+                    }
+                }
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} adapters selected; first valid WFB packet wins",
+                        app.settings.selected_device_ids().len()
+                    ))
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
                 );
             }
             ui.horizontal(|ui| {
@@ -282,7 +340,7 @@ fn profile_editor(app: &mut NebulusApp, ui: &mut egui::Ui) {
     });
     ui.label(
         egui::RichText::new(
-            "Profiles include the adapter, radio, link, key, routes, audio, VPN, and decoder settings.",
+            "Profiles include primary/diversity adapters, radio, link, key, routes, audio, VPN, and decoder settings.",
         )
         .small()
         .color(ui.visuals().weak_text_color()),
@@ -290,55 +348,75 @@ fn profile_editor(app: &mut NebulusApp, ui: &mut egui::Ui) {
 }
 
 fn connected_receiver(app: &NebulusApp, ui: &mut egui::Ui) {
-    let receiver = app
-        .receiver_info
-        .as_ref()
-        .expect("receiver info checked before rendering");
-    section(ui, "Connected receiver", |ui| {
-        egui::Grid::new("connected-receiver-info")
+    section(ui, "Connected receivers", |ui| {
+        for receiver in &app.receiver_infos {
+            ui.strong(format!(
+                "Radio {} · {}",
+                receiver.source_id + 1,
+                receiver.label
+            ));
+            egui::Grid::new(("connected-receiver-info", receiver.source_id))
+                .num_columns(2)
+                .striped(true)
+                .spacing([18.0, 7.0])
+                .show(ui, |ui| {
+                    receiver_row(ui, "Adapter", &receiver.label);
+                    receiver_row(ui, "Device", &receiver.id);
+                    receiver_row(
+                        ui,
+                        "USB ID",
+                        &match (receiver.vendor_id, receiver.product_id) {
+                            (Some(vendor), Some(product)) => format!("{vendor:04x}:{product:04x}"),
+                            _ => "Not applicable".to_owned(),
+                        },
+                    );
+                    receiver_row(ui, "Chipset", &receiver.chip);
+                    receiver_row(ui, "RF paths", &receiver.rf_paths);
+                    receiver_row(
+                        ui,
+                        "Cut revision",
+                        &receiver
+                            .cut_version
+                            .map_or_else(|| "Not reported".to_owned(), |cut| cut.to_string()),
+                    );
+                    receiver_row(ui, "USB link", &receiver.usb_speed);
+                    receiver_row(
+                        ui,
+                        "Bulk endpoints",
+                        &match (receiver.bulk_in_endpoint, receiver.bulk_out_endpoint) {
+                            (Some(input), Some(output)) => {
+                                format!("IN 0x{input:02x} / OUT 0x{output:02x}")
+                            }
+                            _ => "Not applicable".to_owned(),
+                        },
+                    );
+                    receiver_row(ui, "Initialization", &receiver.initialization);
+                    receiver_row(
+                        ui,
+                        "Firmware downloaded",
+                        match receiver.firmware_downloaded {
+                            Some(true) => "Yes",
+                            Some(false) => "No",
+                            None => "Not applicable",
+                        },
+                    );
+                    receiver_row(
+                        ui,
+                        "Role",
+                        if receiver.source_id == 0 {
+                            "Primary RX and uplink"
+                        } else {
+                            "Diversity RX"
+                        },
+                    );
+                });
+            ui.add_space(8.0);
+        }
+        egui::Grid::new("connected-radio-config")
             .num_columns(2)
             .striped(true)
             .spacing([18.0, 7.0])
             .show(ui, |ui| {
-                receiver_row(ui, "Adapter", &receiver.label);
-                receiver_row(
-                    ui,
-                    "USB ID",
-                    &match (receiver.vendor_id, receiver.product_id) {
-                        (Some(vendor), Some(product)) => format!("{vendor:04x}:{product:04x}"),
-                        _ => "Not applicable".to_owned(),
-                    },
-                );
-                receiver_row(ui, "Chipset", &receiver.chip);
-                receiver_row(ui, "RF paths", &receiver.rf_paths);
-                receiver_row(
-                    ui,
-                    "Cut revision",
-                    &receiver
-                        .cut_version
-                        .map_or_else(|| "Not reported".to_owned(), |cut| cut.to_string()),
-                );
-                receiver_row(ui, "USB link", &receiver.usb_speed);
-                receiver_row(
-                    ui,
-                    "Bulk endpoints",
-                    &match (receiver.bulk_in_endpoint, receiver.bulk_out_endpoint) {
-                        (Some(input), Some(output)) => {
-                            format!("IN 0x{input:02x} / OUT 0x{output:02x}")
-                        }
-                        _ => "Not applicable".to_owned(),
-                    },
-                );
-                receiver_row(ui, "Initialization", &receiver.initialization);
-                receiver_row(
-                    ui,
-                    "Firmware downloaded",
-                    match receiver.firmware_downloaded {
-                        Some(true) => "Yes",
-                        Some(false) => "No",
-                        None => "Not applicable",
-                    },
-                );
                 receiver_row(
                     ui,
                     "RF configuration",
@@ -385,7 +463,7 @@ fn selected_device_label(app: &NebulusApp) -> String {
         .device_id
         .as_deref()
         .and_then(|id| app.devices.iter().find(|device| device.id == id))
-        .map(|device| format!("{} ({})", device.label, device.id))
+        .map(|device| format!("{} — {}", device.label, device.location))
         .or_else(|| app.settings.device_id.clone())
         .unwrap_or_else(|| "Select an adapter".to_owned())
 }

@@ -158,6 +158,15 @@ The browser still needs the same Realtek HAL work as native: WebUSB changes how
 control and bulk transfers are issued, not what registers or firmware steps the
 adapter needs.
 
+### Exact physical adapter selection
+
+`list_supported_devices()` returns `UsbDeviceSummary` values with bus, address,
+and hub-port information. `summary.stable_id()` combines that topology with the
+VID/PID. Pass the result to `RealtekDevice::open_by_id` when two adapters share
+the same USB identifiers. Nebulus uses this path for packet-level receive
+diversity and keeps an independent descriptor layout and transfer queue for
+each radio.
+
 An initialized device can be moved to another channel with `retune` on native
 or `retune_async` on every target. Retuning reuses firmware and cached EFUSE
 power data; it does not repeat cold initialization. The caller must pause its

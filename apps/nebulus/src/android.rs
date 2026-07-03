@@ -461,7 +461,7 @@ pub(crate) fn list_devices() -> Result<Vec<UsbDeviceInfo>, String> {
 pub(crate) fn open_device(selected: Option<&str>) -> Result<OpenedUsbDevice, String> {
     let app = app()?;
     let vm = java_vm(&app)?;
-    let selected = selected.and_then(parse_device_id);
+    let selected = selected.map(str::to_owned);
     let (manager, device, info, permission_granted) = vm
         .attach_current_thread(|env| {
             let manager = usb_manager(env, &app)?;
@@ -483,7 +483,8 @@ pub(crate) fn open_device(selected: Option<&str>) -> Result<OpenedUsbDevice, Str
                     continue;
                 };
                 let matches = selected
-                    .map(|ids| ids == (info.vendor_id, info.product_id))
+                    .as_deref()
+                    .map(|id| info.id == id || info.id.starts_with(id))
                     .unwrap_or(true);
                 if matches {
                     found = Some((device, info));
@@ -627,11 +628,22 @@ fn device_info(
     let Some(supported) = openipc_rtl88xx::supported_device(vendor_id, product_id) else {
         return Ok(None);
     };
+    let device_name = env
+        .call_method(
+            device,
+            jni_str!("getDeviceName"),
+            jni_sig!("()Ljava/lang/String;"),
+            &[],
+        )?
+        .check_null()?
+        .l()?;
+    let device_name = env.cast_local::<JString>(device_name)?.try_to_string(env)?;
     Ok(Some(UsbDeviceInfo {
-        id: format!("{vendor_id:04x}:{product_id:04x}"),
+        id: format!("{vendor_id:04x}:{product_id:04x}@android-{device_name}"),
         label: supported.label.to_owned(),
         vendor_id,
         product_id,
+        location: device_name,
     }))
 }
 
@@ -709,12 +721,4 @@ fn duplicate_fd(fd: i32) -> Result<OwnedFd, String> {
     }
     // SAFETY: `dup` returned a fresh descriptor now exclusively owned here.
     Ok(unsafe { OwnedFd::from_raw_fd(duplicate) })
-}
-
-fn parse_device_id(value: &str) -> Option<(u16, u16)> {
-    let (vendor, product) = value.split_once(':')?;
-    Some((
-        u16::from_str_radix(vendor, 16).ok()?,
-        u16::from_str_radix(product, 16).ok()?,
-    ))
 }

@@ -31,6 +31,8 @@ flowchart LR
 ## Shared Rust Responsibilities
 
 - Realtek RX aggregate parsing from 24-byte USB RX descriptors.
+- First-valid-copy WFB selection across independent receive adapters without a
+  comparison delay.
 - OpenIPC/WFB 802.11 frame filtering.
 - WFB session-key handling, data decryption, FEC recovery, and counters.
 - RTP parsing and H.264/H.265 depacketization into Annex-B frames.
@@ -56,15 +58,16 @@ protocol details, then let each target own the APIs that make sense there.
 - Realtek TX descriptor construction for monitor-injection packets before USB
   bulk OUT.
 - CLI output as Annex-B or RTP-over-UDP.
-- Nebulus RX-thread ownership of bulk-IN, protocol state, and decoder submit;
+- Nebulus per-adapter bulk-IN workers feeding one protocol and decoder worker;
   a lower-priority bounded radio worker owns auxiliary bulk-OUT and Jaguar3
   maintenance.
 - Tauri commands/events for the legacy desktop station UI.
 
 ### Browser
 
-- JavaScript owns the WebUSB permission prompt because browsers require a user
-  gesture.
+- JavaScript owns each WebUSB permission prompt because browsers require a user
+  gesture. Rust can concurrently operate every adapter already authorized by
+  the user.
 - The granted `UsbDevice` is passed into Rust/WASM through `nusb-webusb`,
   imported as `nusb`.
 - Rust/WASM initializes the Realtek adapter, performs bulk IN/OUT, and returns
@@ -117,8 +120,11 @@ persistent WebGL texture; decoded pixels do not pass through a WASM byte array.
 
 ```mermaid
 flowchart TD
-    A["Realtek USB bulk IN"] --> B["RX aggregate parser"]
-    B --> C["OpenIPC 802.11/WFB filter"]
+    A1["Realtek adapter A<br/>USB bulk IN"] --> B1["RX aggregate parser A"]
+    A2["Realtek adapter B<br/>USB bulk IN"] --> B2["RX aggregate parser B"]
+    B1 --> S["First-valid-copy selector"]
+    B2 --> S
+    S --> C["OpenIPC 802.11/WFB filter"]
     C --> D["WFB session/data decrypt"]
     D --> E["Reed-Solomon FEC recovery"]
     E --> P["ReceiverRuntime<br/>route fanout"]

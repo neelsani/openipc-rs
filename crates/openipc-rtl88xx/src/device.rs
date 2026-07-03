@@ -116,6 +116,28 @@ impl RealtekDevice {
     }
 
     #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+    /// Open one exact physical adapter returned by [`crate::list_supported_devices`].
+    ///
+    /// The stable id contains USB topology in addition to VID/PID, allowing
+    /// callers to independently open multiple adapters of the same model.
+    pub fn open_by_id(stable_id: &str, options: DriverOptions) -> Result<Self, DriverError> {
+        let info = nusb::list_devices()
+            .wait()
+            .map_err(|err| DriverError::Nusb(format!("list_devices failed: {err}")))?
+            .find(|device| {
+                let legacy_id = format!("{:04x}:{:04x}", device.vendor_id(), device.product_id());
+                (crate::types::nusb_device_id(device) == stable_id || legacy_id == stable_id)
+                    && device_matches_options(device.vendor_id(), device.product_id(), options)
+            })
+            .ok_or(DriverError::DeviceNotFound)?;
+        let device = info
+            .open()
+            .wait()
+            .map_err(|err| DriverError::Nusb(format!("open adapter {stable_id} failed: {err}")))?;
+        Self::from_nusb_device(device, options)
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
     /// Open every visible adapter matching [`DriverOptions`].
     ///
     /// This is intended for mirror/transmit workflows where one WFB packet

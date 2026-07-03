@@ -380,7 +380,8 @@ mod tests {
         StartRequest {
             #[cfg(target_os = "android")]
             video_output: None,
-            device_id: None,
+            primary_device_id: None,
+            device_ids: Vec::new(),
             channel: settings.channel,
             channel_width_mhz: settings.channel_width_mhz,
             channel_offset: settings.channel_offset,

@@ -61,6 +61,8 @@ the next release.
   presentation.
 - Done: Nebulus profiles, editable HUD, preflight, automatic native recovery,
   idle native/WebUSB channel survey, and sanitized support bundles.
+- Done: packet-level multiple-adapter receive diversity on desktop, Android,
+  and WebUSB with one shared WFB/FEC/RTP pipeline.
 - Done: legacy Tauri desktop station using the native Rust/nusb backend.
 
 ## Browser

@@ -6,6 +6,9 @@ The repo contains the shared Rust packet pipeline, Realtek USB WiFi driver,
 adaptive-link feedback, a WASM/WebUSB SDK, and Nebulus, the primary ground
 station for desktop, Android, and the browser.
 
+Nebulus supports packet-level receive diversity: several USB radios can feed
+one low-latency WFB/FEC/RTP pipeline while the first valid packet copy wins.
+
 ## Repository
 
 ```text
@@ -157,6 +160,7 @@ bun run start
 - [WASM SDK Usage](docs/docs/wasm-sdk.md)
 - [Desktop Tauri](docs/docs/desktop-tauri.md)
 - [Nebulus](docs/docs/nebulus.md)
+- [Receive Diversity](docs/docs/receive-diversity.md)
 - [Adaptive Link](docs/docs/adaptive-link.md)
 - [CI/CD](docs/docs/ci-cd.md)
 - [Publishing](docs/docs/publishing.md)

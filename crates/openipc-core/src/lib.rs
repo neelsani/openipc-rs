@@ -9,6 +9,8 @@ pub mod adaptive;
 pub mod channel;
 /// Legacy WFB ChaCha20-Poly1305 compatibility helpers.
 pub mod crypto;
+/// First-valid-copy packet diversity for multiple receive adapters.
+pub mod diversity;
 /// Reed-Solomon forward-error-correction helpers.
 pub mod fec;
 /// Minimal 802.11 frame parsing and construction helpers.
@@ -34,6 +36,9 @@ pub mod wfb_tx;
 
 pub use adaptive::{AdaptiveLink, AdaptiveLinkSender, LinkQuality};
 pub use channel::{ChannelId, RadioPort};
+pub use diversity::{
+    DiversityCombiner, DiversityDecision, DiversitySourceId, DiversitySourceStats, DiversityStats,
+};
 pub use fec::{FecCode, FecError};
 pub use ieee80211::{FrameLayout, WifiFrame};
 pub use mock::{MockRtpFrame, MockRtpPipeline};

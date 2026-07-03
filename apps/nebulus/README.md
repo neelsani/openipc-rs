@@ -1,9 +1,9 @@
 # Nebulus
 
 Nebulus is a pure-Rust OpenIPC FPV ground station built with
-[egui](https://github.com/emilk/egui). It opens a supported Realtek USB WiFi
-adapter, reconstructs WFB video, decodes H.264 or H.265 with the operating
-system's video API, and always presents the newest decoded frame.
+[egui](https://github.com/emilk/egui). It opens one or more supported Realtek
+USB WiFi adapters, reconstructs WFB video, decodes H.264 or H.265 with the
+operating system's video API, and always presents the newest decoded frame.
 
 It shares the same Rust application, protocol pipeline, settings, metrics, and
 UI across desktop, Android, and the browser. Only USB access and video-surface
@@ -52,11 +52,11 @@ HUD values can be hidden or dragged to normalized video positions, so one
 layout remains usable at different window sizes. Theme, scale, and HUD changes
 apply immediately on desktop, Android, and the browser.
 
-Settings includes named receiver profiles. A profile snapshots the adapter,
-radio, Link ID, key, routes, audio, VPN, and decoder choices; GUI appearance
-stays global. Use **Save current** after changing a profile. **Run preflight**
-checks the selected adapter, key, radio values, routes, decoder state, VPN, and
-adaptive-link configuration before RX starts.
+Settings includes named receiver profiles. A profile snapshots the primary and
+diversity adapters, radio, Link ID, key, routes, audio, VPN, and decoder
+choices; GUI appearance stays global. Use **Save current** after changing a
+profile. **Run preflight** checks the selected adapters, key, radio values,
+routes, decoder state, VPN, and adaptive-link configuration before RX starts.
 
 **Scan channels** opens an idle-only survey. The Rust driver initializes the
 adapter once, retunes it across the selected channels, and reports traffic,
@@ -75,7 +75,9 @@ cd apps/nebulus
 trunk serve --release --open
 ```
 
-Press **Start RX** to open the browser's WebUSB device picker. Browser builds
+Use **Add adapter** to authorize each WebUSB radio, select a primary and any
+diversity receivers, then press **Start RX**. With no authorized selection,
+**Start RX** opens the browser's WebUSB device picker for one adapter. Browser builds
 use the same Rust Realtek initialization and WFB/FEC/RTP pipeline as native
 builds. WebCodecs performs H.264/H.265 decoding and WebGL uploads the retained
 browser `VideoFrame` directly, without copying decoded pixels through WASM.
@@ -134,17 +136,18 @@ control before adding `--release` for distribution builds.
 ## Data Path
 
 ```text
-USB bulk IN
-  -> openipc-rtl88xx RX descriptor parsing
+USB bulk IN from each selected adapter
+  -> per-adapter openipc-rtl88xx RX descriptor parsing
+  -> first-valid-copy diversity selection when multiple radios are active
   -> openipc-core 802.11 filtering, WFB crypto, FEC, RTP depacketizing
   -> openipc-video platform H.264/H.265 decoder
   -> newest decoded frame
   -> platform GPU presenter
 ```
 
-Desktop and Android run USB, protocol, and decode work on a dedicated Rust
-worker thread. The egui event loop only updates state and uploads the newest
-presentable frame. The browser keeps WebUSB and WebCodecs on its local async
+Desktop and Android keep one bulk-IN capture worker per adapter and one shared
+protocol/decode worker. The egui event loop only updates state and uploads the
+newest presentable frame. The browser keeps WebUSB and WebCodecs on its local async
 executor because browser handles are not `Send`. Rust/WASM submits compressed
 access units directly to the browser WebCodecs API; application-written
 JavaScript callbacks are not part of the receive path.
@@ -202,6 +205,8 @@ codec. Native audio requests a 256-frame output buffer and keeps no more than
 ## Included Controls
 
 - Supported-adapter discovery and refresh
+- Packet-level receive diversity across multiple adapters of the same or mixed
+  supported Realtek families
 - RF channel, width, offset, link ID, epoch, and USB transfer size
 - Built-in default `gs.key`, native file picker, and key-file drop
 - Optional RTP reorder buffer

@@ -94,9 +94,14 @@ fn metrics_summary(app: &NebulusApp, ui: &mut egui::Ui) {
     let radio = app
         .receiver_info
         .as_ref()
-        .map(|receiver| receiver.label.as_str())
-        .unwrap_or("Not connected")
-        .to_owned();
+        .map(|receiver| {
+            if app.receiver_infos.len() > 1 {
+                format!("{} + {}", receiver.label, app.receiver_infos.len() - 1)
+            } else {
+                receiver.label.clone()
+            }
+        })
+        .unwrap_or_else(|| "Not connected".to_owned());
 
     ui.columns(2, |columns| {
         metric_group(&mut columns[0], "STREAM", "metrics_stream", |ui| {

@@ -202,14 +202,30 @@ fn discover_devices() -> Result<Vec<openipc_rtl88xx::UsbDeviceSummary>, String> 
 
 #[cfg(not(target_os = "android"))]
 fn device_info(device: openipc_rtl88xx::UsbDeviceSummary) -> UsbDeviceInfo {
+    let id = device.stable_id();
+    let location = if device.port_chain.is_empty() {
+        format!("{} address {}", device.bus_id, device.device_address)
+    } else {
+        format!(
+            "{} port {}",
+            device.bus_id,
+            device
+                .port_chain
+                .iter()
+                .map(u8::to_string)
+                .collect::<Vec<_>>()
+                .join(".")
+        )
+    };
     UsbDeviceInfo {
-        id: format!("{:04x}:{:04x}", device.vendor_id, device.product_id),
+        id,
         label: device
             .product
             .or(device.manufacturer)
             .unwrap_or_else(|| format!("{:04x}:{:04x}", device.vendor_id, device.product_id)),
         vendor_id: device.vendor_id,
         product_id: device.product_id,
+        location,
     }
 }
 
@@ -243,12 +259,13 @@ mod worker {
         time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
 
-    use nusb::transfer::TransferError;
+    use nusb::transfer::{Buffer, TransferError};
     use nusb::MaybeFuture;
     use openipc_core::{
         realtek::{parse_rx_aggregate_with_kind, RxPacketType},
-        AdaptiveLink, AdaptiveLinkSender, ChannelId, FecCounters, FrameLayout, PayloadRouteId,
-        RadioPort, ReceiverRuntime, TxRadioParams, WfbKeypair, WfbTransmitter, WfbTxKeypair,
+        AdaptiveLink, AdaptiveLinkSender, ChannelId, DiversityCombiner, DiversityDecision,
+        DiversitySourceId, DiversityStats, FecCounters, FrameLayout, PayloadRouteId, RadioPort,
+        ReceiverRuntime, TxRadioParams, WfbKeypair, WfbTransmitter, WfbTxKeypair,
     };
     use openipc_rtl88xx::{
         ChannelWidth, ChipFamily, DriverOptions, Jaguar3PowerTrackingState, MonitorOptions,
@@ -264,8 +281,8 @@ mod worker {
         model::LogLevel,
         runtime::{
             route_runtime::{configure_receiver, RouteProcessor, VPN_ROUTE_ID},
-            BatchMetrics, ChannelScanAccumulator, MetricsThrottle, RuntimeEvent, ScanRequest,
-            StartRequest, VpnMetrics,
+            AdapterRuntimeMetrics, BatchMetrics, ChannelScanAccumulator, MetricsThrottle,
+            RuntimeEvent, ScanRequest, StartRequest, VpnMetrics,
         },
     };
 
@@ -278,18 +295,22 @@ mod worker {
         if request.channels.is_empty() {
             return Err("Select at least one channel to scan".to_owned());
         }
-        let mut driver = DriverOptions::default();
-        if let Some(device_id) = &request.device_id {
-            if let Some((vendor, product)) = parse_device_id(device_id) {
-                driver.target_vendor_id = Some(vendor);
-                driver.target_product_id = Some(product);
-            }
-        }
+        let driver = DriverOptions::default();
         #[cfg(not(target_os = "android"))]
-        let device = RealtekDevice::open_first(driver).map_err(|error| error.to_string())?;
+        let device = request
+            .device_id
+            .as_deref()
+            .map_or_else(
+                || RealtekDevice::open_first(driver),
+                |id| RealtekDevice::open_by_id(id, driver),
+            )
+            .map_err(|error| error.to_string())?;
         #[cfg(target_os = "android")]
         let (device, _android_connection) = {
-            driver.skip_reset = true;
+            let driver = DriverOptions {
+                skip_reset: true,
+                ..driver
+            };
             let opened = crate::android::open_device(request.device_id.as_deref())?;
             let device = RealtekDevice::from_nusb_device(opened.device, driver)
                 .map_err(|error| error.to_string())?;
@@ -551,6 +572,229 @@ mod worker {
 
     const VIDEO_ROUTE: PayloadRouteId = PayloadRouteId::new(1);
     const RX_TRANSFERS_IN_FLIGHT: usize = 4;
+
+    struct CaptureEvent {
+        source_id: u16,
+        buffer: Buffer,
+        actual_len: usize,
+        usb_latency_ms: f64,
+    }
+
+    struct CaptureWorker {
+        return_buffer: mpsc::Sender<Buffer>,
+        metrics: Arc<Mutex<AdapterRuntimeMetrics>>,
+        worker: Option<JoinHandle<()>>,
+    }
+
+    impl CaptureWorker {
+        fn start(
+            source_id: u16,
+            device_id: String,
+            label: String,
+            device: &RealtekDevice,
+            transfer_size: usize,
+            stop: Arc<AtomicBool>,
+            completions: SyncSender<CaptureEvent>,
+        ) -> Result<Self, String> {
+            let mut endpoint = device
+                .bulk_in_endpoint()
+                .map_err(|error| error.to_string())?;
+            while endpoint.pending() < RX_TRANSFERS_IN_FLIGHT {
+                endpoint.submit(endpoint.allocate(transfer_size));
+            }
+            let metrics = Arc::new(Mutex::new(AdapterRuntimeMetrics {
+                source_id,
+                device_id,
+                label,
+                online: true,
+                ..AdapterRuntimeMetrics::default()
+            }));
+            let thread_metrics = Arc::clone(&metrics);
+            let (return_buffer, returned_buffers) = mpsc::channel();
+            let worker = std::thread::Builder::new()
+                .name(format!("nebulus-usb-rx-{source_id}"))
+                .spawn(move || {
+                    let mut consecutive_errors = 0u8;
+                    while !stop.load(Ordering::Relaxed) {
+                        while let Ok(buffer) = returned_buffers.try_recv() {
+                            endpoint.submit(buffer);
+                        }
+                        let started = Instant::now();
+                        let Some(completion) =
+                            endpoint.wait_next_complete(Duration::from_millis(20))
+                        else {
+                            continue;
+                        };
+                        let usb_latency_ms = started.elapsed().as_secs_f64() * 1_000.0;
+                        let actual_len = completion.actual_len;
+                        match completion.status {
+                            Ok(()) => {
+                                consecutive_errors = 0;
+                                {
+                                    let mut metrics =
+                                        thread_metrics.lock().expect("capture metrics poisoned");
+                                    metrics.transfers = metrics.transfers.saturating_add(1);
+                                    metrics.transfer_bytes =
+                                        metrics.transfer_bytes.saturating_add(actual_len as u64);
+                                }
+                                let event = CaptureEvent {
+                                    source_id,
+                                    buffer: completion.buffer,
+                                    actual_len,
+                                    usb_latency_ms,
+                                };
+                                match completions.try_send(event) {
+                                    Ok(()) => {}
+                                    Err(TrySendError::Full(event)) => {
+                                        thread_metrics
+                                            .lock()
+                                            .expect("capture metrics poisoned")
+                                            .queue_drops += 1;
+                                        endpoint.submit(event.buffer);
+                                    }
+                                    Err(TrySendError::Disconnected(event)) => {
+                                        endpoint.submit(event.buffer);
+                                        break;
+                                    }
+                                }
+                            }
+                            Err(TransferError::Disconnected) => {
+                                thread_metrics
+                                    .lock()
+                                    .expect("capture metrics poisoned")
+                                    .usb_errors += 1;
+                                break;
+                            }
+                            Err(TransferError::Stall) => {
+                                thread_metrics
+                                    .lock()
+                                    .expect("capture metrics poisoned")
+                                    .usb_errors += 1;
+                                let _ = endpoint.clear_halt().wait();
+                                endpoint.submit(completion.buffer);
+                                consecutive_errors = 0;
+                            }
+                            Err(_) => {
+                                thread_metrics
+                                    .lock()
+                                    .expect("capture metrics poisoned")
+                                    .usb_errors += 1;
+                                endpoint.submit(completion.buffer);
+                                consecutive_errors = consecutive_errors.saturating_add(1);
+                                if consecutive_errors >= 8 {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    thread_metrics
+                        .lock()
+                        .expect("capture metrics poisoned")
+                        .online = false;
+                })
+                .map_err(|error| format!("start USB capture worker failed: {error}"))?;
+            Ok(Self {
+                return_buffer,
+                metrics,
+                worker: Some(worker),
+            })
+        }
+
+        fn snapshot(&self, diversity: &DiversityStats) -> AdapterRuntimeMetrics {
+            let mut snapshot = self
+                .metrics
+                .lock()
+                .expect("capture metrics poisoned")
+                .clone();
+            if let Some(source) = diversity
+                .sources
+                .get(&DiversitySourceId::new(snapshot.source_id))
+            {
+                snapshot.accepted = source.accepted;
+                snapshot.duplicates = source.duplicates;
+            }
+            snapshot
+        }
+    }
+
+    struct CaptureGroup {
+        stop: Arc<AtomicBool>,
+        workers: Vec<CaptureWorker>,
+    }
+
+    impl CaptureGroup {
+        fn online_count(&self) -> usize {
+            self.workers
+                .iter()
+                .filter(|worker| {
+                    worker
+                        .metrics
+                        .lock()
+                        .expect("capture metrics poisoned")
+                        .online
+                })
+                .count()
+        }
+
+        fn snapshots(&self, diversity: &DiversityStats) -> Vec<AdapterRuntimeMetrics> {
+            self.workers
+                .iter()
+                .map(|worker| worker.snapshot(diversity))
+                .collect()
+        }
+    }
+
+    fn diversity_snapshot(
+        diversity: &DiversityCombiner,
+        captures: &CaptureGroup,
+        source_quality: &mut [AdaptiveLink],
+        now: u64,
+    ) -> (DiversityStats, Vec<AdapterRuntimeMetrics>) {
+        let stats = diversity.stats();
+        let mut adapters = captures.snapshots(&stats);
+        for (snapshot, quality_tracker) in adapters.iter_mut().zip(source_quality) {
+            let quality = quality_tracker.quality(now);
+            snapshot.rssi[0] = quality.rssi[0];
+            snapshot.rssi[1] = quality.rssi[1];
+            snapshot.snr[0] = quality.snr[0];
+            snapshot.snr[1] = quality.snr[1];
+        }
+        (stats, adapters)
+    }
+
+    fn send_metrics(
+        events: &super::EventQueue,
+        context: &eframe::egui::Context,
+        mut metrics: BatchMetrics,
+        diversity: &DiversityCombiner,
+        captures: &CaptureGroup,
+        source_quality: &mut [AdaptiveLink],
+        now: u64,
+    ) {
+        (metrics.diversity, metrics.adapters) =
+            diversity_snapshot(diversity, captures, source_quality, now);
+        send(events, context, RuntimeEvent::Batch(Box::new(metrics)));
+    }
+
+    impl Drop for CaptureGroup {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            for worker in &mut self.workers {
+                if let Some(handle) = worker.worker.take() {
+                    let _ = handle.join();
+                }
+            }
+        }
+    }
+
+    struct ActiveAdapter {
+        id: String,
+        label: String,
+        device: Arc<RealtekDevice>,
+        chip: ChipFamily,
+        descriptor: openipc_core::RxDescriptorKind,
+        receiver_info: crate::runtime::ReceiverInfo,
+    }
 
     fn decoder_options() -> DecoderOptions {
         #[cfg(target_os = "android")]
@@ -843,45 +1087,155 @@ mod worker {
         events: &super::EventQueue,
         context: &eframe::egui::Context,
     ) -> Result<(), String> {
-        let mut driver = DriverOptions::default();
-        if let Some(device_id) = &request.device_id {
-            if let Some((vendor, product)) = parse_device_id(device_id) {
-                driver.target_vendor_id = Some(vendor);
-                driver.target_product_id = Some(product);
-            }
-        }
-        #[cfg(not(target_os = "android"))]
-        let (device, device_label) = (
-            Arc::new(RealtekDevice::open_first(driver).map_err(|error| error.to_string())?),
-            request
-                .device_id
-                .as_deref()
-                .and_then(parse_device_id)
-                .and_then(|(vendor, product)| openipc_rtl88xx::supported_device(vendor, product))
-                .map(|supported| supported.label.to_owned())
-                .or_else(|| request.device_id.clone())
-                .unwrap_or_else(|| "Realtek USB adapter".to_owned()),
-        );
-        #[cfg(target_os = "android")]
-        let (device, _android_connection, device_label) = {
-            driver.skip_reset = true;
-            let opened = crate::android::open_device(request.device_id.as_deref())?;
-            let label = opened.info.label.clone();
-            let device = RealtekDevice::from_nusb_device(opened.device, driver)
-                .map_err(|error| error.to_string())?;
-            (Arc::new(device), opened.connection, label)
-        };
         let radio = RadioConfig {
             channel: request.channel,
             channel_width: channel_width(request.channel_width_mhz)?,
             channel_offset: request.channel_offset,
         };
-        let report = device
-            .initialize_monitor_with_options(radio, MonitorOptions::from_env())
-            .map_err(|error| error.to_string())?;
-        let chip = report.chip.family;
-        let receiver_info =
-            crate::runtime::ReceiverInfo::initialized(device_label, &device, &report);
+        let mut adapters = Vec::new();
+        let mut adapter_errors = Vec::new();
+        #[cfg(target_os = "android")]
+        let mut android_connections = Vec::new();
+        let requested_ids = if request.device_ids.is_empty() {
+            vec![request.primary_device_id.clone()]
+        } else {
+            request.device_ids.iter().cloned().map(Some).collect()
+        };
+        for requested_id in requested_ids {
+            let driver = DriverOptions::default();
+            #[cfg(target_os = "android")]
+            let driver = DriverOptions {
+                skip_reset: true,
+                ..driver
+            };
+            #[cfg(not(target_os = "android"))]
+            let (device, id, label) = {
+                let opened = requested_id.as_deref().map_or_else(
+                    || RealtekDevice::open_first(driver),
+                    |id| RealtekDevice::open_by_id(id, driver),
+                );
+                let device = match opened {
+                    Ok(device) => device,
+                    Err(error) => {
+                        log(
+                            events,
+                            context,
+                            LogLevel::Warn,
+                            "usb",
+                            format!(
+                                "Skipping diversity adapter {}: {error}",
+                                requested_id.as_deref().unwrap_or("automatic")
+                            ),
+                        );
+                        adapter_errors.push(format!(
+                            "{}: {error}",
+                            requested_id.as_deref().unwrap_or("automatic")
+                        ));
+                        continue;
+                    }
+                };
+                let id = requested_id.unwrap_or_else(|| {
+                    format!("{:04x}:{:04x}", device.vendor_id(), device.product_id())
+                });
+                let label =
+                    openipc_rtl88xx::supported_device(device.vendor_id(), device.product_id())
+                        .map(|supported| supported.label.to_owned())
+                        .unwrap_or_else(|| id.clone());
+                (device, id, label)
+            };
+            #[cfg(target_os = "android")]
+            let (device, id, label) = {
+                let opened = match crate::android::open_device(requested_id.as_deref()) {
+                    Ok(opened) => opened,
+                    Err(error) => {
+                        log(
+                            events,
+                            context,
+                            LogLevel::Warn,
+                            "usb",
+                            format!(
+                                "Skipping diversity adapter {}: {error}",
+                                requested_id.as_deref().unwrap_or("automatic")
+                            ),
+                        );
+                        adapter_errors.push(format!(
+                            "{}: {error}",
+                            requested_id.as_deref().unwrap_or("automatic")
+                        ));
+                        continue;
+                    }
+                };
+                let id = opened.info.id.clone();
+                let label = opened.info.label.clone();
+                let device = match RealtekDevice::from_nusb_device(opened.device, driver) {
+                    Ok(device) => device,
+                    Err(error) => {
+                        log(
+                            events,
+                            context,
+                            LogLevel::Warn,
+                            "usb",
+                            format!("Skipping diversity adapter {id}: claim failed: {error}"),
+                        );
+                        adapter_errors.push(format!("{id}: claim failed: {error}"));
+                        continue;
+                    }
+                };
+                android_connections.push(opened.connection);
+                (device, id, label)
+            };
+            if adapters
+                .iter()
+                .any(|adapter: &ActiveAdapter| adapter.id == id)
+            {
+                continue;
+            }
+            let device = Arc::new(device);
+            let report = match device
+                .initialize_monitor_with_options(radio, MonitorOptions::from_env())
+            {
+                Ok(report) => report,
+                Err(error) => {
+                    log(
+                        events,
+                        context,
+                        LogLevel::Warn,
+                        "usb",
+                        format!("Skipping diversity adapter {id}: initialization failed: {error}"),
+                    );
+                    adapter_errors.push(format!("{id}: initialization failed: {error}"));
+                    continue;
+                }
+            };
+            let source_id = u16::try_from(adapters.len())
+                .map_err(|_| "too many diversity adapters selected".to_owned())?;
+            adapters.push(ActiveAdapter {
+                descriptor: device.rx_descriptor_kind(),
+                chip: report.chip.family,
+                receiver_info: crate::runtime::ReceiverInfo::initialized(
+                    id.clone(),
+                    source_id,
+                    label.clone(),
+                    &device,
+                    &report,
+                ),
+                id,
+                label,
+                device,
+            });
+        }
+        let primary = adapters.first().ok_or_else(|| {
+            format!(
+                "no selected receive adapter could be initialized{}",
+                if adapter_errors.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", adapter_errors.join("; "))
+                }
+            )
+        })?;
+        let chip = primary.chip;
+        let device = Arc::clone(&primary.device);
         let mut decoder = create_decoder(&request)?;
         let presenter = FramePresenter::new(events, context);
         let decoder_environment = decoder_environment(decoder.capabilities());
@@ -889,7 +1243,10 @@ mod worker {
             events,
             context,
             RuntimeEvent::Connected {
-                receiver: receiver_info,
+                receivers: adapters
+                    .iter()
+                    .map(|adapter| adapter.receiver_info.clone())
+                    .collect(),
                 decoder: decoder_environment,
             },
         );
@@ -941,9 +1298,6 @@ mod worker {
                 ),
             );
         }
-        let mut ep_in = device
-            .bulk_in_endpoint()
-            .map_err(|error| error.to_string())?;
         let radio = RadioWorker::start(
             Arc::clone(&device),
             chip,
@@ -951,71 +1305,137 @@ mod worker {
             events,
             context,
         )?;
-        while ep_in.pending() < RX_TRANSFERS_IN_FLIGHT {
-            ep_in.submit(ep_in.allocate(request.transfer_size));
+        let diversity_radio_workers = adapters
+            .iter()
+            .skip(1)
+            .map(|adapter| {
+                RadioWorker::start(
+                    Arc::clone(&adapter.device),
+                    adapter.chip,
+                    false,
+                    events,
+                    context,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let capture_stop = Arc::new(AtomicBool::new(false));
+        let queue_capacity = adapters
+            .len()
+            .saturating_mul(RX_TRANSFERS_IN_FLIGHT)
+            .saturating_mul(2)
+            .max(8);
+        let (capture_sender, capture_events) = mpsc::sync_channel(queue_capacity);
+        let mut captures = CaptureGroup {
+            stop: capture_stop,
+            workers: Vec::with_capacity(adapters.len()),
+        };
+        for (index, adapter) in adapters.iter().enumerate() {
+            captures.workers.push(CaptureWorker::start(
+                index as u16,
+                adapter.id.clone(),
+                adapter.label.clone(),
+                &adapter.device,
+                request.transfer_size,
+                Arc::clone(&captures.stop),
+                capture_sender.clone(),
+            )?);
         }
+        drop(capture_sender);
         send(events, context, RuntimeEvent::Started);
-        log(events, context, LogLevel::Info, "rx", "Receiver started");
+        log(
+            events,
+            context,
+            LogLevel::Info,
+            "rx",
+            format!(
+                "Receiver started with {} adapter(s); primary TX adapter is {}",
+                adapters.len(),
+                adapters[0].label
+            ),
+        );
 
-        let descriptor = device.rx_descriptor_kind();
         let mut last_decode_errors = 0;
-        let mut consecutive_usb_errors = 0u8;
         let mut recorder: Option<EncodedRecorder> = None;
         let mut armed_path: Option<PathBuf> = None;
         let mut metrics_throttle = MetricsThrottle::new();
+        let mut diversity = DiversityCombiner::default();
+        let diversity_enabled = adapters.len() > 1;
+        let mut source_quality = (0..adapters.len())
+            .map(|_| AdaptiveLink::new())
+            .collect::<Vec<_>>();
+        let mut last_online_count = captures.online_count();
         while !stop.load(Ordering::Relaxed) {
-            let usb_start = Instant::now();
-            let Some(completion) = ep_in.wait_next_complete(Duration::from_millis(250)) else {
-                if let Some(metrics) = metrics_throttle.flush() {
-                    send(events, context, RuntimeEvent::Batch(Box::new(metrics)));
+            let event = match capture_events.recv_timeout(Duration::from_millis(50)) {
+                Ok(event) => event,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let online_count = captures.online_count();
+                    if online_count != last_online_count {
+                        let level = if online_count == adapters.len() {
+                            LogLevel::Info
+                        } else {
+                            LogLevel::Warn
+                        };
+                        log(
+                            events,
+                            context,
+                            level,
+                            "diversity",
+                            format!(
+                                "Receive diversity health: {online_count}/{} adapters online",
+                                adapters.len()
+                            ),
+                        );
+                        last_online_count = online_count;
+                        let now = now_ms();
+                        let (stats, adapters) =
+                            diversity_snapshot(&diversity, &captures, &mut source_quality, now);
+                        send(
+                            events,
+                            context,
+                            RuntimeEvent::DiversityUpdate { stats, adapters },
+                        );
+                    }
+                    if online_count == 0 {
+                        return Err("all receive adapters disconnected".to_owned());
+                    }
+                    if let Some(metrics) = metrics_throttle.flush() {
+                        send_metrics(
+                            events,
+                            context,
+                            metrics,
+                            &diversity,
+                            &captures,
+                            &mut source_quality,
+                            now_ms(),
+                        );
+                    }
+                    update_recording(
+                        &[],
+                        recording_control,
+                        &mut armed_path,
+                        &mut recorder,
+                        recording_audio_config,
+                        events,
+                        context,
+                    );
+                    tick_adaptive(&mut link, radio.as_ref(), now_ms(), events, context);
+                    if let (Some(tun), Some(radio)) = (tun.as_mut(), radio.as_ref()) {
+                        tun.tick(now_ms(), radio);
+                    }
+                    continue;
                 }
-                update_recording(
-                    &[],
-                    recording_control,
-                    &mut armed_path,
-                    &mut recorder,
-                    recording_audio_config,
-                    events,
-                    context,
-                );
-                tick_adaptive(&mut link, radio.as_ref(), now_ms(), events, context);
-                if let (Some(tun), Some(radio)) = (tun.as_mut(), radio.as_ref()) {
-                    tun.tick(now_ms(), radio);
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("all USB capture workers stopped".to_owned());
                 }
+            };
+            let source_index = usize::from(event.source_id);
+            let Some(adapter) = adapters.get(source_index) else {
                 continue;
             };
-            let usb_latency_ms = usb_start.elapsed().as_secs_f64() * 1000.0;
-            let actual_len = completion.actual_len;
-            if let Err(error) = completion.status {
-                if error == TransferError::Disconnected {
-                    return Err("USB adapter disconnected".to_owned());
-                }
-                if error == TransferError::Stall {
-                    let _ = ep_in.clear_halt().wait();
-                    consecutive_usb_errors = 0;
-                } else {
-                    consecutive_usb_errors = consecutive_usb_errors.saturating_add(1);
-                }
-                log(
-                    events,
-                    context,
-                    LogLevel::Warn,
-                    "usb",
-                    format!("bulk IN failed: {error}"),
-                );
-                ep_in.submit(completion.buffer);
-                if consecutive_usb_errors >= 8 {
-                    return Err(format!(
-                        "USB receive failed {consecutive_usb_errors} times consecutively: {error}"
-                    ));
-                }
-                continue;
-            }
-            consecutive_usb_errors = 0;
-            let bytes = &completion.buffer[..actual_len];
+            let bytes = &event.buffer[..event.actual_len];
             let batch_start = Instant::now();
             let parse_start = Instant::now();
-            let packets = match parse_rx_aggregate_with_kind(bytes, descriptor) {
+            let packets = match parse_rx_aggregate_with_kind(bytes, adapter.descriptor) {
                 Ok(packets) => packets,
                 Err(error) => {
                     log(
@@ -1023,9 +1443,11 @@ mod worker {
                         context,
                         LogLevel::Warn,
                         "usb",
-                        format!("RX aggregate rejected: {error}"),
+                        format!("{} RX aggregate rejected: {error}", adapter.label),
                     );
-                    ep_in.submit(completion.buffer);
+                    let _ = captures.workers[source_index]
+                        .return_buffer
+                        .send(event.buffer);
                     continue;
                 }
             };
@@ -1037,17 +1459,44 @@ mod worker {
                     && packet.attrib.pkt_rpt_type == RxPacketType::NormalRx
                     && receiver.accepts_video_frame(packet.data)
                 {
-                    link.record_rx(now, packet.attrib.rssi, packet.attrib.snr);
+                    source_quality[source_index].record_rx_paths(
+                        now,
+                        packet.attrib.rssi,
+                        packet.attrib.snr,
+                    );
                 }
             }
+            let source = DiversitySourceId::new(event.source_id);
+            let selected_packets = packets.into_iter().filter(|packet| {
+                if packet.attrib.crc_err
+                    || packet.attrib.icv_err
+                    || packet.attrib.pkt_rpt_type != RxPacketType::NormalRx
+                {
+                    return true;
+                }
+                let decision = if diversity_enabled {
+                    diversity.observe_frame(source, packet.data, FrameLayout::WithFcs)
+                } else {
+                    DiversityDecision::Passthrough
+                };
+                let is_video = openipc_core::WifiFrame::parse(packet.data, FrameLayout::WithFcs)
+                    .is_ok_and(|frame| {
+                        frame.matches_channel_id(ChannelId::new(request.channel_id))
+                    });
+                if decision != DiversityDecision::Duplicate && is_video {
+                    link.record_rx(now, packet.attrib.rssi, packet.attrib.snr);
+                }
+                decision.should_forward()
+            });
             let pipeline_start = Instant::now();
-            let mut batch = receiver.push_rx_packets(packets, &options);
+            let mut batch = receiver.push_rx_packets(selected_packets, &options);
             let pipeline_latency_ms = pipeline_start.elapsed().as_secs_f64() * 1000.0;
 
-            // The parsed packets no longer borrow the transfer storage. Put
-            // the buffer back on the USB endpoint before any decode, audio,
-            // recording, diagnostics, or uplink work can delay capture.
-            ep_in.submit(completion.buffer);
+            // Return the owned transfer buffer before decode, audio, recording,
+            // diagnostics, or uplink processing can reduce USB queue depth.
+            let _ = captures.workers[source_index]
+                .return_buffer
+                .send(event.buffer);
 
             let video_bytes = batch.frames.iter().map(|frame| frame.data.len()).sum();
             update_recording(
@@ -1060,9 +1509,6 @@ mod worker {
                 context,
             );
 
-            // Move access-unit ownership into the decoder. The previous
-            // iter().cloned() path copied every encoded video frame even when
-            // recording was disabled.
             let decode_submit_start = Instant::now();
             for frame in std::mem::take(&mut batch.frames)
                 .into_iter()
@@ -1118,12 +1564,12 @@ mod worker {
             let stats = decoder.stats();
             if let Some(metrics) = metrics_throttle.push(BatchMetrics {
                 transfers: 1,
-                transfer_bytes: actual_len,
+                transfer_bytes: event.actual_len,
                 packets: batch.counters.packets,
                 rtp_packets: batch.counters.rtp_packets,
                 video_frames: batch.counters.video_frames,
                 video_bytes,
-                usb_latency_ms,
+                usb_latency_ms: event.usb_latency_ms,
                 parse_latency_ms,
                 pipeline_latency_ms,
                 route_latency_ms,
@@ -1144,8 +1590,18 @@ mod worker {
                 vpn: tun
                     .as_ref()
                     .map_or_else(VpnMetrics::default, |tun| tun.metrics.clone()),
+                diversity: DiversityStats::default(),
+                adapters: Vec::new(),
             }) {
-                send(events, context, RuntimeEvent::Batch(Box::new(metrics)));
+                send_metrics(
+                    events,
+                    context,
+                    metrics,
+                    &diversity,
+                    &captures,
+                    &mut source_quality,
+                    now,
+                );
             }
             if stats.decode_errors > last_decode_errors {
                 last_decode_errors = stats.decode_errors;
@@ -1164,16 +1620,34 @@ mod worker {
         }
 
         if let Some(metrics) = metrics_throttle.flush() {
-            send(events, context, RuntimeEvent::Batch(Box::new(metrics)));
+            send_metrics(
+                events,
+                context,
+                metrics,
+                &diversity,
+                &captures,
+                &mut source_quality,
+                now_ms(),
+            );
         }
-        drop(ep_in);
+        drop(captures);
         drop(radio);
+        drop(diversity_radio_workers);
         finish_recording(&mut recorder, events, context);
         let _ = decoder.flush();
         drop(presenter);
-        device
-            .shutdown_monitor()
-            .map_err(|error| format!("monitor shutdown failed: {error}"))?;
+        let mut shutdown_errors = Vec::new();
+        for adapter in adapters {
+            if let Err(error) = adapter.device.shutdown_monitor() {
+                shutdown_errors.push(format!("{}: {error}", adapter.label));
+            }
+        }
+        if !shutdown_errors.is_empty() {
+            return Err(format!(
+                "monitor shutdown failed: {}",
+                shutdown_errors.join("; ")
+            ));
+        }
         send(events, context, RuntimeEvent::Stopped);
         Ok(())
     }
@@ -1214,7 +1688,7 @@ mod worker {
             events,
             context,
             RuntimeEvent::Connected {
-                receiver: crate::runtime::ReceiverInfo::codec_mock(),
+                receivers: vec![crate::runtime::ReceiverInfo::codec_mock()],
                 decoder: decoder_environment(decoder.capabilities()),
             },
         );
@@ -1568,14 +2042,6 @@ mod worker {
             80 => Ok(ChannelWidth::Mhz80),
             _ => Err(format!("unsupported channel width {width} MHz")),
         }
-    }
-
-    fn parse_device_id(value: &str) -> Option<(u16, u16)> {
-        let (vendor, product) = value.split_once(':')?;
-        Some((
-            u16::from_str_radix(vendor, 16).ok()?,
-            u16::from_str_radix(product, 16).ok()?,
-        ))
     }
 
     fn now_ms() -> u64 {

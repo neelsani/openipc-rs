@@ -104,6 +104,23 @@ fn receive_one_transfer() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+For multiple identical adapters, enumerate first and open by the topology-based
+stable id instead of VID/PID:
+
+```rust
+use openipc_rtl88xx::{list_supported_devices, DriverOptions, RealtekDevice};
+
+for summary in list_supported_devices()? {
+    let id = summary.stable_id();
+    let device = RealtekDevice::open_by_id(&id, DriverOptions::default())?;
+    println!("opened {id}: {:04x}:{:04x}", device.vendor_id(), device.product_id());
+}
+```
+
+The id includes the host bus and hub-port chain, with the device address used
+only when no port chain is available. This lets an application keep one driver
+instance and bulk-IN queue per physical radio for receive diversity.
+
 ## Driver Options
 
 `DriverOptions` controls USB discovery and endpoint choice:

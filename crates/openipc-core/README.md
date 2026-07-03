@@ -23,6 +23,8 @@ OpenIPC video without taking a dependency on a specific USB frontend.
 - Build adaptive-link feedback payloads and WFB uplink packets.
 - Build radiotap + 802.11 WFB transmit frames. Hardware crates add their own
   USB/driver descriptors before transmission.
+- Select the first valid copy of each WFB packet when several independent
+  receive adapters feed one protocol pipeline.
 
 ## Basic Receive Shape
 
@@ -64,6 +66,43 @@ The returned frame data is still encoded video. Feed it to WebCodecs, a native
 decoder, a file writer, or an RTP/Annex-B bridge depending on your application.
 Long-running receivers should treat per-frame WFB errors as dropped packets and
 continue scanning the current USB aggregate.
+
+## Multiple-Adapter Diversity
+
+Use one `ReceiverRuntime` for every adapter tuned to the same channel. Put a
+`DiversityCombiner` before it and forward only the first valid copy:
+
+```rust
+use openipc_core::{DiversityCombiner, DiversitySourceId, FrameLayout, RealtekRxPacket};
+
+fn keep_first_copy<'a>(
+    combiner: &mut DiversityCombiner,
+    source: u16,
+    packet: &RealtekRxPacket<'a>,
+) -> bool {
+    if packet.attrib.crc_err || packet.attrib.icv_err {
+        return true; // Let ReceiverRuntime account for the descriptor drop.
+    }
+    combiner
+        .observe_frame(
+            DiversitySourceId::new(source),
+            packet.data,
+            FrameLayout::WithFcs,
+        )
+        .should_forward()
+}
+```
+
+The combiner identifies encrypted data by channel, WFB session generation, and
+data nonce. Session packets use their crypto-box nonce. It forwards the first
+valid copy immediately and never waits for a stronger RSSI sample. Unique
+fragments from every radio then share the normal WFB decryptor and FEC
+assembler, so fragments split across adapters can recover one block. Filter
+corrupt copies before the combiner so a later valid copy is still accepted.
+
+`DiversityStats` reports first-copy wins and duplicates per source. Adapter
+opening, concurrent USB polling, tuning, and failure handling stay at the
+application or hardware-crate boundary.
 
 ## Payload Routes And RTP
 

@@ -14,6 +14,11 @@ Native command-line tools are split into two app packages:
 For embedding the crates directly in your own Rust application, see
 [Rust Library Usage](./rust-library.md).
 
+The `openipc-rs` and `wfb_rx` command-line receivers currently open one radio.
+The Nebulus app supports packet-level receive diversity across multiple
+adapters on desktop, Android, and WebUSB; see
+[Receive Diversity](./receive-diversity.md).
+
 ## What It Is For
 
 - listing and probing USB adapters,

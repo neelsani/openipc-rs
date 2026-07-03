@@ -139,10 +139,17 @@ fn preflight_dialog(app: &mut NebulusApp, context: &egui::Context) {
 
 fn header(app: &mut NebulusApp, ui: &mut egui::Ui, compact: bool) {
     let state = app.state;
-    let connected_label = app
-        .receiver_info
-        .as_ref()
-        .map(|receiver| receiver.label.clone());
+    let connected_label = app.receiver_info.as_ref().map(|receiver| {
+        if app.receiver_infos.len() > 1 {
+            format!(
+                "{} + {} diversity",
+                receiver.label,
+                app.receiver_infos.len() - 1
+            )
+        } else {
+            receiver.label.clone()
+        }
+    });
     if compact {
         egui::containers::Sides::new()
             .height(28.0)

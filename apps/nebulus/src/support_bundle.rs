@@ -43,6 +43,7 @@ pub(crate) fn build(app: &NebulusApp) -> Result<SupportBundle, String> {
                 "id": profile.id,
                 "name": profile.name,
                 "device_id": profile.device_id,
+                "diversity_device_ids": profile.diversity_device_ids,
                 "channel": profile.channel,
                 "channel_width_mhz": profile.channel_width_mhz,
                 "channel_offset": profile.channel_offset,
@@ -69,21 +70,27 @@ pub(crate) fn build(app: &NebulusApp) -> Result<SupportBundle, String> {
             })
         })
         .collect::<Vec<_>>();
-    let receiver = app.receiver_info.as_ref().map(|receiver| {
-        json!({
-            "label": receiver.label,
-            "vendor_id": receiver.vendor_id.map(|id| format!("{id:04x}")),
-            "product_id": receiver.product_id.map(|id| format!("{id:04x}")),
-            "chip": receiver.chip,
-            "rf_paths": receiver.rf_paths,
-            "cut_version": receiver.cut_version,
-            "usb_speed": receiver.usb_speed,
-            "bulk_in_endpoint": receiver.bulk_in_endpoint,
-            "bulk_out_endpoint": receiver.bulk_out_endpoint,
-            "initialization": receiver.initialization,
-            "firmware_downloaded": receiver.firmware_downloaded,
+    let receivers = app
+        .receiver_infos
+        .iter()
+        .map(|receiver| {
+            json!({
+                "id": receiver.id,
+                "source_id": receiver.source_id,
+                "label": receiver.label,
+                "vendor_id": receiver.vendor_id.map(|id| format!("{id:04x}")),
+                "product_id": receiver.product_id.map(|id| format!("{id:04x}")),
+                "chip": receiver.chip,
+                "rf_paths": receiver.rf_paths,
+                "cut_version": receiver.cut_version,
+                "usb_speed": receiver.usb_speed,
+                "bulk_in_endpoint": receiver.bulk_in_endpoint,
+                "bulk_out_endpoint": receiver.bulk_out_endpoint,
+                "initialization": receiver.initialization,
+                "firmware_downloaded": receiver.firmware_downloaded,
+            })
         })
-    });
+        .collect::<Vec<_>>();
     let stage_latencies = app
         .diagnostics
         .stages
@@ -152,9 +159,10 @@ pub(crate) fn build(app: &NebulusApp) -> Result<SupportBundle, String> {
             "h265": app.environment.h265,
             "native_surfaces": app.environment.native_surfaces,
         },
-        "receiver": receiver,
+        "receivers": receivers,
         "configuration": {
             "device_id": app.settings.device_id,
+            "diversity_device_ids": app.settings.diversity_device_ids,
             "channel": app.settings.channel,
             "channel_width_mhz": app.settings.channel_width_mhz,
             "channel_offset": app.settings.channel_offset,
@@ -202,6 +210,26 @@ pub(crate) fn build(app: &NebulusApp) -> Result<SupportBundle, String> {
         "packet_counters": format!("{:?}", app.diagnostics.counters),
         "rtp_status": format!("{:?}", app.diagnostics.rtp),
         "rtp_reorder_status": format!("{:?}", app.diagnostics.reorder),
+        "diversity": {
+            "accepted": app.diagnostics.diversity.accepted,
+            "duplicates": app.diagnostics.diversity.duplicates,
+            "passthrough": app.diagnostics.diversity.passthrough,
+            "cached_packets": app.diagnostics.diversity.cached_packets,
+            "adapters": app.adapter_metrics.iter().map(|adapter| json!({
+                "source_id": adapter.source_id,
+                "device_id": adapter.device_id,
+                "label": adapter.label,
+                "online": adapter.online,
+                "transfers": adapter.transfers,
+                "transfer_bytes": adapter.transfer_bytes,
+                "usb_errors": adapter.usb_errors,
+                "queue_drops": adapter.queue_drops,
+                "rssi": adapter.rssi,
+                "snr": adapter.snr,
+                "accepted": adapter.accepted,
+                "duplicates": adapter.duplicates,
+            })).collect::<Vec<_>>(),
+        },
         "stage_latencies": stage_latencies,
         "route_metrics": route_metrics,
         "preflight": preflight,

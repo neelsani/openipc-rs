@@ -259,6 +259,7 @@ pub(crate) struct DiagnosticsState {
     pub(crate) counters: openipc_core::ReceiverBatchCounters,
     pub(crate) rtp: openipc_core::RtpDepacketizerStatus,
     pub(crate) reorder: openipc_core::RtpReorderStatus,
+    pub(crate) diversity: openipc_core::DiversityStats,
     pub(crate) stages: BTreeMap<&'static str, LatencySeries>,
 }
 

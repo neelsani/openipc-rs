@@ -90,6 +90,55 @@ fn health(app: &NebulusApp, ui: &mut egui::Ui) {
         row(ui, "WFB sessions", counters.sessions);
         row(ui, "Route errors", counters.route_errors);
     });
+    if !app.adapter_metrics.is_empty() {
+        ui.add_space(10.0);
+        ui.heading("Receive adapters");
+        if app.adapter_metrics.len() > 1 {
+            value_grid(ui, "diversity-summary", |ui| {
+                row(ui, "Unique packets", app.diagnostics.diversity.accepted);
+                row(ui, "Duplicate copies", app.diagnostics.diversity.duplicates);
+                row(
+                    ui,
+                    "Dedup cache",
+                    app.diagnostics.diversity.cached_packets as u64,
+                );
+            });
+        }
+        for adapter in &app.adapter_metrics {
+            ui.add_space(6.0);
+            ui.strong(format!(
+                "Radio {} · {}",
+                adapter.source_id + 1,
+                adapter.label
+            ));
+            value_grid(ui, ("diversity-adapter", adapter.source_id), |ui| {
+                text_row(ui, "Device", &adapter.device_id);
+                text_row(
+                    ui,
+                    "State",
+                    if adapter.online { "Online" } else { "Offline" },
+                );
+                row(ui, "USB transfers", adapter.transfers);
+                row(ui, "USB bytes", adapter.transfer_bytes);
+                if app.adapter_metrics.len() > 1 {
+                    row(ui, "First-copy wins", adapter.accepted);
+                    row(ui, "Duplicate copies", adapter.duplicates);
+                }
+                row(ui, "USB errors", adapter.usb_errors);
+                row(ui, "Queue drops", adapter.queue_drops);
+                text_row(
+                    ui,
+                    "RSSI",
+                    &format!("{}/{} dBm", adapter.rssi[0], adapter.rssi[1]),
+                );
+                text_row(
+                    ui,
+                    "SNR",
+                    &format!("{}/{} dB", adapter.snr[0], adapter.snr[1]),
+                );
+            });
+        }
+    }
 }
 
 fn rtp(app: &NebulusApp, ui: &mut egui::Ui) {
@@ -272,7 +321,11 @@ fn health_row(ui: &mut egui::Ui, label: &str, healthy: bool) {
     });
 }
 
-fn value_grid(ui: &mut egui::Ui, id: &str, add: impl FnOnce(&mut egui::Ui)) {
+fn value_grid(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    add: impl FnOnce(&mut egui::Ui),
+) {
     let max_column_width = ((ui.available_width() - 20.0) * 0.5).max(80.0);
     egui::Grid::new(id)
         .num_columns(2)

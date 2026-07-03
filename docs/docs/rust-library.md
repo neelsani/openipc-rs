@@ -149,6 +149,58 @@ Treat a malformed Realtek aggregate as a transfer-level error. Treat a failed
 WFB frame inside a valid aggregate as a packet drop and keep scanning, which is
 how the working wfb-ng/PixelPilot receiver behaves.
 
+## Combine Multiple Receive Adapters
+
+Use one USB capture loop per adapter and one shared `ReceiverRuntime` for all
+of them. `DiversityCombiner` identifies encrypted WFB session/data packets and
+forwards the first valid copy immediately. Later copies are dropped before
+decryption and FEC work. Because all unique fragments enter the same receiver,
+fragments heard by different radios can recover one FEC block.
+
+```rust
+use openipc_core::{
+    parse_rx_aggregate, DiversityCombiner, DiversitySourceId, FrameLayout,
+    ReceiverBatchOptions, ReceiverRuntime,
+};
+use openipc_core::realtek::RxPacketType;
+
+fn push_radio_transfer(
+    receiver: &mut ReceiverRuntime,
+    diversity: &mut DiversityCombiner,
+    source: DiversitySourceId,
+    transfer: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    for packet in parse_rx_aggregate(transfer)? {
+        let valid = packet.attrib.pkt_rpt_type == RxPacketType::NormalRx
+            && !packet.attrib.crc_err
+            && !packet.attrib.icv_err;
+        if !valid {
+            continue;
+        }
+
+        let decision = diversity.observe_frame(
+            source,
+            packet.data,
+            FrameLayout::WithFcs,
+        );
+        if decision.should_forward() {
+            let _batch = receiver.push_80211_frame(
+                packet.data,
+                &ReceiverBatchOptions::default(),
+            )?;
+        }
+    }
+    Ok(())
+}
+```
+
+Assign each open adapter a stable `DiversitySourceId`. Do not create one
+receiver per radio: that would split WFB sessions and FEC fragments into
+independent state machines and throw away the main benefit of diversity.
+`DiversityCombiner::stats()` reports first-copy contributions and duplicate
+counts per source. It is intentionally bypassed in Nebulus when only one radio
+is active, so the normal path has no diversity hashing overhead.
+
 ## Compose Payload Recovery And RTP
 
 `ReceiverRuntime` does two jobs for the configured video route: it recovers WFB
@@ -470,6 +522,29 @@ fn open_specific_adapter() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+When several identical adapters are attached, list them once and reopen each
+one by its physical-path identity:
+
+```rust
+use openipc_rtl88xx::{list_supported_devices, DriverOptions, RealtekDevice};
+
+fn open_all_adapters() -> Result<Vec<RealtekDevice>, Box<dyn std::error::Error>> {
+    let mut devices = Vec::new();
+    for summary in list_supported_devices()? {
+        devices.push(RealtekDevice::open_by_id(
+            &summary.stable_id(),
+            DriverOptions::default(),
+        )?);
+    }
+    Ok(devices)
+}
+```
+
+The stable id includes the USB bus and physical port chain when the platform
+provides them. Keep the returned devices separate through initialization and
+bulk-IN capture, then feed their parsed valid frames through one
+`DiversityCombiner` as shown above.
 
 Diagnostics such as thermal status, false-alarm counters, PHYDM watchdog ticks,
 IQK, and power tracking are explicit APIs. The driver does not spawn its own

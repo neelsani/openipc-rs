@@ -41,7 +41,8 @@ cd openipc-rs
 - Permission to claim the USB device on the host operating system.
 
 Browser mode also requires HTTPS or `localhost`. WebUSB is browser-gated, so
-the device picker must be opened by the Start RX user action.
+the picker must be opened by **Start RX** for the first radio or **Add adapter**
+for each additional diversity receiver.
 
 For source builds, install Rust stable. Trunk is needed for the browser app.
 Bun is only needed for the documentation site, legacy Station, and generated
@@ -60,6 +61,11 @@ npm SDK workflows.
 6. Run **Preflight** to catch invalid keys, routes, and unavailable platform
    features before hardware initialization.
 7. Press **Start RX** and accept the USB permission prompt if one appears.
+
+For packet-level receive diversity, connect additional supported adapters,
+choose one primary receiver, and enable the others under **Diversity
+receivers**. All radios use the same RF settings and key. Browser users must
+press **Add adapter** once per device before selecting it.
 
 The healthy startup sequence is: adapter initialized, USB transfers arriving,
 802.11 packets accepted, WFB session established, payload recovered, RTP

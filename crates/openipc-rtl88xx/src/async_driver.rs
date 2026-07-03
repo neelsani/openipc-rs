@@ -57,6 +57,15 @@ impl RealtekDevice {
         let device = nusb::Device::from_js(device)
             .await
             .map_err(|err| DriverError::Nusb(format!("nusb from_js failed: {err}")))?;
+        Self::from_nusb_device_async(device, options).await
+    }
+
+    /// Build a browser driver from an exact device opened by `nusb` discovery.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn from_nusb_device_async(
+        device: nusb::Device,
+        options: DriverOptions,
+    ) -> Result<Self, DriverError> {
         let descriptor = device.device_descriptor();
         let vendor_id = descriptor.vendor_id();
         let product_id = descriptor.product_id();

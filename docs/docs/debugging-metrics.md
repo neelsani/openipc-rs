@@ -21,6 +21,12 @@ The health view follows this order:
 7. Codec parameter sets complete.
 8. Encoded access units extracted.
 9. Platform decoder active.
+
+With receive diversity enabled, the same view includes a **Receive adapters**
+section. Check each radio's online state, USB errors, queue drops, RSSI/SNR,
+first-copy wins, and duplicates. Queue drops should remain zero. A secondary
+with few wins can still be useful if those wins occur during primary antenna
+shadowing.
 10. Optional audio and VPN routes healthy.
 
 A pending marker means that stage has not been observed in the current receiver

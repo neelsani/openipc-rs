@@ -111,6 +111,52 @@ editable. Dropping a `gs.key` file on the window remains available where the
 platform supports file drops. Channel, offset, and Link ID use bounded sliders
 with individual buttons that restore OpenIPC defaults.
 
+### Profiles
+
+The Profiles section stores named receiver configurations. Each profile
+contains the selected adapter, RF channel/width/offset, Link ID, minimum epoch,
+WFB key, decoder preference, RTP reorder setting, adaptive-link settings,
+payload routes, audio volume, transfer size, and VPN state. Theme, UI scale,
+log verbosity, sidebar visibility, and HUD layout remain global.
+
+Selecting a profile applies its saved snapshot. Editing controls does not
+silently overwrite that snapshot; use **Save current** when the new values
+should become the profile. **New** copies the values currently on screen and
+**Delete** removes the active profile. At least one profile is retained.
+
+### Preflight
+
+**Run preflight** opens a report without touching the adapter. It validates:
+
+- selected-device visibility,
+- WFB key structure,
+- channel, width, offset, and Link ID ranges,
+- duplicate or invalid route definitions,
+- browser-incompatible UDP routes,
+- VPN/TUN availability,
+- adaptive-link state,
+- known decoder capabilities from the current session.
+
+A failed check disables **Start RX** in the report. Warnings identify optional
+or connect-time checks and do not block startup. The normal Start RX button is
+still available for operators who intentionally need to test an unusual setup.
+
+### Channel Scanner
+
+**Scan channels** opens an idle survey and cannot run alongside RX. Select a
+2.4 GHz or 5 GHz preset, individual channels, and a dwell time. Nebulus performs
+one monitor-mode initialization, keeps bulk-IN transfers active, and uses the
+driver's retune operation between dwell windows. Each result includes valid
+802.11 packet count, recognized WFB frame count, average RSSI by RF path,
+captured bytes, and the corresponding observed bitrate. **Use** copies a result
+back into the active radio settings.
+
+The scanner is a receiver-side observation, not a spectrum analyzer. Packet
+counts only cover traffic the adapter can demodulate. A strong WFB count is a
+useful way to locate an active VTX; a zero count does not prove a channel is
+free of RF energy. The driver always runs monitor shutdown after a completed or
+failed survey.
+
 Once monitor initialization succeeds, the top of Settings shows the connected
 receiver's actual USB VID:PID, probed chip family, RF path layout, cut revision,
 USB connection speed, bulk endpoints, cold/warm initialization result, firmware
@@ -191,6 +237,12 @@ second Java/Kotlin data path.
 The Android entrypoint installs Nebulus's shared Rust logger, so driver and
 application messages are available in standard application output and the
 in-app Logs tab.
+
+eframe storage is explicitly rooted in Android's internal app-data directory.
+Profiles, the key, route definitions, HUD positions, and GUI settings survive
+activity recreation and process restarts without requesting broad filesystem
+permission. Clearing application storage resets them. File imports and support
+bundle exports use Android's Storage Access Framework.
 
 The default build uses Android's debug key. A distribution build additionally
 needs a release keystore configured through
@@ -296,6 +348,15 @@ The Logs tab owns capture verbosity: Low, Normal, High, or Very verbose. It also
 has an independent minimum-level display filter and target/message search. Logs
 remain bounded to avoid memory growth.
 
+**Export support bundle** writes a ZIP containing `report.json`, `logs.txt`,
+and a short README. The report captures the build tag/commit, platform and
+decoder capabilities, selected receiver configuration, sanitized profile and
+route summaries, hardware identity, packet/FEC/RTP/audio/VPN metrics, recovery
+state, and the latest channel-scan results. Home-directory paths in logs are
+shortened. Key bytes are never included; the report records only key length and
+whether the active key is the built-in default. Desktop uses a save dialog,
+Android uses the document picker, and the browser downloads the ZIP.
+
 ## GUI Settings
 
 The GUI tab keeps appearance controls separate from receiver and codec
@@ -305,7 +366,12 @@ configuration. Settings apply immediately and persist through eframe storage:
   light palette; the other three are dark palettes.
 - **Interface scale** adjusts the complete interface from 75% to 150% in 5%
   increments without changing decoded video resolution.
-- **Link telemetry overlay** controls the in-video RSSI/SNR/loss/FEC strip.
+- **Link telemetry overlay** controls the ground-station video HUD.
+- **Edit video HUD** opens a 16:9 preview. Each value can be dragged to a
+  normalized video position, hidden, scaled, or given a different background
+  opacity. The default layout places resolution, FPS, bitrate, local latency,
+  RSSI, packet loss, and link score along the lower edge. Positions are clamped
+  to the visible video on small screens.
 - **Controls panel visible** hides or restores the side/bottom controls. The
   header's **Controls** button always remains available to restore it.
 - **Reset GUI settings** restores Macchiato, 100% scale, the telemetry overlay,
@@ -366,9 +432,14 @@ wrapped as IPv4/UDP by `openipc-core`, encrypted and FEC-framed for radio port
 adds general-purpose IP downlink/uplink bridging on ports `0x20` and `0xa0`.
 
 Malformed USB aggregates and recoverable bulk-transfer failures are logged and
-skipped. A stalled endpoint is cleared before reads resume. A disconnect or
-fatal initialization/decode error moves the app to the failed state instead of
-leaving the UI stuck in a connecting state.
+skipped. A stalled endpoint is cleared before reads resume. With **Automatically
+recover a dropped receiver** enabled, a native receiver that had reached Ready
+or Receiving is restarted after bounded exponential delays. A bad initial key,
+unsupported decoder, or other first-connect failure is left in the failed state
+for operator correction instead of looping. Browser recovery remains manual
+because `requestDevice()` requires a user gesture. Backoff state resets after
+30 seconds of stable reception, and Stop RX or Cancel immediately clears a
+pending retry.
 
 ## Validate
 

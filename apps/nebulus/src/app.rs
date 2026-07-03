@@ -11,7 +11,8 @@ type PendingKeyFile = Rc<RefCell<Option<Result<(String, Vec<u8>), String>>>>;
 use crate::{
     model::{
         AudioStats, DiagnosticsState, EnvironmentDetails, LiveMetrics, LogEntry, LogLevel,
-        MetricHistory, ReceiverState, RecordingState, RecordingStatus, RouteStats, VpnStatus,
+        MetricHistory, ReceiverState, RecordingState, RecordingStatus, RecoveryStatus, RouteStats,
+        VpnStatus,
     },
     runtime::{ReceiverInfo, Runtime, RuntimeEvent, StartRequest, UsbDeviceInfo},
     settings::Settings,
@@ -51,6 +52,16 @@ pub struct NebulusApp {
     key_file_result: PendingKeyFile,
     pub(crate) video_fullscreen: bool,
     pub(crate) show_about: bool,
+    pub(crate) show_hud_editor: bool,
+    pub(crate) show_preflight: bool,
+    pub(crate) preflight: crate::preflight::PreflightReport,
+    pub(crate) recovery: RecoveryStatus,
+    pub(crate) show_channel_scanner: bool,
+    pub(crate) scan_channels: Vec<u8>,
+    pub(crate) scan_dwell_ms: u64,
+    pub(crate) scan_progress: Option<(usize, usize)>,
+    pub(crate) scan_results: Vec<crate::runtime::ChannelScanResult>,
+    pub(crate) scan_error: Option<String>,
     started_at: Instant,
     metrics_started_at: Instant,
     rate_window_started: Instant,
@@ -64,10 +75,11 @@ pub struct NebulusApp {
 
 impl NebulusApp {
     pub(crate) fn new(context: &eframe::CreationContext<'_>) -> Self {
-        let settings: Settings = context
+        let mut settings: Settings = context
             .storage
             .and_then(|storage| eframe::get_value(storage, eframe::APP_KEY))
             .unwrap_or_default();
+        settings.normalize();
         crate::logging::set_level(settings.diagnostic_verbosity.log_level());
         let key_name = if settings.key_bytes == crate::settings::DEFAULT_KEY_BYTES {
             "Default gs.key".to_owned()
@@ -112,6 +124,19 @@ impl NebulusApp {
             key_file_result: Rc::new(RefCell::new(None)),
             video_fullscreen: false,
             show_about: false,
+            show_hud_editor: false,
+            show_preflight: false,
+            preflight: crate::preflight::PreflightReport::default(),
+            recovery: RecoveryStatus::default(),
+            show_channel_scanner: false,
+            scan_channels: vec![
+                36, 40, 44, 48, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 149,
+                153, 157, 161, 165, 169, 173, 177,
+            ],
+            scan_dwell_ms: 150,
+            scan_progress: None,
+            scan_results: Vec::new(),
+            scan_error: None,
             started_at: Instant::now(),
             metrics_started_at: Instant::now(),
             rate_window_started: Instant::now(),
@@ -157,6 +182,11 @@ impl NebulusApp {
     }
 
     pub(crate) fn start_receiver(&mut self, context: &egui::Context) {
+        self.recovery.cancel();
+        self.start_receiver_attempt(context);
+    }
+
+    fn start_receiver_attempt(&mut self, context: &egui::Context) {
         self.reset_runtime_metrics();
         let request = self.start_request();
         self.runtime.start(request, context.clone());
@@ -164,6 +194,7 @@ impl NebulusApp {
 
     #[cfg(debug_assertions)]
     pub(crate) fn start_codec_mock(&mut self, context: &egui::Context) {
+        self.recovery.cancel();
         self.reset_runtime_metrics();
         let request = self.start_request();
         self.runtime.start_codec_mock(request, context.clone());
@@ -211,6 +242,7 @@ impl NebulusApp {
     }
 
     pub(crate) fn stop_receiver(&mut self) {
+        self.recovery.cancel();
         if self.recording.state != RecordingState::Idle {
             self.runtime.stop_recording();
         }
@@ -259,6 +291,146 @@ impl NebulusApp {
 
     pub(crate) fn refresh_devices(&mut self) {
         self.runtime.refresh_devices();
+    }
+
+    pub(crate) fn run_preflight(&mut self) {
+        self.preflight = crate::preflight::PreflightReport::run(self);
+        self.show_preflight = true;
+        let [passed, warnings, failures] = self.preflight.counts();
+        self.log(
+            if failures == 0 {
+                LogLevel::Info
+            } else {
+                LogLevel::Warn
+            },
+            "preflight",
+            format!("Preflight: {passed} passed, {warnings} warnings, {failures} failures"),
+        );
+    }
+
+    pub(crate) fn export_support_bundle(&mut self) {
+        let result = crate::support_bundle::build(self).and_then(crate::support_bundle::save);
+        match result {
+            Ok(message) => self.log(LogLevel::Info, "support", message),
+            Err(error) => self.log(LogLevel::Error, "support", error),
+        }
+    }
+
+    pub(crate) fn start_channel_scan(&mut self, context: &egui::Context) {
+        if !matches!(self.state, ReceiverState::Idle | ReceiverState::Failed) {
+            self.scan_error = Some("Stop the receiver before scanning channels".to_owned());
+            return;
+        }
+        if self.scan_channels.is_empty() {
+            self.scan_error = Some("Select at least one channel".to_owned());
+            return;
+        }
+        self.recovery.cancel();
+        self.scan_results.clear();
+        self.scan_error = None;
+        self.scan_progress = Some((0, self.scan_channels.len()));
+        self.state = ReceiverState::Scanning;
+        self.runtime.start_scan(
+            crate::runtime::ScanRequest {
+                device_id: self.settings.device_id.clone(),
+                channels: self.scan_channels.clone(),
+                channel_width_mhz: self.settings.channel_width_mhz,
+                channel_offset: self.settings.channel_offset,
+                transfer_size: self.settings.transfer_size,
+                dwell: std::time::Duration::from_millis(self.scan_dwell_ms),
+            },
+            context.clone(),
+        );
+    }
+
+    pub(crate) fn use_scanned_channel(&mut self, channel: u8) {
+        self.settings.channel = channel;
+        self.show_channel_scanner = false;
+        self.log(
+            LogLevel::Info,
+            "scanner",
+            format!("Selected channel {channel} from channel survey"),
+        );
+    }
+
+    pub(crate) fn apply_profile(&mut self, id: u64) {
+        let Some(profile) = self
+            .settings
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        profile.apply(&mut self.settings);
+        self.key_name = format!("{} key", profile.name);
+        self.key_error = None;
+        self.log(
+            LogLevel::Info,
+            "profile",
+            format!("Applied receiver profile {}", profile.name),
+        );
+    }
+
+    pub(crate) fn save_active_profile(&mut self) {
+        let Some(id) = self.settings.active_profile_id else {
+            return;
+        };
+        let Some(index) = self
+            .settings
+            .profiles
+            .iter()
+            .position(|profile| profile.id == id)
+        else {
+            return;
+        };
+        let name = self.settings.profiles[index].name.clone();
+        self.settings.profiles[index] =
+            crate::settings::ReceiverProfile::capture(id, name.clone(), &self.settings);
+        self.log(
+            LogLevel::Info,
+            "profile",
+            format!("Saved receiver profile {name}"),
+        );
+    }
+
+    pub(crate) fn create_profile(&mut self) {
+        let id = self.settings.next_profile_id();
+        let name = format!("Profile {id}");
+        let profile = crate::settings::ReceiverProfile::capture(id, name.clone(), &self.settings);
+        self.settings.profiles.push(profile);
+        self.settings.active_profile_id = Some(id);
+        self.log(
+            LogLevel::Info,
+            "profile",
+            format!("Created receiver profile {name}"),
+        );
+    }
+
+    pub(crate) fn delete_active_profile(&mut self) {
+        if self.settings.profiles.len() <= 1 {
+            return;
+        }
+        let Some(id) = self.settings.active_profile_id else {
+            return;
+        };
+        let Some(index) = self
+            .settings
+            .profiles
+            .iter()
+            .position(|profile| profile.id == id)
+        else {
+            return;
+        };
+        let name = self.settings.profiles.remove(index).name;
+        let replacement = self.settings.profiles[index.min(self.settings.profiles.len() - 1)].id;
+        self.apply_profile(replacement);
+        self.log(
+            LogLevel::Info,
+            "profile",
+            format!("Deleted receiver profile {name}"),
+        );
     }
 
     pub(crate) fn vpn_available(&self) -> bool {
@@ -339,7 +511,46 @@ impl NebulusApp {
                     self.state = ReceiverState::Ready;
                     self.log(LogLevel::Info, "usb", format!("Connected to {label}"));
                 }
-                RuntimeEvent::Started => self.state = ReceiverState::Receiving,
+                RuntimeEvent::Started => {
+                    self.state = ReceiverState::Receiving;
+                    self.recovery.scheduled_at = None;
+                    self.recovery.stable_since = Some(Instant::now());
+                }
+                RuntimeEvent::ScanStarted { total } => {
+                    self.state = ReceiverState::Scanning;
+                    self.scan_progress = Some((0, total));
+                    self.log(
+                        LogLevel::Info,
+                        "scanner",
+                        format!("Scanning {total} radio channels"),
+                    );
+                }
+                RuntimeEvent::ScanProgress {
+                    index,
+                    total,
+                    result,
+                } => {
+                    self.scan_results.push(result);
+                    self.scan_progress = Some((index, total));
+                }
+                RuntimeEvent::ScanCompleted => {
+                    self.state = ReceiverState::Idle;
+                    self.scan_progress = None;
+                    self.log(
+                        LogLevel::Info,
+                        "scanner",
+                        format!(
+                            "Channel survey completed: {} channel(s)",
+                            self.scan_results.len()
+                        ),
+                    );
+                }
+                RuntimeEvent::ScanFailed(error) => {
+                    self.state = ReceiverState::Failed;
+                    self.scan_progress = None;
+                    self.scan_error = Some(error.clone());
+                    self.log(LogLevel::Error, "scanner", error);
+                }
                 RuntimeEvent::Batch(batch) => self.apply_batch(*batch),
                 RuntimeEvent::NativeVideo {
                     frame,
@@ -429,11 +640,17 @@ impl NebulusApp {
                     self.log(LogLevel::Info, "rx", "Receiver stopped");
                 }
                 RuntimeEvent::Failed(error) => {
+                    let recoverable =
+                        matches!(self.state, ReceiverState::Ready | ReceiverState::Receiving)
+                            || self.recovery.active;
                     self.receiver_info = None;
                     self.state = ReceiverState::Failed;
                     self.recording.state = RecordingState::Idle;
                     self.vpn.active = false;
-                    self.log(LogLevel::Error, "runtime", error);
+                    self.log(LogLevel::Error, "runtime", error.clone());
+                    if self.settings.auto_recover && recoverable && !cfg!(target_arch = "wasm32") {
+                        self.schedule_recovery(error, context);
+                    }
                 }
             }
         }
@@ -442,6 +659,71 @@ impl NebulusApp {
         {
             self.update_rates();
         }
+        self.process_auto_recovery(context);
+    }
+
+    fn schedule_recovery(&mut self, error: String, context: &egui::Context) {
+        self.recovery.active = true;
+        self.recovery.attempt = self.recovery.attempt.saturating_add(1);
+        self.recovery.last_error = error;
+        self.recovery.stable_since = None;
+        let exponent = self.recovery.attempt.saturating_sub(1).min(3);
+        let delay = std::time::Duration::from_secs((1u64 << exponent).min(10));
+        self.recovery.scheduled_at = Some(Instant::now() + delay);
+        self.log(
+            LogLevel::Warn,
+            "recovery",
+            format!(
+                "Receiver recovery attempt {} scheduled in {} second(s)",
+                self.recovery.attempt,
+                delay.as_secs()
+            ),
+        );
+        context.request_repaint_after(delay);
+    }
+
+    fn process_auto_recovery(&mut self, context: &egui::Context) {
+        if self.state == ReceiverState::Receiving {
+            if self
+                .recovery
+                .stable_since
+                .is_some_and(|since| since.elapsed() >= std::time::Duration::from_secs(30))
+            {
+                self.recovery.cancel();
+                self.log(
+                    LogLevel::Info,
+                    "recovery",
+                    "Receiver remained stable; recovery backoff reset",
+                );
+            }
+            return;
+        }
+        if !self.settings.auto_recover || !self.recovery.active {
+            return;
+        }
+        let Some(scheduled_at) = self.recovery.scheduled_at else {
+            return;
+        };
+        let now = Instant::now();
+        if now < scheduled_at {
+            context.request_repaint_after(scheduled_at - now);
+            return;
+        }
+        self.recovery.scheduled_at = None;
+        self.log(
+            LogLevel::Info,
+            "recovery",
+            format!(
+                "Starting receiver recovery attempt {}",
+                self.recovery.attempt
+            ),
+        );
+        self.start_receiver_attempt(context);
+    }
+
+    pub(crate) fn cancel_recovery(&mut self) {
+        self.recovery.cancel();
+        self.log(LogLevel::Info, "recovery", "Automatic recovery cancelled");
     }
 
     #[cfg(target_os = "windows")]

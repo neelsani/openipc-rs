@@ -11,7 +11,18 @@ enum View {
     Environment,
 }
 
-pub(crate) fn show(app: &NebulusApp, ui: &mut egui::Ui) {
+pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        if ui.button("Export support bundle").clicked() {
+            app.export_support_bundle();
+        }
+        ui.label(
+            egui::RichText::new("Includes diagnostics and logs; excludes the WFB key")
+                .small()
+                .color(ui.visuals().weak_text_color()),
+        );
+    });
+    ui.add_space(5.0);
     let id = ui.make_persistent_id("diagnostics-view");
     let mut view = ui.data(|data| data.get_temp::<View>(id).unwrap_or_default());
     ui.horizontal_wrapped(|ui| {
@@ -199,6 +210,7 @@ fn environment(app: &NebulusApp, ui: &mut egui::Ui) {
                 ReceiverState::Connecting => "Connecting",
                 ReceiverState::Ready => "Ready",
                 ReceiverState::Receiving => "Receiving",
+                ReceiverState::Scanning => "Scanning",
                 ReceiverState::Stopping => "Stopping",
                 ReceiverState::Failed => "Failed",
             },

@@ -67,16 +67,78 @@ fn is_lifecycle_barrier(event: &RuntimeEvent) -> bool {
         RuntimeEvent::Connecting
             | RuntimeEvent::Connected { .. }
             | RuntimeEvent::Started
+            | RuntimeEvent::ScanStarted { .. }
+            | RuntimeEvent::ScanCompleted
+            | RuntimeEvent::ScanFailed(_)
             | RuntimeEvent::Stopped
             | RuntimeEvent::Failed(_)
     )
+}
+
+#[derive(Default)]
+struct ChannelScanAccumulator {
+    packets: u64,
+    bytes: u64,
+    wfb_frames: u64,
+    rssi_sum: [i64; 2],
+    rssi_samples: [u64; 2],
+    strongest: [u8; 2],
+}
+
+impl ChannelScanAccumulator {
+    fn observe(&mut self, packet: &openipc_core::realtek::RealtekRxPacket<'_>) {
+        use openipc_core::{realtek::RxPacketType, FrameLayout, WifiFrame};
+
+        if packet.attrib.crc_err
+            || packet.attrib.icv_err
+            || packet.attrib.pkt_rpt_type != RxPacketType::NormalRx
+        {
+            return;
+        }
+        self.packets = self.packets.saturating_add(1);
+        self.bytes = self.bytes.saturating_add(packet.data.len() as u64);
+        if WifiFrame::parse(packet.data, FrameLayout::WithFcs)
+            .ok()
+            .and_then(|frame| frame.channel_id())
+            .is_some()
+        {
+            self.wfb_frames = self.wfb_frames.saturating_add(1);
+        }
+        for path in 0..2 {
+            let rssi = packet.attrib.rssi[path];
+            if rssi > 0 {
+                self.rssi_sum[path] += i64::from(rssi);
+                self.rssi_samples[path] += 1;
+                self.strongest[path] = self.strongest[path].max(rssi);
+            }
+        }
+    }
+
+    fn finish(self, channel: u8, dwell: std::time::Duration) -> ChannelScanResult {
+        let average_rssi_dbm = std::array::from_fn(|path| {
+            if self.rssi_samples[path] == 0 {
+                0
+            } else {
+                -(self.rssi_sum[path] / self.rssi_samples[path] as i64) as i32
+            }
+        });
+        ChannelScanResult {
+            channel,
+            packets: self.packets,
+            bytes: self.bytes,
+            wfb_frames: self.wfb_frames,
+            average_rssi_dbm,
+            strongest_rssi_dbm: self.strongest.map(|value| -(i32::from(value))),
+            dwell_ms: dwell.as_millis().min(u128::from(u64::MAX)) as u64,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
 
-    use super::{queue_event, BatchMetrics, RuntimeEvent};
+    use super::{queue_event, BatchMetrics, ChannelScanAccumulator, RuntimeEvent};
 
     #[test]
     fn pending_batches_are_merged_without_losing_counts() {
@@ -142,5 +204,29 @@ mod tests {
             panic!("expected second receiver batch");
         };
         assert_eq!(second.transfers, 2);
+    }
+
+    #[test]
+    fn channel_scan_counts_valid_wfb_frames_and_signal_paths() {
+        let channel = openipc_core::ChannelId::default_video();
+        let mut frame = openipc_core::ieee80211::build_wfb_header(channel, [1, 0]).to_vec();
+        frame.push(0x42);
+        frame.extend_from_slice(&[0; 4]);
+        let attrib = openipc_core::RxPacketAttrib {
+            rssi: [58, 62, 0, 0],
+            ..openipc_core::RxPacketAttrib::default()
+        };
+        let packet = openipc_core::RealtekRxPacket {
+            attrib,
+            data: &frame,
+        };
+        let mut accumulator = ChannelScanAccumulator::default();
+        accumulator.observe(&packet);
+        let result = accumulator.finish(161, std::time::Duration::from_millis(150));
+
+        assert_eq!(result.packets, 1);
+        assert_eq!(result.wfb_frames, 1);
+        assert_eq!(result.average_rssi_dbm, [-58, -62]);
+        assert_eq!(result.strongest_rssi_dbm, [-58, -62]);
     }
 }

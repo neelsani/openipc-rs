@@ -83,6 +83,7 @@ impl RealtekDevice {
             bulk_out_ep_count,
             detected_family: OnceLock::new(),
             jaguar3_efuse: OnceLock::new(),
+            efuse_info: OnceLock::new(),
             h2c_box: AtomicU8::new(0),
         })
     }
@@ -183,6 +184,7 @@ impl RealtekDevice {
         } else {
             self.read_efuse_info_async(chip).await?
         };
+        let _ = self.efuse_info.set(efuse_info);
 
         self.load_mac_tables_async(chip, efuse_info).await?;
         self.init_queue_fifo_async(chip).await?;
@@ -241,6 +243,28 @@ impl RealtekDevice {
     pub async fn shutdown_monitor_async(&self) -> Result<(), DriverError> {
         let chip = self.probe_chip_async().await?;
         self.shutdown_monitor_for_chip_async(chip).await
+    }
+
+    /// Retune an initialized monitor-mode adapter without reloading firmware.
+    ///
+    /// This is intended for idle channel surveys and deliberate channel
+    /// changes. Callers must stop normal RX/TX processing while retuning.
+    pub async fn retune_async(&self, radio: RadioConfig) -> Result<(), DriverError> {
+        let chip = self.probe_chip_async().await?;
+        if chip.family.is_jaguar3() {
+            return self
+                .set_channel_bwmode_8822c_async(chip, radio.channel, radio.channel_width)
+                .await;
+        }
+        let efuse = if let Some(efuse) = self.efuse_info.get().copied() {
+            efuse
+        } else {
+            let efuse = self.read_efuse_info_async(chip).await?;
+            let _ = self.efuse_info.set(efuse);
+            efuse
+        };
+        self.set_channel_with_options_async(chip, radio, efuse, false)
+            .await
     }
 
     /// Select the active Jaguar1 receive chains.

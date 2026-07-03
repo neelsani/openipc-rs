@@ -3,6 +3,7 @@ mod gui;
 mod logs;
 mod metrics;
 mod routes;
+mod scanner;
 mod settings;
 pub(crate) mod theme;
 mod video;
@@ -63,6 +64,77 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
         .show(ui, |ui| video::show(app, ui));
 
     about_dialog(app, ui.ctx());
+    gui::hud_editor(app, ui.ctx());
+    preflight_dialog(app, ui.ctx());
+    scanner::dialog(app, ui.ctx());
+}
+
+fn preflight_dialog(app: &mut NebulusApp, context: &egui::Context) {
+    if !app.show_preflight {
+        return;
+    }
+    let mut open = true;
+    let can_start = app.preflight.can_start()
+        && matches!(app.state, ReceiverState::Idle | ReceiverState::Failed);
+    egui::Window::new("Receiver preflight")
+        .id(egui::Id::new("receiver-preflight"))
+        .open(&mut open)
+        .resizable(true)
+        .default_width(520.0)
+        .show(context, |ui| {
+            let [passed, warnings, failures] = app.preflight.counts();
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(Color32::from_rgb(61, 214, 154), format!("{passed} passed"));
+                ui.colored_label(
+                    Color32::from_rgb(236, 181, 70),
+                    format!("{warnings} warnings"),
+                );
+                ui.colored_label(Color32::from_rgb(239, 86, 95), format!("{failures} failed"));
+            });
+            ui.separator();
+            for check in &app.preflight.checks {
+                let (symbol, color) = match check.severity {
+                    crate::preflight::PreflightSeverity::Pass => {
+                        ("OK", Color32::from_rgb(61, 214, 154))
+                    }
+                    crate::preflight::PreflightSeverity::Warning => {
+                        ("WARN", Color32::from_rgb(236, 181, 70))
+                    }
+                    crate::preflight::PreflightSeverity::Fail => {
+                        ("FAIL", Color32::from_rgb(239, 86, 95))
+                    }
+                };
+                ui.horizontal_top(|ui| {
+                    ui.add_sized(
+                        [42.0, 18.0],
+                        egui::Label::new(egui::RichText::new(symbol).monospace().color(color)),
+                    );
+                    ui.vertical(|ui| {
+                        ui.strong(check.name);
+                        ui.label(
+                            egui::RichText::new(&check.detail)
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                    });
+                });
+                ui.add_space(5.0);
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Run again").clicked() {
+                    app.preflight = crate::preflight::PreflightReport::run(app);
+                }
+                if ui
+                    .add_enabled(can_start, egui::Button::new("Start RX"))
+                    .clicked()
+                {
+                    app.show_preflight = false;
+                    app.start_receiver(context);
+                }
+            });
+        });
+    app.show_preflight &= open;
 }
 
 fn header(app: &mut NebulusApp, ui: &mut egui::Ui, compact: bool) {
@@ -351,6 +423,11 @@ fn receiver_buttons(app: &mut NebulusApp, ui: &mut egui::Ui) {
                 app.stop_receiver();
             }
         }
+        ReceiverState::Scanning => {
+            if action_button(ui, "Stop scan", ActionTone::Neutral).clicked() {
+                app.stop_receiver();
+            }
+        }
         _ => {
             ui.add_enabled(
                 false,
@@ -596,7 +673,9 @@ fn diagnostic_row(ui: &mut egui::Ui, label: &str, value: &str) {
 fn status_badge(ui: &mut egui::Ui, state: ReceiverState) {
     let color = match state {
         ReceiverState::Receiving => Color32::from_rgb(61, 214, 154),
-        ReceiverState::Connecting | ReceiverState::Stopping => Color32::from_rgb(244, 183, 64),
+        ReceiverState::Connecting | ReceiverState::Scanning | ReceiverState::Stopping => {
+            Color32::from_rgb(244, 183, 64)
+        }
         ReceiverState::Failed => Color32::from_rgb(244, 88, 96),
         _ => ui.visuals().weak_text_color(),
     };

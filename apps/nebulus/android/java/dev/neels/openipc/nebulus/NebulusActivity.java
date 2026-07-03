@@ -14,10 +14,14 @@ import android.view.Surface;
 import android.view.WindowManager;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
+import java.io.OutputStream;
 
 public final class NebulusActivity extends NativeActivity {
     private static final int OPEN_KEY_REQUEST = 0x4753;
     private static final int OPEN_VPN_REQUEST = 0x5650;
+    private static final int SAVE_SUPPORT_REQUEST = 0x5352;
+
+    private byte[] pendingSupportBundle;
 
     private SurfaceTexture videoSurfaceTexture;
     private Surface videoSurface;
@@ -124,6 +128,17 @@ public final class NebulusActivity extends NativeActivity {
         });
     }
 
+    public void saveSupportBundle(String filename, byte[] bytes) {
+        runOnUiThread(() -> {
+            pendingSupportBundle = bytes;
+            Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.setType("application/zip");
+            intent.putExtra(Intent.EXTRA_TITLE, filename);
+            startActivityForResult(intent, SAVE_SUPPORT_REQUEST);
+        });
+    }
+
     public void closeVpn(int fd) {
         if (NebulusVpnService.close(fd)) {
             stopService(new Intent(this, NebulusVpnService.class));
@@ -147,6 +162,21 @@ public final class NebulusActivity extends NativeActivity {
                 startVpnService();
             } else {
                 nativeVpnError("Android VPN permission was not granted");
+            }
+            return;
+        }
+        if (requestCode == SAVE_SUPPORT_REQUEST) {
+            byte[] bytes = pendingSupportBundle;
+            pendingSupportBundle = null;
+            if (resultCode == RESULT_OK && data != null && data.getData() != null && bytes != null) {
+                try (OutputStream output = getContentResolver().openOutputStream(data.getData())) {
+                    if (output != null) {
+                        output.write(bytes);
+                        output.flush();
+                    }
+                } catch (Exception ignored) {
+                    // Rust already records that the picker opened. Android owns any I/O error UI.
+                }
             }
             return;
         }

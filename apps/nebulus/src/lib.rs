@@ -11,9 +11,11 @@ mod logging;
 #[cfg(not(target_arch = "wasm32"))]
 mod low_latency;
 mod model;
+mod preflight;
 mod recording;
 mod runtime;
 mod settings;
+mod support_bundle;
 #[cfg(not(target_arch = "wasm32"))]
 mod tun_bridge;
 mod ui;
@@ -42,6 +44,13 @@ pub fn create_app(context: &eframe::CreationContext<'_>) -> NebulusApp {
 pub fn android_main(app: android_activity::AndroidApp) {
     init_logging();
     android::install(app.clone());
+    let persistence_path = app.internal_data_path().map(|root| {
+        let directory = root.join("nebulus");
+        if let Err(error) = std::fs::create_dir_all(&directory) {
+            log::warn!("could not create Android settings directory: {error}");
+        }
+        directory.join("app.ron")
+    });
     let glow_options = egui_glow::GlowConfiguration {
         vsync: false,
         hardware_acceleration: egui_glow::HardwareAcceleration::Required,
@@ -49,6 +58,7 @@ pub fn android_main(app: android_activity::AndroidApp) {
     };
     let options = eframe::NativeOptions {
         android_app: Some(app),
+        persistence_path,
         viewport: eframe::egui::ViewportBuilder::default().with_fullscreen(true),
         renderer: eframe::Renderer::Glow,
         glow_options,

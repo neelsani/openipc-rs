@@ -123,6 +123,29 @@ pub(crate) struct StartRequest {
     pub(crate) payload_routes: Vec<PayloadRouteSettings>,
 }
 
+/// Configuration for an idle radio channel survey.
+#[derive(Debug, Clone)]
+pub(crate) struct ScanRequest {
+    pub(crate) device_id: Option<String>,
+    pub(crate) channels: Vec<u8>,
+    pub(crate) channel_width_mhz: u16,
+    pub(crate) channel_offset: u8,
+    pub(crate) transfer_size: usize,
+    pub(crate) dwell: Duration,
+}
+
+/// RF activity observed while dwelling on one channel.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ChannelScanResult {
+    pub(crate) channel: u8,
+    pub(crate) packets: u64,
+    pub(crate) bytes: u64,
+    pub(crate) wfb_frames: u64,
+    pub(crate) average_rssi_dbm: [i32; 2],
+    pub(crate) strongest_rssi_dbm: [i32; 2],
+    pub(crate) dwell_ms: u64,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DecoderEnvironment {
     pub(crate) backend: String,
@@ -337,6 +360,16 @@ pub(crate) enum RuntimeEvent {
         decoder: DecoderEnvironment,
     },
     Started,
+    ScanStarted {
+        total: usize,
+    },
+    ScanProgress {
+        index: usize,
+        total: usize,
+        result: ChannelScanResult,
+    },
+    ScanCompleted,
+    ScanFailed(String),
     Batch(Box<BatchMetrics>),
     NativeVideo {
         frame: openipc_video::DecodedFrame<NativeVideoSurface>,

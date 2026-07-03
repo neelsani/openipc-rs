@@ -50,13 +50,16 @@ npm SDK workflows.
 ## Receive A Stream
 
 1. Connect the Realtek USB adapter directly to the host when possible.
-2. Start Nebulus and select the adapter.
-3. Set the RF channel and width to match the air unit. Leave channel offset and
+2. Start Nebulus, select the adapter, or apply a saved receiver profile.
+3. Set the RF channel and width to match the air unit. If the channel is
+   unknown, use the idle **Scan channels** window. Leave channel offset and
    Link ID at their defaults unless the VTX was configured differently.
 4. Load the matching `gs.key` if the transmitter does not use the default key.
 5. Enable adaptive link, payload routes, or VPN only when the air-side setup
    supports them. They are not required for video reception.
-6. Press **Start RX** and accept the USB permission prompt if one appears.
+6. Run **Preflight** to catch invalid keys, routes, and unavailable platform
+   features before hardware initialization.
+7. Press **Start RX** and accept the USB permission prompt if one appears.
 
 The healthy startup sequence is: adapter initialized, USB transfers arriving,
 802.11 packets accepted, WFB session established, payload recovered, RTP

@@ -123,6 +123,7 @@ impl RealtekDevice {
         self.pre_init_system_cfg_8822c_async().await?;
         self.power_on_8822c_async().await?;
         let efuse_info = self.read_efuse_info_async(chip).await?;
+        let _ = self.efuse_info.set(efuse_info);
         let rfe_type =
             if chip.family == ChipFamily::Rtl8822e && matches!(efuse_info.rfe_type, 0 | 0xff) {
                 21
@@ -774,7 +775,7 @@ impl RealtekDevice {
         .await
     }
 
-    async fn set_channel_bwmode_8822c_async(
+    pub(crate) async fn set_channel_bwmode_8822c_async(
         &self,
         chip: ChipInfo,
         channel: u8,

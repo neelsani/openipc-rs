@@ -10,6 +10,8 @@ use openipc_core::realtek::{parse_rx_aggregate_with_kind, RealtekRxPacket, RxDes
 use std::sync::atomic::AtomicU8;
 use std::sync::OnceLock;
 
+use crate::async_efuse::EfuseInfo;
+
 #[cfg(not(target_arch = "wasm32"))]
 use crate::regs::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -47,6 +49,7 @@ pub struct RealtekDevice {
     pub(crate) bulk_out_ep_count: usize,
     pub(crate) detected_family: OnceLock<ChipFamily>,
     pub(crate) jaguar3_efuse: OnceLock<[u8; 512]>,
+    pub(crate) efuse_info: OnceLock<EfuseInfo>,
     pub(crate) h2c_box: AtomicU8,
 }
 
@@ -210,6 +213,7 @@ impl RealtekDevice {
             bulk_out_ep_count,
             detected_family: OnceLock::new(),
             jaguar3_efuse: OnceLock::new(),
+            efuse_info: OnceLock::new(),
             h2c_box: AtomicU8::new(0),
         })
     }
@@ -259,6 +263,12 @@ impl RealtekDevice {
     /// Best-effort monitor-mode shutdown for chips that need explicit deinit.
     pub fn shutdown_monitor(&self) -> Result<(), DriverError> {
         block_on_ready(self.shutdown_monitor_async())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Retune an initialized monitor-mode adapter without repeating firmware bring-up.
+    pub fn retune(&self, radio: RadioConfig) -> Result<(), DriverError> {
+        block_on_ready(self.retune_async(radio))
     }
 
     #[cfg(not(target_arch = "wasm32"))]

@@ -227,6 +227,29 @@ pub(crate) fn open_key_file(context: eframe::egui::Context) -> Result<(), String
     .map_err(|error: jni::errors::Error| format!("Android key picker failed: {error}"))
 }
 
+pub(crate) fn save_file(name: &str, bytes: &[u8]) -> Result<(), String> {
+    let app = app()?;
+    let vm = java_vm(&app)?;
+    vm.attach_current_thread(|env| {
+        let raw_activity = app.activity_as_ptr() as jni::sys::jobject;
+        // SAFETY: android-activity owns this activity global reference.
+        let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&raw_activity)? };
+        let name = env.new_string(name)?;
+        let bytes = env.byte_array_from_slice(bytes)?;
+        env.call_method(
+            &activity,
+            jni_str!("saveSupportBundle"),
+            jni_sig!("(Ljava/lang/String;[B)V"),
+            &[
+                JValue::Object(name.as_ref()),
+                JValue::Object(bytes.as_ref()),
+            ],
+        )?;
+        Ok(())
+    })
+    .map_err(|error: jni::errors::Error| format!("Android document export failed: {error}"))
+}
+
 pub(crate) fn take_key_file_result() -> Option<Result<SelectedKeyFile, String>> {
     KEY_FILE_RESULT
         .get_or_init(|| Mutex::new(None))

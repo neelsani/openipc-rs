@@ -1,6 +1,6 @@
 use eframe::egui;
 
-use crate::{app::NebulusApp, model::ReceiverState, ui::format_bitrate};
+use crate::{app::NebulusApp, model::ReceiverState, settings::HudMetric, ui::format_bitrate};
 
 pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
     let available = ui.available_size();
@@ -8,6 +8,7 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(3, 7, 8));
 
+    let mut video_rect = rect;
     if let Some(frame_size) = app.frame_size {
         let source_aspect = frame_size[0] as f32 / frame_size[1].max(1) as f32;
         let target_aspect = rect.width() / rect.height().max(1.0);
@@ -17,6 +18,7 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
             egui::vec2(rect.width(), rect.width() / source_aspect)
         };
         let image_rect = egui::Rect::from_center_size(rect.center(), size);
+        video_rect = image_rect;
         if let Some(renderer) = app.video_renderer.as_ref() {
             renderer.paint(&painter, image_rect);
         } else if let Some(texture) = app.texture.as_ref() {
@@ -36,6 +38,10 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
             ReceiverState::Connecting => (
                 "Initializing receiver",
                 "Configuring the USB adapter and radio",
+            ),
+            ReceiverState::Scanning => (
+                "Scanning radio channels",
+                "Receiver start is disabled until the idle survey completes",
             ),
             ReceiverState::Failed => (
                 "Receiver error",
@@ -63,144 +69,7 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
     }
 
     if app.settings.show_osd && app.state == ReceiverState::Receiving {
-        let bar = egui::Rect::from_min_max(
-            egui::pos2(rect.left(), rect.bottom() - 44.0),
-            rect.right_bottom(),
-        );
-        painter.rect_filled(bar, 0.0, egui::Color32::from_black_alpha(205));
-        painter.line_segment(
-            [bar.left_top(), bar.right_top()],
-            egui::Stroke::new(1.0, egui::Color32::from_rgb(61, 214, 154)),
-        );
-        let resolution = app
-            .metrics
-            .resolution
-            .map(|[width, height]| format!("{width}x{height}"))
-            .unwrap_or_else(|| "--".to_owned());
-        let mut x = bar.left() + 13.0;
-        let y = bar.center().y;
-        if rect.width() < 620.0 {
-            let base_widths = [44.0, 34.0, 44.0, 39.0, 35.0, 32.0, 38.0];
-            let base_total = base_widths.iter().sum::<f32>();
-            let spacing =
-                ((bar.width() - 26.0 - base_total) / base_widths.len() as f32).clamp(0.0, 10.0);
-            let compact_resolution = app
-                .metrics
-                .resolution
-                .map(|[_, height]| format!("{height}p"))
-                .unwrap_or_else(|| "--".to_owned());
-            let strongest_rssi = app.metrics.rssi[0].max(app.metrics.rssi[1]);
-            let strongest_link = app.metrics.link_score[0].max(app.metrics.link_score[1]);
-            x = compact_hud_item(
-                &painter,
-                x,
-                y,
-                HudIcon::Display,
-                &compact_resolution,
-                base_widths[0] + spacing,
-            );
-            x = compact_hud_item(
-                &painter,
-                x,
-                y,
-                HudIcon::Fps,
-                &format!("{:.0}", app.metrics.decode_fps),
-                base_widths[1] + spacing,
-            );
-            x = compact_hud_item(
-                &painter,
-                x,
-                y,
-                HudIcon::Bitrate,
-                &format_compact_bitrate(app.metrics.bitrate_bps),
-                base_widths[2] + spacing,
-            );
-            x = compact_hud_item(
-                &painter,
-                x,
-                y,
-                HudIcon::Latency,
-                &format!("{:.0}ms", app.metrics.local_processing_latency_ms),
-                base_widths[3] + spacing,
-            );
-            x = compact_hud_item(
-                &painter,
-                x,
-                y,
-                HudIcon::Signal,
-                &strongest_rssi.to_string(),
-                base_widths[4] + spacing,
-            );
-            x = compact_hud_item(
-                &painter,
-                x,
-                y,
-                HudIcon::Loss,
-                &app.metrics.lost_packets.to_string(),
-                base_widths[5] + spacing,
-            );
-            let _ = compact_hud_item(
-                &painter,
-                x,
-                y,
-                HudIcon::Link,
-                &strongest_link.to_string(),
-                base_widths[6] + spacing,
-            );
-        } else {
-            x = hud_item(&painter, x, y, HudIcon::Display, &resolution, 82.0);
-            x = hud_item(
-                &painter,
-                x,
-                y,
-                HudIcon::Fps,
-                &format!("{:.0} fps", app.metrics.decode_fps),
-                72.0,
-            );
-            x = hud_item(
-                &painter,
-                x,
-                y,
-                HudIcon::Bitrate,
-                &format_bitrate(app.metrics.bitrate_bps),
-                96.0,
-            );
-            x = hud_item(
-                &painter,
-                x,
-                y,
-                HudIcon::Latency,
-                &format!("{:.1} ms", app.metrics.local_processing_latency_ms),
-                78.0,
-            );
-            x = hud_item(
-                &painter,
-                x,
-                y,
-                HudIcon::Signal,
-                &format!("{}/{} dBm", app.metrics.rssi[0], app.metrics.rssi[1]),
-                96.0,
-            );
-            x = hud_item(
-                &painter,
-                x,
-                y,
-                HudIcon::Loss,
-                &format!("{} lost", app.metrics.lost_packets),
-                78.0,
-            );
-            let _ = hud_item(
-                &painter,
-                x,
-                y,
-                HudIcon::Link,
-                &format!(
-                    "{}/{}",
-                    app.metrics.link_score[0], app.metrics.link_score[1]
-                ),
-                72.0,
-            );
-        }
+        draw_hud(app, &painter, video_rect);
     }
 
     if app.recording.state != crate::model::RecordingState::Idle {
@@ -217,10 +86,8 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
         );
     }
 
-    let compact_osd =
-        app.settings.show_osd && app.state == ReceiverState::Receiving && rect.width() < 620.0;
     let fullscreen_rect = egui::Rect::from_min_size(
-        rect.right_bottom() - egui::vec2(42.0, if compact_osd { 88.0 } else { 42.0 }),
+        rect.right_bottom() - egui::vec2(42.0, 42.0),
         egui::vec2(36.0, 36.0),
     );
     let fullscreen = ui
@@ -245,6 +112,109 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
     }
 }
 
+fn draw_hud(app: &NebulusApp, painter: &egui::Painter, video_rect: egui::Rect) {
+    let compact = video_rect.width() < 620.0;
+    let scale = f32::from(app.settings.hud.scale_percent) / 100.0;
+    for item in app.settings.hud.items.iter().filter(|item| item.visible) {
+        let value = hud_value(app, item.metric, compact);
+        let font = egui::FontId::monospace(if compact { 8.5 } else { 10.0 } * scale);
+        let color = egui::Color32::from_gray(226);
+        let galley = painter.layout_no_wrap(value, font, color);
+        let icon_size = if compact { 10.0 } else { 12.0 } * scale;
+        let padding = egui::vec2(6.0 * scale, 4.0 * scale);
+        let size = egui::vec2(
+            icon_size + 5.0 * scale + galley.size().x + padding.x * 2.0,
+            galley.size().y.max(icon_size) + padding.y * 2.0,
+        );
+        let requested = egui::pos2(
+            egui::lerp(video_rect.x_range(), item.x),
+            egui::lerp(video_rect.y_range(), item.y),
+        );
+        let center = egui::pos2(
+            clamp_center(requested.x, video_rect.left(), video_rect.right(), size.x),
+            clamp_center(requested.y, video_rect.top(), video_rect.bottom(), size.y),
+        );
+        let item_rect = egui::Rect::from_center_size(center, size);
+        painter.rect_filled(
+            item_rect,
+            3.0,
+            egui::Color32::from_black_alpha(app.settings.hud.background_opacity),
+        );
+        let icon_rect = egui::Rect::from_min_size(
+            item_rect.left_center() + egui::vec2(padding.x, -icon_size * 0.5),
+            egui::vec2(icon_size, icon_size),
+        );
+        draw_hud_icon(
+            painter,
+            icon_rect,
+            hud_icon(item.metric),
+            egui::Stroke::new(1.2 * scale, color),
+        );
+        painter.galley(
+            egui::pos2(
+                icon_rect.right() + 5.0 * scale,
+                item_rect.center().y - galley.size().y * 0.5,
+            ),
+            galley,
+            color,
+        );
+    }
+}
+
+fn clamp_center(value: f32, minimum: f32, maximum: f32, item_size: f32) -> f32 {
+    if item_size >= maximum - minimum {
+        (minimum + maximum) * 0.5
+    } else {
+        value.clamp(minimum + item_size * 0.5, maximum - item_size * 0.5)
+    }
+}
+
+fn hud_value(app: &NebulusApp, metric: HudMetric, compact: bool) -> String {
+    match metric {
+        HudMetric::Resolution if compact => app
+            .metrics
+            .resolution
+            .map(|[_, height]| format!("{height}p"))
+            .unwrap_or_else(|| "--".to_owned()),
+        HudMetric::Resolution => app
+            .metrics
+            .resolution
+            .map(|[width, height]| format!("{width}x{height}"))
+            .unwrap_or_else(|| "--".to_owned()),
+        HudMetric::FrameRate if compact => format!("{:.0}", app.metrics.decode_fps),
+        HudMetric::FrameRate => format!("{:.0} fps", app.metrics.decode_fps),
+        HudMetric::Bitrate if compact => format_compact_bitrate(app.metrics.bitrate_bps),
+        HudMetric::Bitrate => format_bitrate(app.metrics.bitrate_bps),
+        HudMetric::Latency if compact => {
+            format!("{:.0}ms", app.metrics.local_processing_latency_ms)
+        }
+        HudMetric::Latency => format!("{:.1} ms", app.metrics.local_processing_latency_ms),
+        HudMetric::Signal if compact => app.metrics.rssi[0].max(app.metrics.rssi[1]).to_string(),
+        HudMetric::Signal => format!("{}/{} dBm", app.metrics.rssi[0], app.metrics.rssi[1]),
+        HudMetric::PacketLoss if compact => app.metrics.lost_packets.to_string(),
+        HudMetric::PacketLoss => format!("{} lost", app.metrics.lost_packets),
+        HudMetric::LinkScore if compact => app.metrics.link_score[0]
+            .max(app.metrics.link_score[1])
+            .to_string(),
+        HudMetric::LinkScore => format!(
+            "{}/{}",
+            app.metrics.link_score[0], app.metrics.link_score[1]
+        ),
+    }
+}
+
+const fn hud_icon(metric: HudMetric) -> HudIcon {
+    match metric {
+        HudMetric::Resolution => HudIcon::Display,
+        HudMetric::FrameRate => HudIcon::Fps,
+        HudMetric::Bitrate => HudIcon::Bitrate,
+        HudMetric::Latency => HudIcon::Latency,
+        HudMetric::Signal => HudIcon::Signal,
+        HudMetric::PacketLoss => HudIcon::Loss,
+        HudMetric::LinkScore => HudIcon::Link,
+    }
+}
+
 #[derive(Clone, Copy)]
 enum HudIcon {
     Display,
@@ -254,47 +224,6 @@ enum HudIcon {
     Signal,
     Loss,
     Link,
-}
-
-fn hud_item(
-    painter: &egui::Painter,
-    x: f32,
-    y: f32,
-    icon: HudIcon,
-    value: &str,
-    slot_width: f32,
-) -> f32 {
-    let color = egui::Color32::from_gray(218);
-    let galley = painter.layout_no_wrap(value.to_owned(), egui::FontId::monospace(10.0), color);
-    let icon_rect = egui::Rect::from_center_size(egui::pos2(x + 6.0, y), egui::vec2(12.0, 12.0));
-    draw_hud_icon(painter, icon_rect, icon, egui::Stroke::new(1.3, color));
-    let text_x = x + 17.0;
-    painter.galley(
-        egui::pos2(text_x, y - galley.size().y * 0.5),
-        galley.clone(),
-        color,
-    );
-    x + slot_width
-}
-
-fn compact_hud_item(
-    painter: &egui::Painter,
-    x: f32,
-    y: f32,
-    icon: HudIcon,
-    value: &str,
-    slot_width: f32,
-) -> f32 {
-    let color = egui::Color32::from_gray(218);
-    let galley = painter.layout_no_wrap(value.to_owned(), egui::FontId::monospace(8.5), color);
-    let icon_rect = egui::Rect::from_center_size(egui::pos2(x + 5.0, y), egui::vec2(10.0, 10.0));
-    draw_hud_icon(painter, icon_rect, icon, egui::Stroke::new(1.15, color));
-    painter.galley(
-        egui::pos2(x + 14.0, y - galley.size().y * 0.5),
-        galley,
-        color,
-    );
-    x + slot_width
 }
 
 fn format_compact_bitrate(bits_per_second: f64) -> String {

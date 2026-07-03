@@ -64,6 +64,14 @@ fn receive_one_transfer() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("initialized: {:?}", report);
     let descriptor_kind = device.rx_descriptor_kind();
 
+    // RX/TX must be paused while retuning. This reuses the initialized
+    // firmware, EFUSE data, and radio state instead of cold-starting again.
+    device.retune(RadioConfig {
+        channel: 161,
+        channel_width: ChannelWidth::Mhz20,
+        channel_offset: 0,
+    })?;
+
     let mut bulk_in = device.bulk_in_endpoint()?;
     while bulk_in.pending() < 4 {
         bulk_in.submit(bulk_in.allocate(32 * 1024));
@@ -175,6 +183,13 @@ Station ships the local `tauri-plugin-openipc-usb` bridge for this, while the
 driver itself stays platform-neutral: higher layers wrap the descriptor with
 `nusb::Device::from_fd` and pass the resulting device into
 `RealtekDevice::from_nusb_device`.
+
+After monitor initialization, `retune` on native targets and `retune_async` on
+all targets change the active channel without repeating firmware bring-up.
+They are intended for app-owned idle surveys or deliberate channel changes;
+normal bulk RX/TX must be paused while the register sequence runs. Jaguar1
+reuses the cached EFUSE-derived power data, while Jaguar3 reuses its initialized
+channel/bandwidth path. Nebulus uses this API for its channel scanner.
 
 USB control transfers now pass through an internal fakeable transport boundary
 on native builds. That lets tests exercise register retry behavior without a

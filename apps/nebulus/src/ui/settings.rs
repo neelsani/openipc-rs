@@ -13,6 +13,8 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
     }
     let editable = matches!(app.state, ReceiverState::Idle | ReceiverState::Failed);
     ui.add_enabled_ui(editable, |ui| {
+        section(ui, "Profiles", |ui| profile_editor(app, ui));
+
         section(ui, "Receiver", |ui| {
             ui.horizontal(|ui| {
                 egui::ComboBox::from_id_salt("usb-device")
@@ -38,6 +40,14 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
                         .color(ui.visuals().weak_text_color()),
                 );
             }
+            ui.horizontal(|ui| {
+                if ui.button("Run preflight").clicked() {
+                    app.run_preflight();
+                }
+                if ui.button("Scan channels").clicked() {
+                    app.show_channel_scanner = true;
+                }
+            });
         });
 
         section(ui, "Radio", |ui| {
@@ -96,6 +106,40 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
         section(ui, "Link", |ui| {
             ui.checkbox(&mut app.settings.rtp_reorder, "RTP reorder buffer");
             ui.checkbox(&mut app.settings.adaptive_link, "Adaptive link feedback");
+            ui.checkbox(
+                &mut app.settings.auto_recover,
+                "Automatically recover a dropped receiver",
+            );
+            if cfg!(target_arch = "wasm32") {
+                ui.label(
+                    egui::RichText::new(
+                        "Browser reconnects require a user gesture; automatic retries run in native builds.",
+                    )
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+                );
+            }
+            if app.recovery.active {
+                ui.horizontal_wrapped(|ui| {
+                    let remaining = app
+                        .recovery
+                        .scheduled_at
+                        .map_or(0.0, |at| {
+                            at.saturating_duration_since(web_time::Instant::now())
+                                .as_secs_f32()
+                        });
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        format!(
+                            "Recovery attempt {} in {:.1}s",
+                            app.recovery.attempt, remaining
+                        ),
+                    );
+                    if ui.small_button("Cancel").clicked() {
+                        app.cancel_recovery();
+                    }
+                });
+            }
             if app.settings.adaptive_link {
                 ui.horizontal(|ui| {
                     ui.label("Uplink TX power");
@@ -173,6 +217,76 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
                 });
         });
     });
+}
+
+fn profile_editor(app: &mut NebulusApp, ui: &mut egui::Ui) {
+    let active_id = app
+        .settings
+        .active_profile_id
+        .or_else(|| app.settings.profiles.first().map(|profile| profile.id));
+    let selected_name = active_id
+        .and_then(|id| {
+            app.settings
+                .profiles
+                .iter()
+                .find(|profile| profile.id == id)
+        })
+        .map(|profile| profile.name.clone())
+        .unwrap_or_else(|| "No profile".to_owned());
+    let mut selected = active_id;
+    ui.horizontal(|ui| {
+        egui::ComboBox::from_id_salt("receiver-profile")
+            .selected_text(selected_name)
+            .width(180.0)
+            .show_ui(ui, |ui| {
+                for profile in &app.settings.profiles {
+                    ui.selectable_value(&mut selected, Some(profile.id), &profile.name);
+                }
+            });
+        if selected != active_id {
+            if let Some(id) = selected {
+                app.apply_profile(id);
+            }
+        }
+        if ui.button("New").clicked() {
+            app.create_profile();
+        }
+    });
+    if let Some(id) = app.settings.active_profile_id {
+        if let Some(profile) = app
+            .settings
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.id == id)
+        {
+            ui.horizontal(|ui| {
+                ui.label("Name");
+                ui.add(
+                    egui::TextEdit::singleline(&mut profile.name)
+                        .desired_width(180.0)
+                        .char_limit(48),
+                );
+            });
+        }
+    }
+    ui.horizontal(|ui| {
+        if ui.button("Save current").clicked() {
+            app.save_active_profile();
+        }
+        if ui
+            .add_enabled(app.settings.profiles.len() > 1, egui::Button::new("Delete"))
+            .clicked()
+        {
+            app.delete_active_profile();
+        }
+    });
+    ui.label(
+        egui::RichText::new(
+            "Profiles include the adapter, radio, link, key, routes, audio, VPN, and decoder settings.",
+        )
+        .small()
+        .color(ui.visuals().weak_text_color()),
+    );
 }
 
 fn connected_receiver(app: &NebulusApp, ui: &mut egui::Ui) {

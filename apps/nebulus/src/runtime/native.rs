@@ -8,7 +8,7 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use super::{RuntimeEvent, StartRequest, UsbDeviceInfo};
+use super::{RuntimeEvent, ScanRequest, StartRequest, UsbDeviceInfo};
 
 type EventQueue = Arc<Mutex<VecDeque<RuntimeEvent>>>;
 
@@ -87,6 +87,27 @@ impl Runtime {
                     }
                 })
                 .expect("spawn Nebulus receiver worker"),
+        );
+    }
+
+    pub(crate) fn start_scan(&mut self, request: ScanRequest, context: eframe::egui::Context) {
+        self.stop();
+        self.stop = Arc::new(AtomicBool::new(false));
+        let stop = Arc::clone(&self.stop);
+        let events = Arc::clone(&self.events);
+        self.worker = Some(
+            thread::Builder::new()
+                .name("nebulus-channel-scan".to_owned())
+                .spawn(move || {
+                    crate::low_latency::tune_receiver_thread();
+                    if let Err(error) =
+                        super::native::worker::scan(request, &stop, &events, &context)
+                    {
+                        queue(&events, RuntimeEvent::ScanFailed(error));
+                        context.request_repaint();
+                    }
+                })
+                .expect("spawn Nebulus channel scanner"),
         );
     }
 
@@ -243,9 +264,138 @@ mod worker {
         model::LogLevel,
         runtime::{
             route_runtime::{configure_receiver, RouteProcessor, VPN_ROUTE_ID},
-            BatchMetrics, MetricsThrottle, RuntimeEvent, StartRequest, VpnMetrics,
+            BatchMetrics, ChannelScanAccumulator, MetricsThrottle, RuntimeEvent, ScanRequest,
+            StartRequest, VpnMetrics,
         },
     };
+
+    pub(super) fn scan(
+        request: ScanRequest,
+        stop: &AtomicBool,
+        events: &super::EventQueue,
+        context: &eframe::egui::Context,
+    ) -> Result<(), String> {
+        if request.channels.is_empty() {
+            return Err("Select at least one channel to scan".to_owned());
+        }
+        let mut driver = DriverOptions::default();
+        if let Some(device_id) = &request.device_id {
+            if let Some((vendor, product)) = parse_device_id(device_id) {
+                driver.target_vendor_id = Some(vendor);
+                driver.target_product_id = Some(product);
+            }
+        }
+        #[cfg(not(target_os = "android"))]
+        let device = RealtekDevice::open_first(driver).map_err(|error| error.to_string())?;
+        #[cfg(target_os = "android")]
+        let (device, _android_connection) = {
+            driver.skip_reset = true;
+            let opened = crate::android::open_device(request.device_id.as_deref())?;
+            let device = RealtekDevice::from_nusb_device(opened.device, driver)
+                .map_err(|error| error.to_string())?;
+            (device, opened.connection)
+        };
+        let width = channel_width(request.channel_width_mhz)?;
+        let first = request.channels[0];
+        device
+            .initialize_monitor_with_options(
+                RadioConfig {
+                    channel: first,
+                    channel_width: width,
+                    channel_offset: request.channel_offset,
+                },
+                MonitorOptions::from_env(),
+            )
+            .map_err(|error| error.to_string())?;
+        let mut endpoint = device
+            .bulk_in_endpoint()
+            .map_err(|error| error.to_string())?;
+        while endpoint.pending() < 2 {
+            endpoint.submit(endpoint.allocate(request.transfer_size));
+        }
+        let descriptor = device.rx_descriptor_kind();
+        send(
+            events,
+            context,
+            RuntimeEvent::ScanStarted {
+                total: request.channels.len(),
+            },
+        );
+        let scan_result = (|| {
+            for (index, channel) in request.channels.iter().copied().enumerate() {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                if index > 0 {
+                    device
+                        .retune(RadioConfig {
+                            channel,
+                            channel_width: width,
+                            channel_offset: request.channel_offset,
+                        })
+                        .map_err(|error| format!("retune channel {channel} failed: {error}"))?;
+                    std::thread::sleep(Duration::from_millis(15));
+                }
+                let started = Instant::now();
+                let mut observed = ChannelScanAccumulator::default();
+                while started.elapsed() < request.dwell && !stop.load(Ordering::Relaxed) {
+                    let remaining = request.dwell.saturating_sub(started.elapsed());
+                    let Some(completion) =
+                        endpoint.wait_next_complete(remaining.min(Duration::from_millis(40)))
+                    else {
+                        continue;
+                    };
+                    let actual_len = completion.actual_len;
+                    match completion.status {
+                        Ok(()) => {
+                            if let Ok(packets) = parse_rx_aggregate_with_kind(
+                                &completion.buffer[..actual_len],
+                                descriptor,
+                            ) {
+                                for packet in &packets {
+                                    observed.observe(packet);
+                                }
+                            }
+                        }
+                        Err(TransferError::Stall) => {
+                            let _ = endpoint.clear_halt().wait();
+                        }
+                        Err(TransferError::Disconnected) => {
+                            return Err("USB adapter disconnected during channel scan".to_owned());
+                        }
+                        Err(error) => {
+                            log(
+                                events,
+                                context,
+                                LogLevel::Warn,
+                                "scanner",
+                                format!("channel scan USB transfer failed: {error}"),
+                            );
+                        }
+                    }
+                    endpoint.submit(completion.buffer);
+                }
+                send(
+                    events,
+                    context,
+                    RuntimeEvent::ScanProgress {
+                        index: index + 1,
+                        total: request.channels.len(),
+                        result: observed.finish(channel, started.elapsed()),
+                    },
+                );
+            }
+            Ok::<(), String>(())
+        })();
+        drop(endpoint);
+        let shutdown = device
+            .shutdown_monitor()
+            .map_err(|error| format!("monitor shutdown failed after scan: {error}"));
+        scan_result?;
+        shutdown?;
+        send(events, context, RuntimeEvent::ScanCompleted);
+        Ok(())
+    }
 
     enum RecorderMessage {
         Video(crate::recording::RecordedAccessUnit),
@@ -809,6 +959,7 @@ mod worker {
 
         let descriptor = device.rx_descriptor_kind();
         let mut last_decode_errors = 0;
+        let mut consecutive_usb_errors = 0u8;
         let mut recorder: Option<EncodedRecorder> = None;
         let mut armed_path: Option<PathBuf> = None;
         let mut metrics_throttle = MetricsThrottle::new();
@@ -836,8 +987,14 @@ mod worker {
             let usb_latency_ms = usb_start.elapsed().as_secs_f64() * 1000.0;
             let actual_len = completion.actual_len;
             if let Err(error) = completion.status {
+                if error == TransferError::Disconnected {
+                    return Err("USB adapter disconnected".to_owned());
+                }
                 if error == TransferError::Stall {
                     let _ = ep_in.clear_halt().wait();
+                    consecutive_usb_errors = 0;
+                } else {
+                    consecutive_usb_errors = consecutive_usb_errors.saturating_add(1);
                 }
                 log(
                     events,
@@ -847,8 +1004,14 @@ mod worker {
                     format!("bulk IN failed: {error}"),
                 );
                 ep_in.submit(completion.buffer);
+                if consecutive_usb_errors >= 8 {
+                    return Err(format!(
+                        "USB receive failed {consecutive_usb_errors} times consecutively: {error}"
+                    ));
+                }
                 continue;
             }
+            consecutive_usb_errors = 0;
             let bytes = &completion.buffer[..actual_len];
             let batch_start = Instant::now();
             let parse_start = Instant::now();

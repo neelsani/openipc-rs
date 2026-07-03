@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, VecDeque};
+use web_time::Instant;
 
 pub(crate) const METRIC_WINDOW_SECONDS: f64 = 15.0;
 
@@ -10,8 +11,29 @@ pub(crate) enum ReceiverState {
     Connecting,
     Ready,
     Receiving,
+    Scanning,
     Stopping,
     Failed,
+}
+
+/// In-memory state for bounded-delay receiver recovery.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RecoveryStatus {
+    pub(crate) active: bool,
+    pub(crate) attempt: u32,
+    pub(crate) scheduled_at: Option<Instant>,
+    pub(crate) stable_since: Option<Instant>,
+    pub(crate) last_error: String,
+}
+
+impl RecoveryStatus {
+    pub(crate) fn cancel(&mut self) {
+        self.active = false;
+        self.attempt = 0;
+        self.scheduled_at = None;
+        self.stable_since = None;
+        self.last_error.clear();
+    }
 }
 
 impl ReceiverState {
@@ -21,6 +43,7 @@ impl ReceiverState {
             Self::Connecting => "CONNECTING",
             Self::Ready => "READY",
             Self::Receiving => "RECEIVING",
+            Self::Scanning => "SCANNING",
             Self::Stopping => "STOPPING",
             Self::Failed => "ERROR",
         }

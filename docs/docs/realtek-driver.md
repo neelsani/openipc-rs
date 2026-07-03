@@ -158,6 +158,13 @@ The browser still needs the same Realtek HAL work as native: WebUSB changes how
 control and bulk transfers are issued, not what registers or firmware steps the
 adapter needs.
 
+An initialized device can be moved to another channel with `retune` on native
+or `retune_async` on every target. Retuning reuses firmware and cached EFUSE
+power data; it does not repeat cold initialization. The caller must pause its
+normal bulk RX/TX loop for the duration of the radio register sequence. Nebulus
+uses this boundary for its idle channel scanner and shuts monitor mode down
+when the survey ends.
+
 Android is another transport boundary. Nebulus calls `UsbManager` through its
 small JNI module for discovery and permission, then wraps the already-open file
 descriptor with `nusb::Device::from_fd`. The legacy Station performs the same

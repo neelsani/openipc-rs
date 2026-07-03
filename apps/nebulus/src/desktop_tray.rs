@@ -102,7 +102,7 @@ impl DesktopTray {
             .set_text(if idle { "Start RX" } else { "Stop RX" });
         self.receiver.set_enabled(!matches!(
             state,
-            ReceiverState::Connecting | ReceiverState::Stopping
+            ReceiverState::Connecting | ReceiverState::Scanning | ReceiverState::Stopping
         ));
         self.vpn.set_checked(vpn_enabled);
         self.vpn.set_enabled(idle && vpn_available);
@@ -124,7 +124,9 @@ impl NebulusApp {
                 TrayCommand::ToggleReceiver => match self.state {
                     ReceiverState::Idle | ReceiverState::Failed => self.start_receiver(context),
                     ReceiverState::Receiving | ReceiverState::Ready => self.stop_receiver(),
-                    ReceiverState::Connecting | ReceiverState::Stopping => {}
+                    ReceiverState::Connecting
+                    | ReceiverState::Scanning
+                    | ReceiverState::Stopping => {}
                 },
                 TrayCommand::ToggleVpn => {
                     if self.vpn_available()

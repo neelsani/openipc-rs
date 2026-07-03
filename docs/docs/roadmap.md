@@ -59,6 +59,8 @@ the next release.
 - Done: native adaptive-link uplink.
 - Done: Nebulus native/Android renderer with platform decoders and latest-frame
   presentation.
+- Done: Nebulus profiles, editable HUD, preflight, automatic native recovery,
+  idle native/WebUSB channel survey, and sanitized support bundles.
 - Done: legacy Tauri desktop station using the native Rust/nusb backend.
 
 ## Browser

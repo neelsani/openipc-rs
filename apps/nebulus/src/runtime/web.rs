@@ -7,7 +7,7 @@ use std::{
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
 
-use super::{RuntimeEvent, StartRequest, UsbDeviceInfo};
+use super::{RuntimeEvent, ScanRequest, StartRequest, UsbDeviceInfo};
 
 #[derive(Default)]
 struct RecordingControl {
@@ -137,6 +137,31 @@ impl Runtime {
                     &completion_context,
                     RuntimeEvent::Stopped,
                 );
+            }
+        });
+    }
+
+    pub(crate) fn start_scan(&mut self, request: ScanRequest, context: eframe::egui::Context) {
+        if let Some(cancel) = self.cancel.take() {
+            cancel.set(true);
+        }
+        let permission = match request_device(request.device_id.as_deref()) {
+            Ok(permission) => permission,
+            Err(error) => {
+                emit(
+                    &self.events,
+                    &context,
+                    RuntimeEvent::ScanFailed(js_error(error)),
+                );
+                return;
+            }
+        };
+        let cancel = Rc::new(Cell::new(false));
+        self.cancel = Some(Rc::clone(&cancel));
+        let events = Rc::clone(&self.events);
+        spawn_local(async move {
+            if let Err(error) = worker::scan(permission, request, cancel, &events, &context).await {
+                emit(&events, &context, RuntimeEvent::ScanFailed(error));
             }
         });
     }
@@ -313,7 +338,8 @@ mod worker {
         model::LogLevel,
         runtime::{
             route_runtime::{configure_receiver, RouteProcessor},
-            BatchMetrics, MetricsThrottle, RuntimeEvent, StartRequest,
+            BatchMetrics, ChannelScanAccumulator, MetricsThrottle, RuntimeEvent, ScanRequest,
+            StartRequest,
         },
     };
 
@@ -321,6 +347,126 @@ mod worker {
     const RX_TRANSFERS_IN_FLIGHT: usize = 4;
     const TX_TRANSFERS_IN_FLIGHT: usize = 8;
     const MAX_BROWSER_RECORDING_BYTES: usize = 512 * 1024 * 1024;
+
+    pub(super) async fn scan(
+        permission: js_sys::Promise<web_sys::UsbDevice>,
+        request: ScanRequest,
+        cancel: Rc<Cell<bool>>,
+        events: &Rc<RefCell<VecDeque<RuntimeEvent>>>,
+        context: &eframe::egui::Context,
+    ) -> Result<(), String> {
+        if request.channels.is_empty() {
+            return Err("Select at least one channel to scan".to_owned());
+        }
+        let web_device = JsFuture::from(permission).await.map_err(super::js_error)?;
+        let device = RealtekDevice::from_web_usb_device(web_device)
+            .await
+            .map_err(|error| error.to_string())?;
+        let width = channel_width(request.channel_width_mhz)?;
+        device
+            .initialize_monitor_async(
+                RadioConfig {
+                    channel: request.channels[0],
+                    channel_width: width,
+                    channel_offset: request.channel_offset,
+                },
+                false,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut endpoint = device
+            .open_bulk_in_endpoint()
+            .map_err(|error| error.to_string())?;
+        endpoint
+            .clear_halt()
+            .await
+            .map_err(|error| format!("clear bulk-IN halt failed: {error}"))?;
+        while endpoint.pending() < 2 {
+            endpoint.submit(endpoint.allocate(request.transfer_size));
+        }
+        let descriptor = device.rx_descriptor_kind();
+        super::emit(
+            events,
+            context,
+            RuntimeEvent::ScanStarted {
+                total: request.channels.len(),
+            },
+        );
+        let scan_result = async {
+            for (index, channel) in request.channels.iter().copied().enumerate() {
+                if cancel.get() {
+                    break;
+                }
+                if index > 0 {
+                    device
+                        .retune_async(RadioConfig {
+                            channel,
+                            channel_width: width,
+                            channel_offset: request.channel_offset,
+                        })
+                        .await
+                        .map_err(|error| format!("retune channel {channel} failed: {error}"))?;
+                    sleep_ms(15).await;
+                }
+                let started = Instant::now();
+                let mut observed = ChannelScanAccumulator::default();
+                while started.elapsed() < request.dwell && !cancel.get() {
+                    let Some(completion) = next_with_timeout_ms(&mut endpoint, 25).await else {
+                        continue;
+                    };
+                    let actual_len = completion.actual_len;
+                    match completion.status {
+                        Ok(()) => {
+                            if let Ok(packets) = parse_rx_aggregate_with_kind(
+                                &completion.buffer[..actual_len],
+                                descriptor,
+                            ) {
+                                for packet in &packets {
+                                    observed.observe(packet);
+                                }
+                            }
+                        }
+                        Err(TransferError::Stall) => {
+                            let _ = endpoint.clear_halt().await;
+                        }
+                        Err(TransferError::Disconnected) => {
+                            return Err("USB adapter disconnected during channel scan".to_owned());
+                        }
+                        Err(error) => {
+                            log(
+                                events,
+                                context,
+                                LogLevel::Warn,
+                                "scanner",
+                                format!("channel scan USB transfer failed: {error}"),
+                            );
+                        }
+                    }
+                    endpoint.submit(completion.buffer);
+                }
+                super::emit(
+                    events,
+                    context,
+                    RuntimeEvent::ScanProgress {
+                        index: index + 1,
+                        total: request.channels.len(),
+                        result: observed.finish(channel, started.elapsed()),
+                    },
+                );
+            }
+            Ok::<(), String>(())
+        }
+        .await;
+        drop(endpoint);
+        let shutdown = device
+            .shutdown_monitor_async()
+            .await
+            .map_err(|error| format!("monitor shutdown failed after scan: {error}"));
+        scan_result?;
+        shutdown?;
+        super::emit(events, context, RuntimeEvent::ScanCompleted);
+        Ok(())
+    }
 
     struct BrowserRecorder {
         codec: openipc_core::Codec,
@@ -641,6 +787,7 @@ mod worker {
 
         let descriptor = device.rx_descriptor_kind();
         let mut last_decode_errors = 0;
+        let mut consecutive_usb_errors = 0u8;
         let mut recorder: Option<BrowserRecorder> = None;
         let mut recording_armed = false;
         let mut metrics_throttle = MetricsThrottle::new();
@@ -670,8 +817,14 @@ mod worker {
             let usb_latency_ms = usb_start.elapsed().as_secs_f64() * 1_000.0;
             let actual_len = completion.actual_len;
             if let Err(error) = completion.status {
+                if error == TransferError::Disconnected {
+                    return Err("USB adapter disconnected".to_owned());
+                }
                 if error == TransferError::Stall {
                     let _ = endpoint.clear_halt().await;
+                    consecutive_usb_errors = 0;
+                } else {
+                    consecutive_usb_errors = consecutive_usb_errors.saturating_add(1);
                 }
                 log(
                     events,
@@ -681,8 +834,14 @@ mod worker {
                     format!("bulk IN failed: {error}"),
                 );
                 endpoint.submit(completion.buffer);
+                if consecutive_usb_errors >= 8 {
+                    return Err(format!(
+                        "WebUSB receive failed {consecutive_usb_errors} times consecutively: {error}"
+                    ));
+                }
                 continue;
             }
+            consecutive_usb_errors = 0;
 
             let batch_start = Instant::now();
             let parse_start = Instant::now();
@@ -1249,8 +1408,15 @@ mod worker {
     }
 
     async fn next_with_timeout(endpoint: &mut nusb::Endpoint<Bulk, In>) -> Option<Completion> {
+        next_with_timeout_ms(endpoint, 100).await
+    }
+
+    async fn next_with_timeout_ms(
+        endpoint: &mut nusb::Endpoint<Bulk, In>,
+        milliseconds: i32,
+    ) -> Option<Completion> {
         let completion = Box::pin(endpoint.next_complete());
-        let timeout = Box::pin(sleep_ms(100));
+        let timeout = Box::pin(sleep_ms(milliseconds));
         match select(completion, timeout).await {
             Either::Left((completion, _)) => Some(completion),
             Either::Right(((), _)) => None,

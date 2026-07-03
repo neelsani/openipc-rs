@@ -47,9 +47,21 @@ when the receiver disconnects.
 
 The GUI tab contains presentation-only settings. It offers Catppuccin Latte,
 Frappé, Macchiato, and Mocha themes, a persistent 75–150% interface scale,
-video telemetry-overlay visibility, control-panel visibility, and a one-click
-GUI reset. Theme and scale changes apply immediately on desktop, Android, and
-the browser.
+an editable video HUD, control-panel visibility, and a one-click GUI reset.
+HUD values can be hidden or dragged to normalized video positions, so one
+layout remains usable at different window sizes. Theme, scale, and HUD changes
+apply immediately on desktop, Android, and the browser.
+
+Settings includes named receiver profiles. A profile snapshots the adapter,
+radio, Link ID, key, routes, audio, VPN, and decoder choices; GUI appearance
+stays global. Use **Save current** after changing a profile. **Run preflight**
+checks the selected adapter, key, radio values, routes, decoder state, VPN, and
+adaptive-link configuration before RX starts.
+
+**Scan channels** opens an idle-only survey. The Rust driver initializes the
+adapter once, retunes it across the selected channels, and reports traffic,
+WFB frames, RSSI, and observed bitrate. The adapter is shut down after the
+survey. A scan and normal RX never run at the same time.
 
 ## Run In A Browser
 
@@ -108,6 +120,12 @@ through `nusb` and `openipc-rtl88xx`.
 
 Rust `log` output is mirrored to standard Android application output and the
 in-app Logs tab.
+
+Android settings use an app-private eframe RON file under the activity's
+internal data directory. Profiles, the selected key, routes, HUD layout, and
+GUI preferences therefore survive process death and device restart without
+requiring storage permission. Support bundles use Android's document picker,
+so the user chooses where the ZIP is written.
 
 That command creates an installable APK with the normal Android debug key. Add
 `[package.metadata.android.signing.release]` keystore settings outside source
@@ -189,6 +207,10 @@ codec. Native audio requests a 256-frame output buffer and keeps no more than
 - Optional RTP reorder buffer
 - Adaptive-link quality tracking, uplink feedback, and TX power override
 - H.264/H.265 playback, video-only fullscreen, and link OSD
+- Drag-and-drop ground-station HUD editor with per-value visibility and scale
+- Named receiver profiles shared by desktop, Android, and browser builds
+- Preflight validation and native automatic reconnect with bounded backoff
+- Idle channel survey with per-channel WFB traffic and RSSI
 - Keyframe-aligned H.264/H.265 MP4 recording without re-encoding
 - Live bitrate, receive/decode/render FPS, RSSI, loss, and latency plots
 - Pipeline-health, RTP, per-stage latency, and environment diagnostics
@@ -197,10 +219,16 @@ codec. Native audio requests a 256-frame output buffer and keeps no more than
 - Opus playback with volume, queue depth, and decoder/error metrics
 - Native OpenIPC VPN/TUN bridging on macOS, Linux, Windows, and Android
 - Catppuccin Macchiato theme and persisted receiver settings
+- Sanitized ZIP support bundle with build, platform, pipeline, scan, and logs
 
 UDP forwarding and VPN/TUN are native-only. Their controls are unavailable in
 browser builds. Android requests `VpnService` consent and passes the resulting
 TUN file descriptor into the same Rust bridge used by desktop targets.
+Automatic receiver recovery is native-only because starting a WebUSB device
+selection requires a browser user gesture. Native recovery begins only after a
+receiver had reached Ready or Receiving; an initially invalid configuration
+does not create a retry loop. Delays increase from one to eight seconds and
+reset after 30 seconds of stable reception.
 
 Recording writes the original encoded access units and the first enabled Opus
 audio route into MP4 without re-encoding. It waits for an H.264/H.265 keyframe,

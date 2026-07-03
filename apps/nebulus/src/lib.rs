@@ -18,6 +18,8 @@ mod settings;
 mod tun_bridge;
 mod ui;
 mod video;
+#[cfg(target_os = "windows")]
+mod wintun;
 
 pub use app::NebulusApp;
 

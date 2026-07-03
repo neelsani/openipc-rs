@@ -83,6 +83,11 @@ bind the adapter to a user-space USB driver such as WinUSB. macOS may request
 USB accessory permission. Decoder requirements are covered in
 [Platform Video Decoding](./native-video.md).
 
+The Windows release installer includes Wintun for the optional VPN feature. If
+Nebulus was installed with Cargo, open the VPN tab and use **Install Wintun**;
+the app downloads and verifies the official signed package. Video reception and
+adaptive-link feedback work without Wintun.
+
 ## Run Nebulus In A Browser
 
 ```sh

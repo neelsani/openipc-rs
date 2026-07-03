@@ -34,6 +34,10 @@ pub struct NebulusApp {
     pub(crate) environment: EnvironmentDetails,
     pub(crate) recording: RecordingStatus,
     pub(crate) vpn: VpnStatus,
+    #[cfg(target_os = "windows")]
+    pub(crate) wintun_state: crate::wintun::InstallState,
+    #[cfg(target_os = "windows")]
+    wintun_events: Option<std::sync::mpsc::Receiver<crate::wintun::InstallEvent>>,
     pub(crate) active_tab: crate::ui::PanelTab,
     pub(crate) runtime: Runtime,
     pub(crate) texture: Option<egui::TextureHandle>,
@@ -91,6 +95,10 @@ impl NebulusApp {
             environment: EnvironmentDetails::detect(),
             recording: RecordingStatus::default(),
             vpn: VpnStatus::default(),
+            #[cfg(target_os = "windows")]
+            wintun_state: crate::wintun::InstallState::detect(),
+            #[cfg(target_os = "windows")]
+            wintun_events: None,
             active_tab: crate::ui::PanelTab::Settings,
             runtime: Runtime::new(context.egui_ctx.clone()),
             texture: None,
@@ -181,7 +189,7 @@ impl NebulusApp {
             tx_power: self.settings.tx_power,
             key_bytes: self.settings.key_bytes.clone(),
             audio_volume: self.settings.audio_volume,
-            vpn_enabled: self.settings.vpn_enabled && !cfg!(target_arch = "wasm32"),
+            vpn_enabled: self.settings.vpn_enabled && self.vpn_available(),
             payload_routes: self.settings.payload_routes.clone(),
         }
     }
@@ -253,7 +261,49 @@ impl NebulusApp {
         self.runtime.refresh_devices();
     }
 
+    pub(crate) fn vpn_available(&self) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            false
+        }
+        #[cfg(target_os = "windows")]
+        {
+            self.wintun_state.is_ready()
+        }
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "windows")))]
+        {
+            true
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn install_wintun(&mut self, context: &egui::Context) {
+        if matches!(
+            self.wintun_state,
+            crate::wintun::InstallState::Downloading { .. }
+                | crate::wintun::InstallState::Installing
+        ) {
+            return;
+        }
+        match crate::wintun::spawn_installer(context.clone()) {
+            Ok(events) => {
+                self.wintun_state = crate::wintun::InstallState::Downloading {
+                    downloaded: 0,
+                    total: None,
+                };
+                self.wintun_events = Some(events);
+                self.log(LogLevel::Info, "wintun", "Downloading Wintun");
+            }
+            Err(error) => {
+                self.wintun_state = crate::wintun::InstallState::Failed(error.clone());
+                self.log(LogLevel::Error, "wintun", error);
+            }
+        }
+    }
+
     fn process_events(&mut self, context: &egui::Context) {
+        #[cfg(target_os = "windows")]
+        self.process_wintun_events();
         self.process_key_file_result();
         self.process_dropped_files(context);
         if self.video_fullscreen && context.input(|input| input.key_pressed(egui::Key::Escape)) {
@@ -391,6 +441,73 @@ impl NebulusApp {
             && (self.rate_window_bytes > 0 || self.rate_window_frames > 0)
         {
             self.update_rates();
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn process_wintun_events(&mut self) {
+        use std::sync::mpsc::TryRecvError;
+
+        let mut updates = Vec::new();
+        let mut disconnected = false;
+        if let Some(events) = self.wintun_events.as_ref() {
+            loop {
+                match events.try_recv() {
+                    Ok(event) => updates.push(event),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        let mut terminal = false;
+        for event in updates {
+            match event {
+                crate::wintun::InstallEvent::Progress { downloaded, total } => {
+                    self.wintun_state =
+                        crate::wintun::InstallState::Downloading { downloaded, total };
+                }
+                crate::wintun::InstallEvent::Installing => {
+                    self.wintun_state = crate::wintun::InstallState::Installing;
+                }
+                crate::wintun::InstallEvent::Complete(path) => {
+                    self.wintun_state = crate::wintun::InstallState::Ready;
+                    self.log(
+                        LogLevel::Info,
+                        "wintun",
+                        format!(
+                            "Wintun {} installed at {}",
+                            crate::wintun::VERSION,
+                            path.display()
+                        ),
+                    );
+                    terminal = true;
+                }
+                crate::wintun::InstallEvent::Failed(error) => {
+                    self.wintun_state = crate::wintun::InstallState::Failed(error.clone());
+                    self.log(LogLevel::Error, "wintun", error);
+                    terminal = true;
+                }
+            }
+        }
+        if disconnected
+            && !terminal
+            && matches!(
+                self.wintun_state,
+                crate::wintun::InstallState::Downloading { .. }
+                    | crate::wintun::InstallState::Installing
+            )
+        {
+            let error = "Wintun installer stopped before completion".to_owned();
+            self.wintun_state = crate::wintun::InstallState::Failed(error.clone());
+            self.log(LogLevel::Error, "wintun", error);
+            terminal = true;
+        }
+        if terminal || disconnected {
+            self.wintun_events = None;
         }
     }
 

@@ -96,7 +96,7 @@ impl DesktopTray {
         self.events.try_iter().collect()
     }
 
-    pub(crate) fn sync(&self, state: ReceiverState, vpn_enabled: bool) {
+    pub(crate) fn sync(&self, state: ReceiverState, vpn_enabled: bool, vpn_available: bool) {
         let idle = matches!(state, ReceiverState::Idle | ReceiverState::Failed);
         self.receiver
             .set_text(if idle { "Start RX" } else { "Stop RX" });
@@ -105,7 +105,7 @@ impl DesktopTray {
             ReceiverState::Connecting | ReceiverState::Stopping
         ));
         self.vpn.set_checked(vpn_enabled);
-        self.vpn.set_enabled(idle);
+        self.vpn.set_enabled(idle && vpn_available);
     }
 }
 
@@ -127,7 +127,9 @@ impl NebulusApp {
                     ReceiverState::Connecting | ReceiverState::Stopping => {}
                 },
                 TrayCommand::ToggleVpn => {
-                    if matches!(self.state, ReceiverState::Idle | ReceiverState::Failed) {
+                    if self.vpn_available()
+                        && matches!(self.state, ReceiverState::Idle | ReceiverState::Failed)
+                    {
                         self.settings.vpn_enabled = !self.settings.vpn_enabled;
                     }
                 }
@@ -145,7 +147,7 @@ impl NebulusApp {
             }
         }
         if let Some(tray) = self.desktop_tray.as_ref() {
-            tray.sync(self.state, self.settings.vpn_enabled);
+            tray.sync(self.state, self.settings.vpn_enabled, self.vpn_available());
         }
     }
 }

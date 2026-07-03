@@ -215,6 +215,14 @@ FEC-wrapped, injected through the userland Realtek driver, and transmitted on
 radio port `0xa0`. Linux may require elevated network-device permissions;
 Windows uses Wintun through `rust-tun`; Android uses its system `VpnService`.
 
+The Windows release installer includes the matching `wintun.dll`. A
+`cargo install nebulus` installation detects when the DLL is absent and shows
+**Install Wintun** in the VPN tab. Nebulus downloads the official signed 0.14.1
+archive, verifies its published SHA-256, and installs the architecture-matched
+DLL under `%LOCALAPPDATA%\Nebulus\wintun\0.14.1`. The installer runs outside
+the receiver thread. Adaptive-link feedback injects WFB packets directly
+through the Realtek driver and does not require Wintun or an enabled VPN route.
+
 Debug native and WASM builds also show **Codec mock**. It loops embedded,
 pre-recorded 1920x1080 H.264 and 48 kHz Opus fixtures, packetizes both tracks
 as RTP, and interleaves them on their media clocks. Native debug builds can

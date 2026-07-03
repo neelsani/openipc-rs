@@ -198,6 +198,9 @@ pub(crate) struct TunBridge {
 #[cfg(target_os = "windows")]
 impl TunBridge {
     pub(crate) fn open_default() -> Result<Self, String> {
+        let wintun_path = crate::wintun::locate().ok_or_else(|| {
+            "Wintun is not installed; install it from the Nebulus VPN tab".to_owned()
+        })?;
         let mut config = tun::Configuration::default();
         config
             .tun_name("OpenIPC Nebulus")
@@ -207,6 +210,7 @@ impl TunBridge {
             .layer(tun::Layer::L3)
             .up();
         config.platform_config(|platform| {
+            platform.wintun_file(wintun_path.as_os_str());
             platform.wait_for_interfaces(true, false, std::time::Duration::from_secs(5));
         });
         let device = tun::create_as_async(&config)

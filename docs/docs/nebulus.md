@@ -352,6 +352,19 @@ network interface or send arbitrary UDP/IP packets. Android uses a small
 duplicated into `rust-tun`; packet transport, WFB wrapping, and Realtek
 injection remain in Rust.
 
+Windows uses Wintun. GitHub release installers place the architecture-matched
+DLL beside Nebulus. When a Cargo installation has no DLL, the VPN tab shows an
+**Install Wintun** button and download progress. Nebulus fetches the official
+[Wintun 0.14.1 archive](https://www.wintun.net/), verifies the published
+SHA-256 before extraction, and writes the DLL and its license to
+`%LOCALAPPDATA%\Nebulus\wintun\0.14.1`. The install controls disappear as soon
+as the verified DLL is ready, and failed downloads can be retried.
+
+Adaptive link does not require a TUN interface or Wintun. Its quality report is
+wrapped as IPv4/UDP by `openipc-core`, encrypted and FEC-framed for radio port
+`0xa0`, then submitted directly to the Realtek TX worker. Enabling VPN merely
+adds general-purpose IP downlink/uplink bridging on ports `0x20` and `0xa0`.
+
 Malformed USB aggregates and recoverable bulk-transfer failures are logged and
 skipped. A stalled endpoint is cleared before reads resume. A disconnect or
 fatal initialization/decode error moves the app to the failed state instead of

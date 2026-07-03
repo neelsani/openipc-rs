@@ -444,9 +444,12 @@ fn vpn(app: &mut NebulusApp, ui: &mut egui::Ui) {
             .color(ui.visuals().weak_text_color()),
     );
     ui.add_space(10.0);
+    #[cfg(target_os = "windows")]
+    wintun_install(app, ui);
     let supported = !cfg!(target_arch = "wasm32");
+    let available = app.vpn_available();
     ui.add_enabled_ui(
-        supported && matches!(app.state, ReceiverState::Idle | ReceiverState::Failed),
+        supported && available && matches!(app.state, ReceiverState::Idle | ReceiverState::Failed),
         |ui| {
             ui.checkbox(
                 &mut app.settings.vpn_enabled,
@@ -459,9 +462,24 @@ fn vpn(app: &mut NebulusApp, ui: &mut egui::Ui) {
             ui.visuals().warn_fg_color,
             "VPN/TUN is unavailable in browsers.",
         );
+    } else if !available {
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            "Install Wintun before enabling the Windows VPN interface.",
+        );
     }
     ui.separator();
     egui::Grid::new("vpn-status").num_columns(2).show(ui, |ui| {
+        #[cfg(target_os = "windows")]
+        diagnostic_row(
+            ui,
+            "Wintun",
+            if app.wintun_state.is_ready() {
+                "Available"
+            } else {
+                "Not installed"
+            },
+        );
         diagnostic_row(
             ui,
             "State",
@@ -497,6 +515,76 @@ fn vpn(app: &mut NebulusApp, ui: &mut egui::Ui) {
         );
         diagnostic_row(ui, "Errors", &app.vpn.errors.to_string());
     });
+}
+
+#[cfg(target_os = "windows")]
+fn wintun_install(app: &mut NebulusApp, ui: &mut egui::Ui) {
+    use crate::wintun::InstallState;
+
+    let state = app.wintun_state.clone();
+    if matches!(state, InstallState::Ready) {
+        return;
+    }
+
+    egui::Frame::group(ui.style())
+        .inner_margin(egui::Margin::same(10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.strong("Wintun required");
+            ui.label(
+                egui::RichText::new(
+                    "Nebulus uses the signed Wintun driver only for the optional Windows VPN interface.",
+                )
+                .small()
+                .color(ui.visuals().weak_text_color()),
+            );
+            ui.add_space(6.0);
+            match state {
+                InstallState::Missing => {
+                    if ui.button("Install Wintun").clicked() {
+                        app.install_wintun(ui.ctx());
+                    }
+                }
+                InstallState::Downloading { downloaded, total } => {
+                    let progress = total
+                        .filter(|total| *total > 0)
+                        .map_or(0.0, |total| downloaded as f32 / total as f32)
+                        .clamp(0.0, 1.0);
+                    let text = total.map_or_else(
+                        || format!("Downloading {}", format_bytes(downloaded)),
+                        |total| {
+                            format!(
+                                "Downloading {} / {}",
+                                format_bytes(downloaded),
+                                format_bytes(total)
+                            )
+                        },
+                    );
+                    ui.add(
+                        egui::ProgressBar::new(progress)
+                            .animate(total.is_none())
+                            .desired_width(ui.available_width())
+                            .text(text),
+                    );
+                }
+                InstallState::Installing => {
+                    ui.add(
+                        egui::ProgressBar::new(1.0)
+                            .animate(true)
+                            .desired_width(ui.available_width())
+                            .text("Verifying and installing Wintun"),
+                    );
+                }
+                InstallState::Failed(error) => {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                    if ui.button("Retry installation").clicked() {
+                        app.install_wintun(ui.ctx());
+                    }
+                }
+                InstallState::Ready => {}
+            }
+        });
+    ui.add_space(10.0);
 }
 
 fn diagnostic_row(ui: &mut egui::Ui, label: &str, value: &str) {

@@ -1,6 +1,6 @@
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 fn main() -> eframe::Result {
-    nebulus::init_logging();
+    nebulus_app::init_logging();
     let wgpu_options = eframe::egui_wgpu::WgpuConfiguration::default().with_surface_config(
         eframe::egui_wgpu::SurfaceConfig {
             present_mode: eframe::wgpu::PresentMode::AutoNoVsync,
@@ -19,7 +19,7 @@ fn main() -> eframe::Result {
             dithering: false,
             ..Default::default()
         },
-        Box::new(|context| Ok(Box::new(nebulus::create_app(context)))),
+        Box::new(|context| Ok(Box::new(nebulus_app::create_app(context)))),
     )
 }
 

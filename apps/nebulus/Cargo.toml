@@ -9,6 +9,7 @@ publish = true
 readme = "README.md"
 
 [lib]
+name = "nebulus_app"
 crate-type = ["cdylib", "rlib"]
 
 [[bin]]
@@ -125,7 +126,7 @@ exported = true
 
 [[package.metadata.android.application.activity.meta_data]]
 name = "android.app.lib_name"
-value = "nebulus"
+value = "nebulus_app"
 
 [[package.metadata.android.application.activity.intent_filter]]
 actions = ["android.intent.action.MAIN"]

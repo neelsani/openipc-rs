@@ -11,6 +11,7 @@ use crate::{
     model::AudioStats,
     recording::{AudioTrackConfig, RecordedAudioPacket},
     settings::{PayloadRouteSettings, RouteAction},
+    telemetry::{TelemetryDecoder, TelemetryUpdate},
 };
 
 use super::{RouteMetricDelta, StartRequest};
@@ -32,6 +33,8 @@ struct ActiveRoute {
     audio_unavailable: Option<AudioStats>,
     #[cfg(not(target_arch = "wasm32"))]
     udp: Option<std::net::UdpSocket>,
+    telemetry: Option<TelemetryDecoder>,
+    telemetry_announced: bool,
     last_log: Option<Instant>,
 }
 
@@ -112,11 +115,15 @@ impl RouteProcessor {
             routes.insert(
                 settings.id,
                 ActiveRoute {
+                    telemetry: (settings.action == RouteAction::Telemetry).then(|| {
+                        TelemetryDecoder::new(settings.telemetry_protocol, &request.telemetry)
+                    }),
                     settings: settings.clone(),
                     audio,
                     audio_unavailable,
                     #[cfg(not(target_arch = "wasm32"))]
                     udp,
+                    telemetry_announced: false,
                     last_log: None,
                 },
             );
@@ -151,10 +158,12 @@ impl RouteProcessor {
         Vec<RouteMetricDelta>,
         Vec<RouteLog>,
         Vec<RecordedAudioPacket>,
+        Option<TelemetryUpdate>,
     ) {
         let mut updates = BTreeMap::<u64, RouteMetricDelta>::new();
         let mut logs = Vec::new();
         let mut recorded_audio = Vec::new();
+        let mut telemetry = TelemetryUpdate::default();
         for payload in payloads {
             let Some(route) = self.routes.get_mut(&payload.route_id.raw()) else {
                 continue;
@@ -201,6 +210,46 @@ impl RouteProcessor {
                         .ok_or_else(|| "audio output unavailable".to_owned())
                         .and_then(|audio| audio.push_rtp(&payload.data))
                 }
+                RouteAction::Telemetry => match route.telemetry.as_mut() {
+                    Some(decoder) => {
+                        let decoded = decoder.push(&payload.data);
+                        if !decoded.is_empty() {
+                            if !route.telemetry_announced {
+                                let protocol = match (decoded.protocol, decoded.mavlink_version) {
+                                    (
+                                        Some(crate::telemetry::TelemetryProtocol::Mavlink),
+                                        Some(version),
+                                    ) => {
+                                        format!("MAVLink v{version}")
+                                    }
+                                    (Some(protocol), _) => protocol.label().to_owned(),
+                                    (None, _) => "telemetry".to_owned(),
+                                };
+                                let blocked = decoded.counters.accepted_frames == 0
+                                    && (decoded.counters.rejected_frames > 0
+                                        || decoded.counters.filtered_frames > 0);
+                                logs.push(RouteLog {
+                                    warning: blocked,
+                                    message: if blocked {
+                                        format!(
+                                            "Telemetry protocol detected: {protocol} (route {}, radio port 0x{:02x}); frame blocked by telemetry policy",
+                                            route.settings.name, route.settings.radio_port
+                                        )
+                                    } else {
+                                        format!(
+                                            "Telemetry protocol detected: {protocol} (route {}, radio port 0x{:02x})",
+                                            route.settings.name, route.settings.radio_port
+                                        )
+                                    },
+                                });
+                                route.telemetry_announced = true;
+                            }
+                            telemetry.merge(decoded);
+                        }
+                        Ok(())
+                    }
+                    None => Err("telemetry decoder unavailable".to_owned()),
+                },
                 RouteAction::Udp => {
                     #[cfg(not(target_arch = "wasm32"))]
                     {
@@ -231,7 +280,12 @@ impl RouteProcessor {
                 }
             }
         }
-        (updates.into_values().collect(), logs, recorded_audio)
+        (
+            updates.into_values().collect(),
+            logs,
+            recorded_audio,
+            (!telemetry.is_empty()).then_some(telemetry),
+        )
     }
 
     pub(super) fn recording_audio_config(&self) -> Option<AudioTrackConfig> {
@@ -374,7 +428,7 @@ mod tests {
     };
 
     use super::{configure_receiver, RouteProcessor};
-    use crate::{runtime::StartRequest, settings::Settings};
+    use crate::{runtime::StartRequest, settings::Settings, telemetry::crc8_dvb_s2};
 
     fn request_from_settings(settings: Settings) -> StartRequest {
         StartRequest {
@@ -396,6 +450,7 @@ mod tests {
             audio_volume: settings.audio_volume,
             vpn_enabled: settings.vpn_enabled,
             payload_routes: settings.payload_routes,
+            telemetry: settings.telemetry,
         }
     }
 
@@ -472,10 +527,42 @@ mod tests {
             data: rtp,
         };
 
-        let (_, _, recorded) = routes.process(&[payload], true);
+        let (_, _, recorded, _) = routes.process(&[payload], true);
 
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].timestamp, 48_000);
         assert_eq!(recorded[0].data, opus);
+    }
+
+    #[test]
+    fn telemetry_route_decodes_raw_radio_payload_for_the_osd() {
+        let request = request_from_settings(Settings::default());
+        let mut routes = RouteProcessor::new(&request).unwrap();
+        let battery = [0x00, 0xa8, 0x00, 0xeb, 0x00, 0x04, 0xd2, 81];
+        let mut frame = vec![0xc8, (battery.len() + 2) as u8, 0x08];
+        frame.extend_from_slice(&battery);
+        frame.push(crc8_dvb_s2(&frame[2..]));
+        let payload = RoutePayload {
+            route_id: PayloadRouteId::new(2),
+            channel_id: ChannelId::from_link_port(request.channel_id >> 8, RadioPort::TelemetryRx),
+            packet_seq: 10,
+            data: frame,
+        };
+
+        let (metrics, logs, _, telemetry) = routes.process(std::slice::from_ref(&payload), false);
+        let telemetry = telemetry.expect("telemetry OSD update");
+
+        assert_eq!(metrics[0].packets, 1);
+        assert_eq!(telemetry.battery_voltage_v, Some(16.8));
+        assert_eq!(telemetry.battery_current_a, Some(23.5));
+        assert_eq!(telemetry.battery_remaining_pct, Some(81));
+        assert!(logs
+            .iter()
+            .any(|log| log.message.contains("Telemetry protocol detected: CRSF")));
+
+        let (_, repeated_logs, _, _) = routes.process(&[payload], false);
+        assert!(!repeated_logs
+            .iter()
+            .any(|log| log.message.contains("Telemetry protocol detected")));
     }
 }

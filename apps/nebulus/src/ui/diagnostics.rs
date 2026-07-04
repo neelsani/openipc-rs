@@ -194,26 +194,68 @@ fn rtp(app: &NebulusApp, ui: &mut egui::Ui) {
 }
 
 fn latency(app: &NebulusApp, ui: &mut egui::Ui) {
+    if ui.available_width() < 700.0 {
+        latency_cards(app, ui);
+        return;
+    }
+
     egui::Grid::new("latency-stages")
         .num_columns(6)
         .striped(true)
-        .spacing([12.0, 7.0])
+        .spacing([10.0, 7.0])
         .show(ui, |ui| {
-            for heading in ["Stage", "Last", "Average", "P95", "Maximum", "Samples"] {
+            for heading in ["Stage", "Last (ms)", "Average", "P95", "Maximum", "Samples"] {
                 ui.strong(heading);
             }
             ui.end_row();
             for (name, values) in &app.diagnostics.stages {
                 let summary = values.summary();
                 ui.label(*name);
-                ui.monospace(format!("{:.2} ms", summary.last));
-                ui.monospace(format!("{:.2} ms", summary.average));
-                ui.monospace(format!("{:.2} ms", summary.p95));
-                ui.monospace(format!("{:.2} ms", summary.maximum));
+                ui.monospace(format!("{:.2}", summary.last));
+                ui.monospace(format!("{:.2}", summary.average));
+                ui.monospace(format!("{:.2}", summary.p95));
+                ui.monospace(format!("{:.2}", summary.maximum));
                 ui.monospace(summary.samples.to_string());
                 ui.end_row();
             }
         });
+}
+
+fn latency_cards(app: &NebulusApp, ui: &mut egui::Ui) {
+    for (name, values) in &app.diagnostics.stages {
+        let summary = values.summary();
+        egui::Frame::group(ui.style())
+            .inner_margin(egui::Margin::symmetric(10, 8))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.strong(*name);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{} samples", summary.samples))
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                    });
+                });
+                ui.add_space(5.0);
+                ui.columns(4, |columns| {
+                    latency_stat(&mut columns[0], "Last", summary.last);
+                    latency_stat(&mut columns[1], "Average", summary.average);
+                    latency_stat(&mut columns[2], "P95", summary.p95);
+                    latency_stat(&mut columns[3], "Maximum", summary.maximum);
+                });
+            });
+        ui.add_space(6.0);
+    }
+}
+
+fn latency_stat(ui: &mut egui::Ui, label: &str, value_ms: f64) {
+    ui.label(
+        egui::RichText::new(label)
+            .small()
+            .color(ui.visuals().weak_text_color()),
+    );
+    ui.monospace(format!("{value_ms:.2} ms"));
 }
 
 fn environment(app: &NebulusApp, ui: &mut egui::Ui) {

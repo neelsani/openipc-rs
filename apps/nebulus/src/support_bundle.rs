@@ -26,6 +26,7 @@ pub(crate) fn build(app: &NebulusApp) -> Result<SupportBundle, String> {
                 "name": route.name,
                 "radio_port": route.radio_port,
                 "action": format!("{:?}", route.action),
+                "telemetry_protocol": format!("{:?}", route.telemetry_protocol),
                 "payload_type": route.payload_type,
                 "sample_rate": route.sample_rate,
                 "channels": route.channels,
@@ -52,6 +53,8 @@ pub(crate) fn build(app: &NebulusApp) -> Result<SupportBundle, String> {
                 "adaptive_link": profile.adaptive_link,
                 "vpn": profile.vpn_enabled,
                 "key_bytes": profile.key_bytes.len(),
+                "telemetry_signing": profile.telemetry.mavlink_signing.label(),
+                "telemetry_signing_key_bytes": profile.telemetry.mavlink_signing_key.len(),
             })
         })
         .collect::<Vec<_>>();
@@ -132,6 +135,56 @@ pub(crate) fn build(app: &NebulusApp) -> Result<SupportBundle, String> {
             })
         })
         .collect::<Vec<_>>();
+    let telemetry_configuration = json!({
+        "stale_timeout_ms": app.settings.telemetry.stale_timeout_ms,
+        "mavlink_signing": app.settings.telemetry.mavlink_signing.label(),
+        "mavlink_signing_key_bytes": app.settings.telemetry.mavlink_signing_key.len(),
+        "mavlink_system_id": app.settings.telemetry.mavlink_system_id,
+        "mavlink_component_id": app.settings.telemetry.mavlink_component_id,
+        "msp_version": app.settings.telemetry.msp_version.label(),
+        "msp_direction": app.settings.telemetry.msp_direction.label(),
+        "crsf_address": app.settings.telemetry.crsf_address,
+    });
+    let telemetry = json!({
+        "protocol": app.telemetry.protocol.map(|protocol| protocol.label()),
+        "messages": app.telemetry.messages,
+        "fresh": app.telemetry.is_fresh(app.settings.telemetry.stale_timeout_ms),
+        "age_seconds": app.telemetry.age_seconds(),
+        "frame_age_seconds": app.telemetry.frame_age_seconds(),
+        "accepted_frames": app.telemetry.counters.accepted_frames,
+        "rejected_frames": app.telemetry.counters.rejected_frames,
+        "filtered_frames": app.telemetry.counters.filtered_frames,
+        "mavlink_version": app.telemetry.mavlink_version,
+        "mavlink_system_id": app.telemetry.mavlink_system_id,
+        "mavlink_component_id": app.telemetry.mavlink_component_id,
+        "mavlink_last_signed": app.telemetry.mavlink_last_signed,
+        "mavlink_signing_link_id": app.telemetry.mavlink_signing_link_id,
+        "mavlink_signed_frames": app.telemetry.counters.mavlink_signed_frames,
+        "mavlink_unsigned_frames": app.telemetry.counters.mavlink_unsigned_frames,
+        "mavlink_verified_frames": app.telemetry.counters.mavlink_verified_frames,
+        "mavlink_invalid_signatures": app.telemetry.counters.mavlink_invalid_signatures,
+        "mavlink_replay_drops": app.telemetry.counters.mavlink_replay_drops,
+        "mavlink_stale_timestamp_drops": app.telemetry.counters.mavlink_stale_timestamp_drops,
+        "mavlink_missing_key_drops": app.telemetry.counters.mavlink_missing_key_drops,
+        "armed": app.telemetry.armed,
+        "flight_mode": app.telemetry.flight_mode,
+        "battery_voltage_v": app.telemetry.battery_voltage_v,
+        "battery_current_a": app.telemetry.battery_current_a,
+        "battery_consumed_mah": app.telemetry.battery_consumed_mah,
+        "battery_remaining_pct": app.telemetry.battery_remaining_pct,
+        "gps_fix": app.telemetry.gps_fix,
+        "satellites": app.telemetry.satellites,
+        "altitude_m": app.telemetry.altitude_m,
+        "relative_altitude_m": app.telemetry.relative_altitude_m,
+        "ground_speed_mps": app.telemetry.ground_speed_mps,
+        "air_speed_mps": app.telemetry.air_speed_mps,
+        "vertical_speed_mps": app.telemetry.vertical_speed_mps,
+        "heading_deg": app.telemetry.heading_deg,
+        "home_distance_m": app.telemetry.home_distance_m,
+        "rc_link_quality_pct": app.telemetry.rc_link_quality_pct,
+        "position_available": app.telemetry.latitude_deg.is_some()
+            && app.telemetry.longitude_deg.is_some(),
+    });
     let report = json!({
         "generated_unix_seconds": timestamp,
         "build": {
@@ -177,6 +230,7 @@ pub(crate) fn build(app: &NebulusApp) -> Result<SupportBundle, String> {
             "vpn_enabled": app.settings.vpn_enabled,
             "key_bytes": app.settings.key_bytes.len(),
             "key_is_default": app.settings.key_bytes == crate::settings::DEFAULT_KEY_BYTES,
+            "telemetry": telemetry_configuration,
             "routes": routes,
             "profiles": profiles,
         },
@@ -232,6 +286,7 @@ pub(crate) fn build(app: &NebulusApp) -> Result<SupportBundle, String> {
         },
         "stage_latencies": stage_latencies,
         "route_metrics": route_metrics,
+        "telemetry": telemetry,
         "preflight": preflight,
         "audio": {
             "enabled": app.audio.enabled,

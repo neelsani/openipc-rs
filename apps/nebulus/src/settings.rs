@@ -1,6 +1,8 @@
 use openipc_core::{channel::DEFAULT_LINK_ID, ChannelId, RadioPort};
 use serde::{Deserialize, Serialize};
 
+use crate::telemetry::{TelemetryProtocol, TelemetrySettings};
+
 pub(crate) const DEFAULT_KEY_BYTES: &[u8; 64] = &[
     0xbb, 0xb7, 0xed, 0x6e, 0x83, 0xa4, 0x6a, 0x8a, 0x9b, 0x8a, 0x12, 0xa0, 0xf9, 0x8e, 0xce, 0x2b,
     0xdc, 0x97, 0x87, 0x05, 0xb8, 0x20, 0x47, 0x01, 0xb2, 0x08, 0x5f, 0xa2, 0x8c, 0xac, 0x7b, 0x46,
@@ -99,6 +101,7 @@ pub(crate) enum RouteAction {
     Log,
     Udp,
     Audio,
+    Telemetry,
 }
 
 impl RouteAction {
@@ -108,6 +111,7 @@ impl RouteAction {
             Self::Log => "Log",
             Self::Udp => "UDP forward",
             Self::Audio => "Audio",
+            Self::Telemetry => "Telemetry to OSD",
         }
     }
 }
@@ -120,6 +124,7 @@ pub(crate) struct PayloadRouteSettings {
     pub(crate) name: String,
     pub(crate) radio_port: u8,
     pub(crate) action: RouteAction,
+    pub(crate) telemetry_protocol: TelemetryProtocol,
     pub(crate) payload_type: u8,
     pub(crate) sample_rate: u32,
     pub(crate) channels: u8,
@@ -127,7 +132,7 @@ pub(crate) struct PayloadRouteSettings {
     pub(crate) udp_port: u16,
 }
 
-/// A value that can be placed on the ground-station video HUD.
+/// A value that can be placed on the ground-station video OSD.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum HudMetric {
     Resolution,
@@ -137,10 +142,37 @@ pub(crate) enum HudMetric {
     Signal,
     PacketLoss,
     LinkScore,
+    LinkHealth,
+    Armed,
+    FlightMode,
+    BatteryVoltage,
+    BatteryCurrent,
+    BatteryRemaining,
+    GpsStatus,
+    Altitude,
+    GroundSpeed,
+    VerticalSpeed,
+    Heading,
+    HomeDistance,
+    Throttle,
+    Attitude,
+    StatusText,
+    Coordinates,
+    RcLinkQuality,
+    // Retained only so layouts written by the first customizable-HUD build can
+    // be migrated into presentation options on their corresponding metric.
+    #[doc(hidden)]
+    SignalBars,
+    #[doc(hidden)]
+    SignalTrend,
+    #[doc(hidden)]
+    LossTrend,
+    #[doc(hidden)]
+    LatencyTrend,
 }
 
 impl HudMetric {
-    pub(crate) const ALL: [Self; 7] = [
+    pub(crate) const ALL: [Self; 24] = [
         Self::Resolution,
         Self::FrameRate,
         Self::Bitrate,
@@ -148,6 +180,23 @@ impl HudMetric {
         Self::Signal,
         Self::PacketLoss,
         Self::LinkScore,
+        Self::LinkHealth,
+        Self::Armed,
+        Self::FlightMode,
+        Self::BatteryVoltage,
+        Self::BatteryCurrent,
+        Self::BatteryRemaining,
+        Self::GpsStatus,
+        Self::Altitude,
+        Self::GroundSpeed,
+        Self::VerticalSpeed,
+        Self::Heading,
+        Self::HomeDistance,
+        Self::Throttle,
+        Self::Attitude,
+        Self::StatusText,
+        Self::Coordinates,
+        Self::RcLinkQuality,
     ];
 
     pub(crate) const fn label(self) -> &'static str {
@@ -159,12 +208,71 @@ impl HudMetric {
             Self::Signal => "RSSI",
             Self::PacketLoss => "Packet loss",
             Self::LinkScore => "Link score",
+            Self::LinkHealth => "Link health",
+            Self::Armed => "Arm state",
+            Self::FlightMode => "Flight mode",
+            Self::BatteryVoltage => "Battery voltage",
+            Self::BatteryCurrent => "Battery current",
+            Self::BatteryRemaining => "Battery remaining",
+            Self::GpsStatus => "GPS fix / satellites",
+            Self::Altitude => "Altitude",
+            Self::GroundSpeed => "Ground speed",
+            Self::VerticalSpeed => "Vertical speed",
+            Self::Heading => "Heading",
+            Self::HomeDistance => "Home distance",
+            Self::Throttle => "Throttle",
+            Self::Attitude => "Attitude",
+            Self::StatusText => "Status message",
+            Self::Coordinates => "Coordinates",
+            Self::RcLinkQuality => "RC link quality",
+            Self::SignalBars => "Legacy signal bars",
+            Self::SignalTrend => "RSSI trend",
+            Self::LossTrend => "Loss trend",
+            Self::LatencyTrend => "Latency trend",
         }
+    }
+
+    pub(crate) const fn supports_graph(self) -> bool {
+        matches!(
+            self,
+            Self::FrameRate
+                | Self::Bitrate
+                | Self::Latency
+                | Self::Signal
+                | Self::PacketLoss
+                | Self::LinkScore
+        )
+    }
+
+    pub(crate) const fn supports_signal_bars(self) -> bool {
+        matches!(self, Self::Signal)
+    }
+
+    pub(crate) const fn requires_telemetry(self) -> bool {
+        matches!(
+            self,
+            Self::Armed
+                | Self::FlightMode
+                | Self::BatteryVoltage
+                | Self::BatteryCurrent
+                | Self::BatteryRemaining
+                | Self::GpsStatus
+                | Self::Altitude
+                | Self::GroundSpeed
+                | Self::VerticalSpeed
+                | Self::Heading
+                | Self::HomeDistance
+                | Self::Throttle
+                | Self::Attitude
+                | Self::StatusText
+                | Self::Coordinates
+                | Self::RcLinkQuality
+        )
     }
 }
 
-/// Position and visibility of one HUD value.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Position, visibility, and presentation of one OSD value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct HudItemSettings {
     pub(crate) metric: HudMetric,
@@ -173,6 +281,22 @@ pub(crate) struct HudItemSettings {
     pub(crate) x: f32,
     /// Vertical item center in normalized video coordinates.
     pub(crate) y: f32,
+    pub(crate) show_icon: bool,
+    pub(crate) show_label: bool,
+    pub(crate) show_value: bool,
+    pub(crate) show_graph: bool,
+    pub(crate) show_signal_bars: bool,
+    pub(crate) show_background: bool,
+    pub(crate) colorize: bool,
+    pub(crate) hide_when_unavailable: bool,
+    /// Scale relative to the global HUD scale.
+    pub(crate) scale_percent: u16,
+    /// Percentage of the global HUD background opacity.
+    pub(crate) background_opacity_percent: u8,
+    pub(crate) graph_seconds: u16,
+    pub(crate) graph_width: u16,
+    pub(crate) graph_height: u16,
+    pub(crate) graph_fill: bool,
 }
 
 impl Default for HudItemSettings {
@@ -182,12 +306,26 @@ impl Default for HudItemSettings {
             visible: true,
             x: 0.08,
             y: 0.95,
+            show_icon: true,
+            show_label: false,
+            show_value: true,
+            show_graph: false,
+            show_signal_bars: false,
+            show_background: true,
+            colorize: true,
+            hide_when_unavailable: false,
+            scale_percent: 100,
+            background_opacity_percent: 100,
+            graph_seconds: 20,
+            graph_width: 118,
+            graph_height: 42,
+            graph_fill: false,
         }
     }
 }
 
-/// Persisted layout and appearance of the video HUD.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Persisted layout and appearance of the video OSD.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct HudSettings {
     pub(crate) items: Vec<HudItemSettings>,
@@ -200,22 +338,30 @@ impl HudSettings {
         *self = Self::default();
     }
 
+    pub(crate) fn reset_item(&mut self, metric: HudMetric) {
+        let index = HudMetric::ALL
+            .iter()
+            .position(|candidate| *candidate == metric)
+            .unwrap_or_default();
+        if let Some(item) = self.items.iter_mut().find(|item| item.metric == metric) {
+            *item = default_hud_item(metric, index);
+        }
+    }
+
     pub(crate) fn normalize(&mut self) {
         for metric in HudMetric::ALL {
             if !self.items.iter().any(|item| item.metric == metric) {
-                let fallback = Self::default();
-                if let Some(item) = fallback
-                    .items
-                    .into_iter()
-                    .find(|item| item.metric == metric)
-                {
-                    self.items.push(item);
-                }
+                let index = HudMetric::ALL
+                    .iter()
+                    .position(|candidate| *candidate == metric)
+                    .unwrap_or_default();
+                self.items.push(default_hud_item(metric, index));
             }
         }
+        self.migrate_legacy_visual_items();
         let mut seen = Vec::with_capacity(HudMetric::ALL.len());
         self.items.retain(|item| {
-            if seen.contains(&item.metric) {
+            if !HudMetric::ALL.contains(&item.metric) || seen.contains(&item.metric) {
                 false
             } else {
                 seen.push(item.metric);
@@ -225,8 +371,55 @@ impl HudSettings {
         for item in &mut self.items {
             item.x = item.x.clamp(0.03, 0.97);
             item.y = item.y.clamp(0.03, 0.97);
+            item.scale_percent = item.scale_percent.clamp(60, 200);
+            item.background_opacity_percent = item.background_opacity_percent.min(100);
+            item.graph_seconds = item.graph_seconds.clamp(5, 60);
+            item.graph_width = item.graph_width.clamp(80, 260);
+            item.graph_height = item.graph_height.clamp(32, 120);
+            item.show_graph &= item.metric.supports_graph();
+            item.show_signal_bars &= item.metric.supports_signal_bars();
+            if !item.show_icon
+                && !item.show_label
+                && !item.show_value
+                && !item.show_graph
+                && !item.show_signal_bars
+            {
+                item.show_value = true;
+            }
         }
         self.scale_percent = self.scale_percent.clamp(70, 160);
+    }
+
+    fn migrate_legacy_visual_items(&mut self) {
+        let legacy = self
+            .items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item.metric,
+                    HudMetric::SignalBars
+                        | HudMetric::SignalTrend
+                        | HudMetric::LossTrend
+                        | HudMetric::LatencyTrend
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        for old in legacy.into_iter().filter(|item| item.visible) {
+            let (metric, graph, bars) = match old.metric {
+                HudMetric::SignalBars => (HudMetric::Signal, false, true),
+                HudMetric::SignalTrend => (HudMetric::Signal, true, false),
+                HudMetric::LossTrend => (HudMetric::PacketLoss, true, false),
+                HudMetric::LatencyTrend => (HudMetric::Latency, true, false),
+                _ => continue,
+            };
+            let Some(target) = self.items.iter_mut().find(|item| item.metric == metric) else {
+                continue;
+            };
+            target.show_graph |= graph;
+            target.show_signal_bars |= bars;
+        }
     }
 }
 
@@ -236,16 +429,45 @@ impl Default for HudSettings {
             items: HudMetric::ALL
                 .into_iter()
                 .enumerate()
-                .map(|(index, metric)| HudItemSettings {
-                    metric,
-                    visible: true,
-                    x: 0.075 + index as f32 * 0.14,
-                    y: 0.95,
-                })
+                .map(|(index, metric)| default_hud_item(metric, index))
                 .collect(),
             scale_percent: 100,
             background_opacity: 205,
         }
+    }
+}
+
+fn default_hud_item(metric: HudMetric, index: usize) -> HudItemSettings {
+    let (visible, x, y) = match metric {
+        HudMetric::LinkHealth => (false, 0.50, 0.10),
+        HudMetric::Armed => (true, 0.50, 0.10),
+        HudMetric::FlightMode => (true, 0.10, 0.10),
+        HudMetric::BatteryVoltage => (true, 0.90, 0.10),
+        HudMetric::BatteryRemaining => (true, 0.90, 0.24),
+        HudMetric::BatteryCurrent => (true, 0.90, 0.38),
+        HudMetric::GpsStatus => (true, 0.10, 0.24),
+        HudMetric::Altitude => (true, 0.10, 0.38),
+        HudMetric::GroundSpeed => (true, 0.10, 0.52),
+        HudMetric::VerticalSpeed => (true, 0.10, 0.66),
+        HudMetric::Heading => (true, 0.50, 0.24),
+        HudMetric::HomeDistance => (true, 0.50, 0.38),
+        HudMetric::Throttle => (true, 0.90, 0.52),
+        HudMetric::StatusText => (true, 0.50, 0.52),
+        HudMetric::Attitude => (false, 0.50, 0.50),
+        HudMetric::Coordinates => (false, 0.50, 0.33),
+        HudMetric::RcLinkQuality => (false, 0.90, 0.66),
+        _ => {
+            let columns = [0.07, 0.21, 0.35, 0.49, 0.63, 0.77, 0.91];
+            (true, columns[index.min(columns.len() - 1)], 0.95)
+        }
+    };
+    HudItemSettings {
+        metric,
+        visible,
+        x,
+        y,
+        hide_when_unavailable: metric.requires_telemetry(),
+        ..HudItemSettings::default()
     }
 }
 
@@ -268,6 +490,7 @@ pub(crate) struct ReceiverProfile {
     pub(crate) tx_power: u8,
     pub(crate) audio_volume: u8,
     pub(crate) payload_routes: Vec<PayloadRouteSettings>,
+    pub(crate) telemetry: TelemetrySettings,
     pub(crate) transfer_size: usize,
     pub(crate) vpn_enabled: bool,
     pub(crate) key_bytes: Vec<u8>,
@@ -291,6 +514,7 @@ impl ReceiverProfile {
             tx_power: settings.tx_power,
             audio_volume: settings.audio_volume,
             payload_routes: settings.payload_routes.clone(),
+            telemetry: settings.telemetry.clone(),
             transfer_size: settings.transfer_size,
             vpn_enabled: settings.vpn_enabled,
             key_bytes: settings.key_bytes.clone(),
@@ -313,6 +537,7 @@ impl ReceiverProfile {
         settings.tx_power = self.tx_power;
         settings.audio_volume = self.audio_volume;
         settings.payload_routes.clone_from(&self.payload_routes);
+        settings.telemetry.clone_from(&self.telemetry);
         settings.transfer_size = self.transfer_size;
         settings.vpn_enabled = self.vpn_enabled;
         settings.key_bytes.clone_from(&self.key_bytes);
@@ -338,6 +563,7 @@ impl Default for ReceiverProfile {
             tx_power: 20,
             audio_volume: 80,
             payload_routes: default_routes(),
+            telemetry: TelemetrySettings::default(),
             transfer_size: openipc_core::realtek::DEFAULT_RX_TRANSFER_SIZE,
             vpn_enabled: false,
             key_bytes: DEFAULT_KEY_BYTES.to_vec(),
@@ -353,6 +579,7 @@ impl Default for PayloadRouteSettings {
             name: "Route 4".to_owned(),
             radio_port: RadioPort::TunnelRx.as_u8(),
             action: RouteAction::Inspect,
+            telemetry_protocol: TelemetryProtocol::Auto,
             payload_type: openipc_core::rtp::RTP_PAYLOAD_TYPE_OPUS,
             sample_rate: 48_000,
             channels: 1,
@@ -368,7 +595,7 @@ fn default_routes() -> Vec<PayloadRouteSettings> {
             id: 2,
             name: "Telemetry".to_owned(),
             radio_port: RadioPort::TelemetryRx.as_u8(),
-            action: RouteAction::Inspect,
+            action: RouteAction::Telemetry,
             ..PayloadRouteSettings::default()
         },
         PayloadRouteSettings {
@@ -387,6 +614,21 @@ fn default_routes() -> Vec<PayloadRouteSettings> {
             ..PayloadRouteSettings::default()
         },
     ]
+}
+
+fn normalize_payload_routes(routes: &mut [PayloadRouteSettings]) {
+    for route in routes {
+        // Releases before telemetry-backed OSD indicators used this exact
+        // built-in route as a byte inspector. Leave custom Inspect routes alone.
+        if route.id == 2
+            && route.name == "Telemetry"
+            && route.radio_port == RadioPort::TelemetryRx.as_u8()
+            && route.action == RouteAction::Inspect
+        {
+            route.action = RouteAction::Telemetry;
+            route.telemetry_protocol = TelemetryProtocol::Auto;
+        }
+    }
 }
 
 /// User settings persisted by eframe on desktop and web.
@@ -410,7 +652,10 @@ pub(crate) struct Settings {
     pub(crate) gui_theme: GuiTheme,
     pub(crate) interface_scale_percent: u16,
     pub(crate) audio_volume: u8,
+    /// Native recording folder. Empty selects the platform default.
+    pub(crate) recording_directory: String,
     pub(crate) payload_routes: Vec<PayloadRouteSettings>,
+    pub(crate) telemetry: TelemetrySettings,
     pub(crate) transfer_size: usize,
     pub(crate) diagnostic_verbosity: DiagnosticVerbosity,
     pub(crate) vpn_enabled: bool,
@@ -452,6 +697,12 @@ impl Settings {
 
     pub(crate) fn normalize(&mut self) {
         self.hud.normalize();
+        self.telemetry.normalize();
+        normalize_payload_routes(&mut self.payload_routes);
+        for profile in &mut self.profiles {
+            profile.telemetry.normalize();
+            normalize_payload_routes(&mut profile.payload_routes);
+        }
         if let Some(primary) = self.device_id.as_ref() {
             self.diversity_device_ids.retain(|id| id != primary);
         }
@@ -494,7 +745,9 @@ impl Default for Settings {
             gui_theme: GuiTheme::Macchiato,
             interface_scale_percent: 100,
             audio_volume: 80,
+            recording_directory: String::new(),
             payload_routes: default_routes(),
+            telemetry: TelemetrySettings::default(),
             transfer_size: openipc_core::realtek::DEFAULT_RX_TRANSFER_SIZE,
             diagnostic_verbosity: DiagnosticVerbosity::Normal,
             vpn_enabled: false,
@@ -509,7 +762,13 @@ impl Default for Settings {
 
 #[cfg(test)]
 mod tests {
-    use super::{GuiTheme, HudMetric, ReceiverProfile, Settings};
+    use openipc_core::channel::RadioPort;
+
+    use crate::telemetry::MavlinkSigningPolicy;
+
+    use super::{
+        GuiTheme, HudMetric, PayloadRouteSettings, ReceiverProfile, RouteAction, Settings,
+    };
 
     #[test]
     fn profile_restores_receiver_fields_without_replacing_gui_preferences() {
@@ -519,24 +778,36 @@ mod tests {
             device_id: Some("0bda:8812@bus/1".to_owned()),
             diversity_device_ids: vec!["0bda:8812@bus/2".to_owned()],
             gui_theme: GuiTheme::Latte,
+            recording_directory: "first-recording-folder".to_owned(),
             ..Settings::default()
         };
+        settings.telemetry.mavlink_signing = MavlinkSigningPolicy::RequireSigned;
+        settings.telemetry.mavlink_signing_key = vec![7; 32];
         let profile = ReceiverProfile::capture(42, "Race quad".to_owned(), &settings);
         settings.channel = 36;
         settings.link_id = 1;
         settings.gui_theme = GuiTheme::Mocha;
+        settings.recording_directory = "current-recording-folder".to_owned();
         settings.diversity_device_ids.clear();
+        settings.telemetry.mavlink_signing = MavlinkSigningPolicy::Disabled;
+        settings.telemetry.mavlink_signing_key.clear();
 
         profile.apply(&mut settings);
 
         assert_eq!(settings.channel, 149);
         assert_eq!(settings.link_id, 0x12_34_56);
         assert_eq!(settings.gui_theme, GuiTheme::Mocha);
+        assert_eq!(settings.recording_directory, "current-recording-folder");
         assert_eq!(
             settings.diversity_device_ids,
             ["0bda:8812@bus/2".to_owned()]
         );
         assert_eq!(settings.active_profile_id, Some(42));
+        assert_eq!(
+            settings.telemetry.mavlink_signing,
+            MavlinkSigningPolicy::RequireSigned
+        );
+        assert_eq!(settings.telemetry.mavlink_signing_key, vec![7; 32]);
     }
 
     #[test]
@@ -546,6 +817,7 @@ mod tests {
         settings.normalize();
         assert!(settings.auto_recover);
         assert!(!settings.profiles.is_empty());
+        assert!(settings.recording_directory.is_empty());
         assert_eq!(settings.profiles[0].channel, 149);
         assert_eq!(settings.hud.items.len(), HudMetric::ALL.len());
     }
@@ -556,11 +828,77 @@ mod tests {
         settings.hud.items.truncate(1);
         settings.hud.items[0].x = -4.0;
         settings.hud.items[0].y = 8.0;
+        settings.hud.items[0].show_graph = true;
+        settings.hud.items[0].show_signal_bars = true;
+        settings.hud.items[0].scale_percent = 999;
+        settings.hud.items[0].graph_seconds = 1;
+        settings.hud.items[0].graph_width = 10;
+        settings.hud.items[0].graph_height = 999;
         settings.normalize();
 
         assert_eq!(settings.hud.items.len(), HudMetric::ALL.len());
         assert_eq!(settings.hud.items[0].x, 0.03);
         assert_eq!(settings.hud.items[0].y, 0.97);
+        assert!(!settings.hud.items[0].show_graph);
+        assert!(!settings.hud.items[0].show_signal_bars);
+        assert_eq!(settings.hud.items[0].scale_percent, 200);
+        assert_eq!(settings.hud.items[0].graph_seconds, 5);
+        assert_eq!(settings.hud.items[0].graph_width, 80);
+        assert_eq!(settings.hud.items[0].graph_height, 120);
+        assert!(
+            !settings
+                .hud
+                .items
+                .iter()
+                .find(|item| item.metric == HudMetric::LinkHealth)
+                .expect("link-health HUD item")
+                .visible
+        );
+        assert!(settings
+            .hud
+            .items
+            .iter()
+            .filter(|item| item.metric.supports_graph())
+            .all(|item| !item.show_graph));
+    }
+
+    #[test]
+    fn legacy_visual_items_migrate_to_indicator_options() {
+        let mut settings: Settings = serde_json::from_str(
+            r#"{
+                "hud": {
+                    "items": [
+                        {"metric":"SignalBars","visible":true,"x":0.2,"y":0.2},
+                        {"metric":"SignalTrend","visible":true,"x":0.3,"y":0.3},
+                        {"metric":"LossTrend","visible":true,"x":0.4,"y":0.4},
+                        {"metric":"LatencyTrend","visible":true,"x":0.5,"y":0.5}
+                    ]
+                }
+            }"#,
+        )
+        .expect("legacy settings deserialize");
+        settings.normalize();
+
+        assert_eq!(settings.hud.items.len(), HudMetric::ALL.len());
+        let signal = settings
+            .hud
+            .items
+            .iter()
+            .find(|item| item.metric == HudMetric::Signal)
+            .expect("RSSI indicator");
+        assert!(signal.show_signal_bars);
+        assert!(signal.show_graph);
+        for metric in [HudMetric::PacketLoss, HudMetric::Latency] {
+            assert!(
+                settings
+                    .hud
+                    .items
+                    .iter()
+                    .find(|item| item.metric == metric)
+                    .expect("migrated indicator")
+                    .show_graph
+            );
+        }
     }
 
     #[test]
@@ -580,6 +918,45 @@ mod tests {
         assert_eq!(
             settings.selected_device_ids(),
             ["primary".to_owned(), "secondary".to_owned()]
+        );
+    }
+
+    #[test]
+    fn old_default_telemetry_inspect_routes_migrate_to_the_osd_decoder() {
+        let old_default = PayloadRouteSettings {
+            id: 2,
+            name: "Telemetry".to_owned(),
+            radio_port: RadioPort::TelemetryRx.as_u8(),
+            action: RouteAction::Inspect,
+            ..PayloadRouteSettings::default()
+        };
+        let custom_inspector = PayloadRouteSettings {
+            id: 22,
+            name: "Telemetry".to_owned(),
+            radio_port: RadioPort::TelemetryRx.as_u8(),
+            action: RouteAction::Inspect,
+            ..PayloadRouteSettings::default()
+        };
+        let mut settings = Settings {
+            payload_routes: vec![old_default.clone(), custom_inspector.clone()],
+            profiles: vec![ReceiverProfile {
+                payload_routes: vec![old_default, custom_inspector],
+                ..ReceiverProfile::default()
+            }],
+            ..Settings::default()
+        };
+
+        settings.normalize();
+
+        assert_eq!(settings.payload_routes[0].action, RouteAction::Telemetry);
+        assert_eq!(settings.payload_routes[1].action, RouteAction::Inspect);
+        assert_eq!(
+            settings.profiles[0].payload_routes[0].action,
+            RouteAction::Telemetry
+        );
+        assert_eq!(
+            settings.profiles[0].payload_routes[1].action,
+            RouteAction::Inspect
         );
     }
 }

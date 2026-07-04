@@ -83,6 +83,27 @@ impl PreflightReport {
         );
 
         checks.push(
+            if app.settings.telemetry.mavlink_signing.requires_key()
+                && app.settings.telemetry.mavlink_signing_key.len() != 32
+            {
+                fail(
+                    "MAVLink signing",
+                    "The selected verification policy requires a 32-byte signing key".to_owned(),
+                )
+            } else if app.settings.telemetry.mavlink_signing.requires_key() {
+                pass(
+                    "MAVLink signing",
+                    format!(
+                        "{} with a 32-byte key",
+                        app.settings.telemetry.mavlink_signing.label()
+                    ),
+                )
+            } else {
+                pass("MAVLink signing", "Verification disabled".to_owned())
+            },
+        );
+
+        checks.push(
             if (1..=177).contains(&app.settings.channel)
                 && [5, 10, 20, 40, 80].contains(&app.settings.channel_width_mhz)
                 && app.settings.channel_offset <= 4

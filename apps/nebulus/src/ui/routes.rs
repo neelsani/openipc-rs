@@ -4,6 +4,7 @@ use crate::{
     app::NebulusApp,
     model::{ReceiverState, RouteStats},
     settings::{PayloadRouteSettings, RouteAction},
+    telemetry::TelemetryProtocol,
 };
 const PORTS: &[(u8, &str)] = &[
     (0x00, "Video / mixed RTP"),
@@ -19,16 +20,28 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
     let editable = matches!(app.state, ReceiverState::Idle | ReceiverState::Failed);
     let route_stats = app.route_stats.clone();
     let mut remove = None;
+    let telemetry_summary = match app.telemetry.protocol {
+        Some(protocol)
+            if app
+                .telemetry
+                .is_fresh(app.settings.telemetry.stale_timeout_ms) =>
+        {
+            format!("{} · {} msg", protocol.label(), app.telemetry.messages)
+        }
+        Some(protocol) => format!("{} · stale", protocol.label()),
+        None => "waiting".to_owned(),
+    };
 
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label(egui::RichText::new("Payload routes").strong());
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(format!(
-                "Audio {} · {:.0} ms queued",
-                if app.audio.enabled { "on" } else { "off" },
-                app.audio.queued_ms
-            ));
-        });
+        ui.separator();
+        ui.label(format!("Telemetry {telemetry_summary}"));
+        ui.separator();
+        ui.label(format!(
+            "Audio {} · {:.0} ms",
+            if app.audio.enabled { "on" } else { "off" },
+            app.audio.queued_ms
+        ));
     });
     ui.label(
         egui::RichText::new(
@@ -97,9 +110,12 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
                         egui::ComboBox::from_id_salt(("route-action", route.id))
                             .selected_text(route.action.label())
                             .show_ui(ui, |ui| {
-                                for action in
-                                    [RouteAction::Inspect, RouteAction::Log, RouteAction::Audio]
-                                {
+                                for action in [
+                                    RouteAction::Inspect,
+                                    RouteAction::Log,
+                                    RouteAction::Telemetry,
+                                    RouteAction::Audio,
+                                ] {
                                     ui.selectable_value(&mut route.action, action, action.label());
                                 }
                                 ui.add_enabled_ui(!cfg!(target_arch = "wasm32"), |ui| {
@@ -115,6 +131,7 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
 
                 match route.action {
                     RouteAction::Audio => audio_settings(ui, route),
+                    RouteAction::Telemetry => telemetry_settings(ui, route),
                     RouteAction::Udp => udp_settings(ui, route),
                     RouteAction::Inspect | RouteAction::Log => {}
                 }
@@ -138,6 +155,27 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
             ..PayloadRouteSettings::default()
         });
     }
+}
+
+fn telemetry_settings(ui: &mut egui::Ui, route: &mut PayloadRouteSettings) {
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label("Format");
+        egui::ComboBox::from_id_salt(("telemetry-format", route.id))
+            .selected_text(route.telemetry_protocol.label())
+            .show_ui(ui, |ui| {
+                for protocol in TelemetryProtocol::ALL {
+                    ui.selectable_value(&mut route.telemetry_protocol, protocol, protocol.label());
+                }
+            });
+    });
+    ui.label(
+        egui::RichText::new(
+            "Decoded values feed the video OSD. Auto mode locks after a supported checksum-valid MAVLink, MSP, or CRSF frame.",
+        )
+        .small()
+        .color(ui.visuals().weak_text_color()),
+    );
 }
 
 fn next_route_id(routes: &[PayloadRouteSettings]) -> u64 {

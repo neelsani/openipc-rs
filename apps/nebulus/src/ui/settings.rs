@@ -259,6 +259,8 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
             });
         });
 
+        section(ui, "Recording", |ui| recording_settings(app, ui));
+
         section(ui, "Advanced", |ui| {
             egui::Grid::new("advanced-settings")
                 .num_columns(2)
@@ -275,6 +277,62 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
                 });
         });
     });
+    let vpn_section = egui::CollapsingHeader::new("VPN / tunnel")
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.add_space(3.0);
+            super::vpn(app, ui);
+            ui.add_space(6.0);
+        });
+    if std::mem::take(&mut app.focus_vpn_settings) {
+        vpn_section
+            .header_response
+            .scroll_to_me(Some(egui::Align::TOP));
+    }
+}
+
+fn recording_settings(_app: &mut NebulusApp, ui: &mut egui::Ui) {
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+    {
+        ui.label("Recording folder");
+        ui.add(
+            egui::Label::new(egui::RichText::new(_app.recording_directory_display()).monospace())
+                .wrap(),
+        );
+        ui.horizontal(|ui| {
+            if ui.button("Choose folder").clicked() {
+                _app.choose_recording_directory();
+            }
+            if ui.button("Use default").clicked() {
+                _app.reset_recording_directory();
+            }
+        });
+        ui.label(
+            egui::RichText::new(
+                "Record creates a unique MP4 here immediately; it never opens a save dialog.",
+            )
+            .small()
+            .color(ui.visuals().weak_text_color()),
+        );
+    }
+
+    #[cfg(target_os = "android")]
+    ui.label(
+        egui::RichText::new(
+            "Recordings are written to Nebulus app storage without opening a document picker.",
+        )
+        .small()
+        .color(ui.visuals().weak_text_color()),
+    );
+
+    #[cfg(target_arch = "wasm32")]
+    ui.label(
+        egui::RichText::new(
+            "The browser buffers the MP4 and starts a download when recording stops. The browser controls the download folder.",
+        )
+        .small()
+        .color(ui.visuals().weak_text_color()),
+    );
 }
 
 fn profile_editor(app: &mut NebulusApp, ui: &mut egui::Ui) {
@@ -340,7 +398,7 @@ fn profile_editor(app: &mut NebulusApp, ui: &mut egui::Ui) {
     });
     ui.label(
         egui::RichText::new(
-            "Profiles include primary/diversity adapters, radio, link, key, routes, audio, VPN, and decoder settings.",
+            "Profiles include adapters, radio, link, keys, routes, telemetry, audio, VPN, and decoder settings.",
         )
         .small()
         .color(ui.visuals().weak_text_color()),

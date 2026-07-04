@@ -90,9 +90,10 @@ radio ports. Audio can either be a separate wfb-ng audio route or a filtered RTP
 tap on the main video route. Nebulus can inspect bytes, log a throttled summary,
 forward unchanged payloads over UDP on native targets, or decode Opus audio.
 Auto mode recognizes the documented OpenIPC Opus payload type 98 stream. It does
-not parse MAVLink messages.
+not infer arbitrary audio payload types. Telemetry-to-OSD routes decode MAVLink,
+MSP, or CRSF in Nebulus after `openipc-core` returns the recovered raw payload.
 
-The OpenIPC tunnel/data channel is handled by Nebulus's separate VPN tab rather
+The OpenIPC tunnel/data channel is handled by **Settings → VPN / tunnel** rather
 than the custom route builder. That keeps the fixed tunnel RX/TX pair
 (`0x20`/`0xa0`) out of user-defined payload routing while still using the same
 core route machinery internally.

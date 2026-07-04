@@ -7,6 +7,7 @@ use web_time::Instant;
 use crate::{
     model::LogLevel,
     settings::{CodecPreference, PayloadRouteSettings},
+    telemetry::{TelemetrySettings, TelemetryUpdate},
 };
 
 /// Hardware and initialization details captured when a receiver connects.
@@ -133,6 +134,7 @@ pub(crate) struct StartRequest {
     pub(crate) audio_volume: u8,
     pub(crate) vpn_enabled: bool,
     pub(crate) payload_routes: Vec<PayloadRouteSettings>,
+    pub(crate) telemetry: TelemetrySettings,
 }
 
 /// Configuration for an idle radio channel survey.
@@ -232,6 +234,7 @@ pub(crate) struct BatchMetrics {
     pub(crate) reorder: RtpReorderStatus,
     pub(crate) vpn: VpnMetrics,
     pub(crate) routes: Vec<RouteMetricDelta>,
+    pub(crate) telemetry: Option<TelemetryUpdate>,
     pub(crate) audio: crate::model::AudioStats,
     pub(crate) diversity: DiversityStats,
     pub(crate) adapters: Vec<AdapterRuntimeMetrics>,
@@ -274,6 +277,13 @@ impl BatchMetrics {
                 current.errors = current.errors.saturating_add(update.errors);
             } else {
                 self.routes.push(update);
+            }
+        }
+        if let Some(update) = newer.telemetry {
+            if let Some(current) = self.telemetry.as_mut() {
+                current.merge(update);
+            } else {
+                self.telemetry = Some(update);
             }
         }
         self.audio = newer.audio;
@@ -355,6 +365,7 @@ mod metrics_throttle_tests {
     use std::time::Duration;
 
     use super::{BatchMetrics, MetricsThrottle};
+    use crate::telemetry::{TelemetryProtocol, TelemetryUpdate};
 
     #[test]
     fn flush_preserves_all_coalesced_counts() {
@@ -379,6 +390,33 @@ mod metrics_throttle_tests {
         assert_eq!(merged.transfers, 4);
         assert_eq!(merged.packets, 7);
         assert!(throttle.flush().is_none());
+    }
+
+    #[test]
+    fn coalescing_keeps_partial_telemetry_updates() {
+        let mut metrics = BatchMetrics {
+            telemetry: Some(TelemetryUpdate {
+                protocol: Some(TelemetryProtocol::Mavlink),
+                messages: 1,
+                armed: Some(true),
+                ..TelemetryUpdate::default()
+            }),
+            ..BatchMetrics::default()
+        };
+        metrics.merge(BatchMetrics {
+            telemetry: Some(TelemetryUpdate {
+                protocol: Some(TelemetryProtocol::Mavlink),
+                messages: 2,
+                battery_voltage_v: Some(16.8),
+                ..TelemetryUpdate::default()
+            }),
+            ..BatchMetrics::default()
+        });
+
+        let telemetry = metrics.telemetry.expect("coalesced telemetry");
+        assert_eq!(telemetry.messages, 3);
+        assert_eq!(telemetry.armed, Some(true));
+        assert_eq!(telemetry.battery_voltage_v, Some(16.8));
     }
 }
 

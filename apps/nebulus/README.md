@@ -47,16 +47,21 @@ when the receiver disconnects.
 
 The GUI tab contains presentation-only settings. It offers Catppuccin Latte,
 Frappé, Macchiato, and Mocha themes, a persistent 75–150% interface scale,
-an editable video HUD, control-panel visibility, and a one-click GUI reset.
-HUD values can be hidden or dragged to normalized video positions, so one
-layout remains usable at different window sizes. Theme, scale, and HUD changes
-apply immediately on desktop, Android, and the browser.
+an editable video OSD, control-panel visibility, and a one-click GUI reset.
+Each indicator can be hidden or dragged to normalized video coordinates, so
+one layout remains usable at different window sizes. Its icon, label, value,
+status coloring, background, size, and opacity can be configured independently.
+Supported indicators can optionally include a mini graph with a configurable
+history window and dimensions; RSSI can optionally include signal bars. Graphs
+and bars are off by default. Changes apply immediately on desktop, Android,
+and the browser.
 
 Settings includes named receiver profiles. A profile snapshots the primary and
-diversity adapters, radio, Link ID, key, routes, audio, VPN, and decoder
-choices; GUI appearance stays global. Use **Save current** after changing a
-profile. **Run preflight** checks the selected adapters, key, radio values,
-routes, decoder state, VPN, and adaptive-link configuration before RX starts.
+diversity adapters, radio, Link ID, keys, routes, telemetry policy, audio, VPN,
+and decoder choices; GUI appearance stays global. Use **Save current** after
+changing a profile. **Run preflight** checks the selected adapters, keys, radio
+values, routes, decoder state, VPN, and adaptive-link configuration before RX
+starts.
 
 **Scan channels** opens an idle-only survey. The Rust driver initializes the
 adapter once, retunes it across the selected channels, and reports traffic,
@@ -124,7 +129,7 @@ Rust `log` output is mirrored to standard Android application output and the
 in-app Logs tab.
 
 Android settings use an app-private eframe RON file under the activity's
-internal data directory. Profiles, the selected key, routes, HUD layout, and
+internal data directory. Profiles, the selected key, routes, OSD layout, and
 GUI preferences therefore survive process death and device restart without
 requiring storage permission. Support bundles use Android's document picker,
 so the user chooses where the ZIP is written.
@@ -139,10 +144,11 @@ control before adding `--release` for distribution builds.
 USB bulk IN from each selected adapter
   -> per-adapter openipc-rtl88xx RX descriptor parsing
   -> first-valid-copy diversity selection when multiple radios are active
-  -> openipc-core 802.11 filtering, WFB crypto, FEC, RTP depacketizing
-  -> openipc-video platform H.264/H.265 decoder
-  -> newest decoded frame
-  -> platform GPU presenter
+  -> openipc-core 802.11 filtering, WFB crypto, FEC, route fanout
+     -> video RTP depacketizing -> openipc-video H.264/H.265 decoder
+     -> telemetry route -> MAVLink/MSP/CRSF decoder -> video OSD
+     -> audio route -> Opus decoder -> audio device
+  -> newest decoded video frame -> platform GPU presenter
 ```
 
 Desktop and Android keep one bulk-IN capture worker per adapter and one shared
@@ -159,6 +165,30 @@ the packet twice. Opus decoding uses the pure-Rust `ropus` implementation.
 CPAL feeds native and Android audio devices; browser builds schedule PCM with
 Web Audio. Output volume can be adjusted while the receiver is running and is
 applied to every active audio route without restarting RX.
+
+The default telemetry route reads raw payloads from OpenIPC radio port `0x10`.
+Its **Telemetry to OSD** action can auto-detect checksum-valid MAVLink, MSP, or
+CRSF frames, or be pinned to one format. The radio port remains editable for
+custom VTX layouts. Decoding belongs to Nebulus rather than `openipc-core`:
+the shared core still returns protocol-neutral payload bytes, so applications
+using the libraries can choose different telemetry parsers. Nebulus normalizes
+common flight values into one OSD state and hides stale telemetry indicators
+after three seconds by default.
+
+MAVLink support uses the `mavlink` crate's generated Common dialect. The crate
+provides current message layouts, enums, CRC extras, and MAVLink 2 payload
+handling; Nebulus only keeps the bounded incremental framer needed for payloads
+that may be split across WFB packets and maps selected messages into its
+protocol-neutral OSD state.
+
+The **Telemetry** tab shows the detected protocol, source identity, frame age,
+and accepted/rejected/filtered counters. It also controls the stale-data
+timeout, MAVLink system/component filters and signing policy, MSP version and
+direction filters, and CRSF device-address filtering. MAVLink signing accepts a
+32-byte binary key or a file containing 64 hexadecimal digits. **Verify signed**
+authenticates signed packets while allowing unsigned traffic; **Require signed**
+also rejects MAVLink 1, unsigned MAVLink 2, invalid signatures, stale signing
+timestamps, and replays. The MAVLink key is separate from the WFB `gs.key`.
 
 Pending frame events use a one-frame replacement slot. USB buffers are
 re-armed before decode or route work, encoded frames move into the decoder
@@ -211,8 +241,8 @@ codec. Native audio requests a 256-frame output buffer and keeps no more than
 - Built-in default `gs.key`, native file picker, and key-file drop
 - Optional RTP reorder buffer
 - Adaptive-link quality tracking, uplink feedback, and TX power override
-- H.264/H.265 playback, video-only fullscreen, and link OSD
-- Drag-and-drop ground-station HUD editor with per-value visibility and scale
+- H.264/H.265 playback, video-only fullscreen, and a configurable video OSD
+- Drag-and-drop OSD editor for link, battery, GPS, flight-mode, motion, attitude, and status indicators
 - Named receiver profiles shared by desktop, Android, and browser builds
 - Preflight validation and native automatic reconnect with bounded backoff
 - Idle channel survey with per-channel WFB traffic and RSSI
@@ -220,7 +250,7 @@ codec. Native audio requests a 256-frame output buffer and keeps no more than
 - Live bitrate, receive/decode/render FPS, RSSI, loss, and latency plots
 - Pipeline-health, RTP, per-stage latency, and environment diagnostics
 - Level-controlled library logging with target/text filtering and trace capture
-- Configurable inspect, rate-limited log, audio, and UDP payload routes
+- Configurable inspect, rate-limited log, telemetry-to-OSD, audio, and UDP payload routes
 - Opus playback with volume, queue depth, and decoder/error metrics
 - Native OpenIPC VPN/TUN bridging on macOS, Linux, Windows, and Android
 - Catppuccin Macchiato theme and persisted receiver settings
@@ -240,17 +270,21 @@ audio route into MP4 without re-encoding. It waits for an H.264/H.265 keyframe,
 so the result begins at a valid random-access point. Video and audio timing come
 from their RTP clocks. Native muxing runs on a bounded recorder worker; browser
 recordings download when stopped. Both targets cap retained encoded media at
-512 MiB.
+512 MiB. On desktop, **Record** never opens a file dialog: it writes a unique
+timestamped MP4 to the folder selected under Settings → Recording. The default
+is `Nebulus` inside the user's Videos directory, with Documents or the home
+directory as fallbacks. Android uses app-owned storage without prompting.
 
-The VPN tab bridges recovered IP packets from radio port `0x20` into a native
-L3 interface at `10.5.0.3/24`. Packets read from that interface are encrypted,
+The **VPN / tunnel** section under Settings bridges recovered IP packets from
+radio port `0x20` into a native L3 interface at `10.5.0.3/24`. Packets read from
+that interface are encrypted,
 FEC-wrapped, injected through the userland Realtek driver, and transmitted on
 radio port `0xa0`. Linux may require elevated network-device permissions;
 Windows uses Wintun through `rust-tun`; Android uses its system `VpnService`.
 
 The Windows release installer includes the matching `wintun.dll`. A
 `cargo install nebulus` installation detects when the DLL is absent and shows
-**Install Wintun** in the VPN tab. Nebulus downloads the official signed 0.14.1
+**Install Wintun** in Settings. Nebulus downloads the official signed 0.14.1
 archive, verifies its published SHA-256, and installs the architecture-matched
 DLL under `%LOCALAPPDATA%\Nebulus\wintun\0.14.1`. The installer runs outside
 the receiver thread. Adaptive-link feedback injects WFB packets directly

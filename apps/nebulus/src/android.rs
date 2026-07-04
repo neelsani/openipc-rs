@@ -250,6 +250,14 @@ pub(crate) fn save_file(name: &str, bytes: &[u8]) -> Result<(), String> {
     .map_err(|error: jni::errors::Error| format!("Android document export failed: {error}"))
 }
 
+/// App-owned recording directory used without opening Android's document picker.
+pub(crate) fn recordings_directory() -> Result<std::path::PathBuf, String> {
+    app()?
+        .internal_data_path()
+        .map(|root| root.join("nebulus").join("recordings"))
+        .ok_or_else(|| "Android internal storage is unavailable".to_owned())
+}
+
 pub(crate) fn take_key_file_result() -> Option<Result<SelectedKeyFile, String>> {
     KEY_FILE_RESULT
         .get_or_init(|| Mutex::new(None))

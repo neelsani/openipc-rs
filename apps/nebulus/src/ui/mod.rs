@@ -2,9 +2,11 @@ mod diagnostics;
 mod gui;
 mod logs;
 mod metrics;
+mod osd;
 mod routes;
 mod scanner;
 mod settings;
+mod telemetry;
 pub(crate) mod theme;
 mod video;
 
@@ -18,7 +20,7 @@ pub(crate) enum PanelTab {
     Settings,
     Metrics,
     Routes,
-    Vpn,
+    Telemetry,
     Gui,
     Diagnostics,
     Logs,
@@ -64,7 +66,7 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
         .show(ui, |ui| video::show(app, ui));
 
     about_dialog(app, ui.ctx());
-    gui::hud_editor(app, ui.ctx());
+    gui::osd_editor(app, ui.ctx());
     preflight_dialog(app, ui.ctx());
     scanner::dialog(app, ui.ctx());
 }
@@ -488,7 +490,7 @@ fn side_panel(app: &mut NebulusApp, ui: &mut egui::Ui) {
             (PanelTab::Settings, "Settings"),
             (PanelTab::Metrics, "Metrics"),
             (PanelTab::Routes, "Routes"),
-            (PanelTab::Vpn, "VPN"),
+            (PanelTab::Telemetry, "Telemetry"),
             (PanelTab::Gui, "GUI"),
             (PanelTab::Diagnostics, "Diagnostics"),
             (PanelTab::Logs, "Logs"),
@@ -511,7 +513,7 @@ fn side_panel(app: &mut NebulusApp, ui: &mut egui::Ui) {
                 PanelTab::Settings => settings::show(app, ui),
                 PanelTab::Metrics => metrics::show(app, ui),
                 PanelTab::Routes => routes::show(app, ui),
-                PanelTab::Vpn => vpn(app, ui),
+                PanelTab::Telemetry => telemetry::show(app, ui),
                 PanelTab::Gui => gui::show(app, ui),
                 PanelTab::Diagnostics => diagnostics::show(app, ui),
                 PanelTab::Logs => logs::show(app, ui),
@@ -521,7 +523,6 @@ fn side_panel(app: &mut NebulusApp, ui: &mut egui::Ui) {
 }
 
 fn vpn(app: &mut NebulusApp, ui: &mut egui::Ui) {
-    ui.heading("OpenIPC VPN");
     ui.label(
         egui::RichText::new("Bridges radio tunnel RX 0x20 and TX 0xa0 to a native L3 interface.")
             .small()

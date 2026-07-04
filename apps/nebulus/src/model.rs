@@ -310,6 +310,10 @@ impl MetricSeries {
     pub(crate) fn latest_time(&self) -> Option<f64> {
         self.values.back().map(|point| point[0])
     }
+
+    pub(crate) fn latest_value(&self) -> Option<f64> {
+        self.values.back().map(|point| point[1])
+    }
 }
 
 impl Default for MetricSeries {
@@ -365,10 +369,12 @@ impl LiveMetrics {
 #[derive(Debug, Default)]
 pub(crate) struct MetricHistory {
     pub(crate) link_score: MetricSeries,
+    pub(crate) rssi: MetricSeries,
     pub(crate) fec_recovery: MetricSeries,
     pub(crate) loss: MetricSeries,
     pub(crate) bitrate: MetricSeries,
     pub(crate) receive_fps: MetricSeries,
+    pub(crate) decode_fps: MetricSeries,
     pub(crate) local_processing_ms: MetricSeries,
 }
 
@@ -379,10 +385,12 @@ impl MetricHistory {
 
     pub(crate) fn clear(&mut self) {
         self.link_score.clear();
+        self.rssi.clear();
         self.fec_recovery.clear();
         self.loss.clear();
         self.bitrate.clear();
         self.receive_fps.clear();
+        self.decode_fps.clear();
         self.local_processing_ms.clear();
     }
 }
@@ -403,6 +411,7 @@ mod tests {
             vec![[14.0, 2.0], [16.0, 3.0]]
         );
         assert_eq!(series.latest_time(), Some(16.0));
+        assert_eq!(series.latest_value(), Some(3.0));
     }
 
     #[test]

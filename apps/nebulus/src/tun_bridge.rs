@@ -199,7 +199,7 @@ pub(crate) struct TunBridge {
 impl TunBridge {
     pub(crate) fn open_default() -> Result<Self, String> {
         let wintun_path = crate::wintun::locate().ok_or_else(|| {
-            "Wintun is not installed; install it from the Nebulus VPN tab".to_owned()
+            "Wintun is not installed; install it from Nebulus Settings".to_owned()
         })?;
         let mut config = tun::Configuration::default();
         config

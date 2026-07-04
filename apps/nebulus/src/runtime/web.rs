@@ -1172,7 +1172,7 @@ mod worker {
 
             route_processor.set_audio_volume(audio_volume.get());
             let route_start = Instant::now();
-            let (route_updates, route_logs, recorded_audio) =
+            let (route_updates, route_logs, recorded_audio, telemetry) =
                 route_processor.process(&batch.raw_payloads, recorder.is_some());
             append_recorded_audio(&mut recorder, recorded_audio, events, context);
             let route_latency_ms = route_start.elapsed().as_secs_f64() * 1_000.0;
@@ -1216,6 +1216,7 @@ mod worker {
                 rtp: batch.rtp_status,
                 reorder: batch.rtp_reorder_status,
                 routes: route_updates,
+                telemetry,
                 audio: route_processor.audio_stats(),
                 ..BatchMetrics::default()
             }) {
@@ -1422,7 +1423,7 @@ mod worker {
                     context,
                 );
                 route_processor.set_audio_volume(audio_volume.get());
-                let (route_updates, route_logs, recorded_audio) =
+                let (route_updates, route_logs, recorded_audio, telemetry) =
                     route_processor.process(&batch.raw_payloads, recorder.is_some());
                 append_recorded_audio(&mut recorder, recorded_audio, events, context);
                 metrics.merge(BatchMetrics {
@@ -1430,6 +1431,7 @@ mod worker {
                     counters: batch.counters,
                     rtp: batch.rtp_status,
                     reorder: batch.rtp_reorder_status,
+                    telemetry,
                     ..BatchMetrics::default()
                 });
                 for entry in route_logs {

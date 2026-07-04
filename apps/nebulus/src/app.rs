@@ -8,6 +8,13 @@ use web_time::Instant;
 #[cfg(target_arch = "wasm32")]
 type PendingKeyFile = Rc<RefCell<Option<Result<(String, Vec<u8>), String>>>>;
 
+#[cfg(any(target_arch = "wasm32", target_os = "android"))]
+#[derive(Debug, Clone, Copy)]
+enum KeyFilePurpose {
+    Wfb,
+    MavlinkSigning,
+}
+
 use crate::{
     model::{
         AudioStats, DiagnosticsState, EnvironmentDetails, LiveMetrics, LogEntry, LogLevel,
@@ -17,8 +24,106 @@ use crate::{
     runtime::{
         AdapterRuntimeMetrics, ReceiverInfo, Runtime, RuntimeEvent, StartRequest, UsbDeviceInfo,
     },
-    settings::Settings,
+    settings::{HudMetric, HudSettings, Settings},
+    telemetry::TelemetryState,
 };
+
+const MAX_OSD_UNDO_STEPS: usize = 64;
+
+#[derive(Default)]
+pub(crate) struct OsdEditHistory {
+    active: bool,
+    undo: Vec<HudSettings>,
+    redo: Vec<HudSettings>,
+    pending_gesture: Option<HudSettings>,
+}
+
+impl OsdEditHistory {
+    pub(crate) fn begin_session(&mut self) {
+        if !self.active {
+            self.active = true;
+            self.undo.clear();
+            self.redo.clear();
+            self.pending_gesture = None;
+        }
+    }
+
+    pub(crate) fn end_session(&mut self) {
+        self.active = false;
+        self.pending_gesture = None;
+    }
+
+    pub(crate) fn can_undo(&self) -> bool {
+        self.pending_gesture.is_some() || !self.undo.is_empty()
+    }
+
+    pub(crate) fn observe(
+        &mut self,
+        before: HudSettings,
+        current: &HudSettings,
+        pointer_down: bool,
+    ) {
+        if before != *current {
+            if pointer_down {
+                if self.pending_gesture.is_none() {
+                    self.pending_gesture = Some(before);
+                    self.redo.clear();
+                }
+            } else if self.pending_gesture.is_some() {
+                self.finish_gesture(current);
+            } else {
+                self.push_undo(before);
+            }
+        } else if !pointer_down {
+            self.finish_gesture(current);
+        }
+    }
+
+    pub(crate) fn record(&mut self, before: HudSettings, current: &HudSettings) {
+        self.finish_gesture(&before);
+        if before != *current {
+            self.push_undo(before);
+        }
+    }
+
+    pub(crate) fn undo(&mut self, current: &mut HudSettings) -> bool {
+        self.finish_gesture(current);
+        let Some(previous) = self.undo.pop() else {
+            return false;
+        };
+        self.redo.push(std::mem::replace(current, previous));
+        true
+    }
+
+    pub(crate) fn redo(&mut self, current: &mut HudSettings) -> bool {
+        self.finish_gesture(current);
+        let Some(next) = self.redo.pop() else {
+            return false;
+        };
+        self.push_bounded_undo(std::mem::replace(current, next));
+        true
+    }
+
+    fn finish_gesture(&mut self, current: &HudSettings) {
+        if let Some(before) = self.pending_gesture.take() {
+            if before != *current {
+                self.push_undo(before);
+            }
+        }
+    }
+
+    fn push_undo(&mut self, settings: HudSettings) {
+        self.push_bounded_undo(settings);
+        self.redo.clear();
+    }
+
+    fn push_bounded_undo(&mut self, settings: HudSettings) {
+        if self.undo.len() == MAX_OSD_UNDO_STEPS {
+            self.undo.remove(0);
+        }
+        self.undo.push(settings);
+    }
+}
 
 /// Main Nebulus application state.
 pub struct NebulusApp {
@@ -34,6 +139,7 @@ pub struct NebulusApp {
     pub(crate) log_filter: LogLevel,
     pub(crate) log_search: String,
     pub(crate) route_stats: BTreeMap<u64, RouteStats>,
+    pub(crate) telemetry: TelemetryState,
     pub(crate) audio: AudioStats,
     pub(crate) diagnostics: DiagnosticsState,
     pub(crate) environment: EnvironmentDetails,
@@ -52,15 +158,22 @@ pub struct NebulusApp {
     pub(crate) frame_size: Option<[usize; 2]>,
     pub(crate) key_name: String,
     pub(crate) key_error: Option<String>,
+    pub(crate) mavlink_key_name: String,
+    pub(crate) mavlink_key_error: Option<String>,
+    #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+    pending_key_purpose: Option<KeyFilePurpose>,
     #[cfg(target_arch = "wasm32")]
     key_file_result: PendingKeyFile,
     pub(crate) video_fullscreen: bool,
     pub(crate) show_about: bool,
-    pub(crate) show_hud_editor: bool,
+    pub(crate) show_osd_editor: bool,
+    pub(crate) selected_hud_metric: HudMetric,
+    pub(crate) osd_edit_history: OsdEditHistory,
     pub(crate) show_preflight: bool,
     pub(crate) preflight: crate::preflight::PreflightReport,
     pub(crate) recovery: RecoveryStatus,
     pub(crate) show_channel_scanner: bool,
+    pub(crate) focus_vpn_settings: bool,
     pub(crate) scan_channels: Vec<u8>,
     pub(crate) scan_dwell_ms: u64,
     pub(crate) scan_progress: Option<(usize, usize)>,
@@ -90,6 +203,11 @@ impl NebulusApp {
         } else {
             "Saved gs.key".to_owned()
         };
+        let mavlink_key_name = if settings.telemetry.mavlink_signing_key.is_empty() {
+            "No signing key".to_owned()
+        } else {
+            "Saved MAVLink key".to_owned()
+        };
         let (video_renderer, video_renderer_error) =
             match crate::video::PlatformVideoRenderer::new(context) {
                 Ok(renderer) => (Some(renderer), None),
@@ -108,6 +226,7 @@ impl NebulusApp {
             log_filter: LogLevel::Trace,
             log_search: String::new(),
             route_stats: BTreeMap::new(),
+            telemetry: TelemetryState::default(),
             audio: AudioStats::default(),
             diagnostics: DiagnosticsState::default(),
             environment: EnvironmentDetails::detect(),
@@ -126,15 +245,22 @@ impl NebulusApp {
             frame_size: None,
             key_name,
             key_error: None,
+            mavlink_key_name,
+            mavlink_key_error: None,
+            #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+            pending_key_purpose: None,
             #[cfg(target_arch = "wasm32")]
             key_file_result: Rc::new(RefCell::new(None)),
             video_fullscreen: false,
             show_about: false,
-            show_hud_editor: false,
+            show_osd_editor: false,
+            selected_hud_metric: HudMetric::Signal,
+            osd_edit_history: OsdEditHistory::default(),
             show_preflight: false,
             preflight: crate::preflight::PreflightReport::default(),
             recovery: RecoveryStatus::default(),
             show_channel_scanner: false,
+            focus_vpn_settings: false,
             scan_channels: vec![
                 36, 40, 44, 48, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 149,
                 153, 157, 161, 165, 169, 173, 177,
@@ -229,6 +355,7 @@ impl NebulusApp {
             audio_volume: self.settings.audio_volume,
             vpn_enabled: self.settings.vpn_enabled && self.vpn_available(),
             payload_routes: self.settings.payload_routes.clone(),
+            telemetry: self.settings.telemetry.clone(),
         }
     }
 
@@ -243,6 +370,7 @@ impl NebulusApp {
         self.rate_window_rendered = 0;
         self.last_rate_fec = openipc_core::FecCounters::default();
         self.route_stats.clear();
+        self.telemetry.reset();
         self.audio = AudioStats::default();
         self.diagnostics = DiagnosticsState::default();
         self.adapter_metrics.clear();
@@ -270,25 +398,9 @@ impl NebulusApp {
         self.start_recording();
     }
 
-    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+    #[cfg(not(target_arch = "wasm32"))]
     fn start_recording(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .set_title("Save OpenIPC recording")
-            .set_file_name("openipc-recording.mp4")
-            .add_filter("MP4 video", &["mp4"])
-            .save_file()
-        else {
-            return;
-        };
-        self.runtime.start_recording(path);
-    }
-
-    #[cfg(target_os = "android")]
-    fn start_recording(&mut self) {
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_secs());
-        let path = std::env::temp_dir().join(format!("openipc-{timestamp}.mp4"));
+        let path = crate::recording_destination::next_path(&self.settings.recording_directory);
         self.runtime.start_recording(path);
     }
 
@@ -379,6 +491,12 @@ impl NebulusApp {
         profile.apply(&mut self.settings);
         self.key_name = format!("{} key", profile.name);
         self.key_error = None;
+        self.mavlink_key_name = if profile.telemetry.mavlink_signing_key.is_empty() {
+            "No signing key".to_owned()
+        } else {
+            format!("{} MAVLink key", profile.name)
+        };
+        self.mavlink_key_error = None;
         self.log(
             LogLevel::Info,
             "profile",
@@ -885,13 +1003,16 @@ impl NebulusApp {
 
     #[cfg(target_os = "android")]
     pub(crate) fn open_key_file(&mut self, context: &egui::Context) {
+        self.pending_key_purpose = Some(KeyFilePurpose::Wfb);
         if let Err(error) = crate::android::open_key_file(context.clone()) {
+            self.pending_key_purpose = None;
             self.key_error = Some(error);
         }
     }
 
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn open_key_file(&mut self, context: &egui::Context) {
+        self.pending_key_purpose = Some(KeyFilePurpose::Wfb);
         let result = Rc::clone(&self.key_file_result);
         let context = context.clone();
         wasm_bindgen_futures::spawn_local(async move {
@@ -908,11 +1029,98 @@ impl NebulusApp {
         });
     }
 
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+    pub(crate) fn open_mavlink_key_file(&mut self, _context: &egui::Context) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Open MAVLink signing key")
+            .add_filter("MAVLink signing key", &["key", "bin", "txt"])
+            .pick_file()
+        else {
+            return;
+        };
+        let name = path
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("mavlink.key")
+            .to_owned();
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                if let Err(error) = self.set_mavlink_key_file(name, bytes) {
+                    self.mavlink_key_error = Some(error);
+                }
+            }
+            Err(error) => {
+                self.mavlink_key_error =
+                    Some(format!("Could not read {}: {error}", path.display()));
+            }
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn open_mavlink_key_file(&mut self, context: &egui::Context) {
+        self.pending_key_purpose = Some(KeyFilePurpose::MavlinkSigning);
+        if let Err(error) = crate::android::open_key_file(context.clone()) {
+            self.pending_key_purpose = None;
+            self.mavlink_key_error = Some(error);
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn open_mavlink_key_file(&mut self, context: &egui::Context) {
+        self.pending_key_purpose = Some(KeyFilePurpose::MavlinkSigning);
+        let result = Rc::clone(&self.key_file_result);
+        let context = context.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let Some(file) = rfd::AsyncFileDialog::new()
+                .set_title("Open MAVLink signing key")
+                .add_filter("MAVLink signing key", &["key", "bin", "txt"])
+                .pick_file()
+                .await
+            else {
+                return;
+            };
+            *result.borrow_mut() = Some(Ok((file.file_name(), file.read().await)));
+            context.request_repaint();
+        });
+    }
+
+    pub(crate) fn clear_mavlink_key(&mut self) {
+        self.settings.telemetry.mavlink_signing_key.clear();
+        self.mavlink_key_name = "No signing key".to_owned();
+        self.mavlink_key_error = None;
+    }
+
     pub(crate) fn reset_key(&mut self) {
         let _ = self.set_key_file(
             "Default gs.key".to_owned(),
             crate::settings::DEFAULT_KEY_BYTES.to_vec(),
         );
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+    pub(crate) fn choose_recording_directory(&mut self) {
+        let current =
+            crate::recording_destination::effective_directory(&self.settings.recording_directory);
+        let mut dialog = rfd::FileDialog::new().set_title("Choose Nebulus recording folder");
+        if current.is_dir() {
+            dialog = dialog.set_directory(current);
+        }
+        if let Some(path) = dialog.pick_folder() {
+            self.settings.recording_directory =
+                crate::recording_destination::display_path(path.as_path());
+        }
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+    pub(crate) fn recording_directory_display(&self) -> String {
+        crate::recording_destination::display_path(
+            &crate::recording_destination::effective_directory(&self.settings.recording_directory),
+        )
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+    pub(crate) fn reset_recording_directory(&mut self) {
+        self.settings.recording_directory.clear();
     }
 
     pub(crate) fn set_video_fullscreen(&mut self, context: &egui::Context, enabled: bool) {
@@ -955,27 +1163,35 @@ impl NebulusApp {
     fn process_key_file_result(&mut self) {
         #[cfg(target_os = "android")]
         if let Some(result) = crate::android::take_key_file_result() {
-            match result {
-                Ok(file) => {
-                    if let Err(error) = self.set_key_file(file.name, file.bytes) {
-                        self.key_error = Some(error);
-                    }
-                }
-                Err(error) => self.key_error = Some(error),
-            }
+            self.apply_selected_key_result(result.map(|file| (file.name, file.bytes)));
         }
         #[cfg(target_arch = "wasm32")]
-        let result = self.key_file_result.borrow_mut().take();
+        let result = { self.key_file_result.borrow_mut().take() };
         #[cfg(target_arch = "wasm32")]
         if let Some(result) = result {
-            match result {
-                Ok((name, bytes)) => {
-                    if let Err(error) = self.set_key_file(name, bytes) {
-                        self.key_error = Some(error);
-                    }
+            self.apply_selected_key_result(result);
+        }
+    }
+
+    #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+    fn apply_selected_key_result(&mut self, result: Result<(String, Vec<u8>), String>) {
+        let purpose = self
+            .pending_key_purpose
+            .take()
+            .unwrap_or(KeyFilePurpose::Wfb);
+        match (purpose, result) {
+            (KeyFilePurpose::Wfb, Ok((name, bytes))) => {
+                if let Err(error) = self.set_key_file(name, bytes) {
+                    self.key_error = Some(error);
                 }
-                Err(error) => self.key_error = Some(error),
             }
+            (KeyFilePurpose::MavlinkSigning, Ok((name, bytes))) => {
+                if let Err(error) = self.set_mavlink_key_file(name, bytes) {
+                    self.mavlink_key_error = Some(error);
+                }
+            }
+            (KeyFilePurpose::Wfb, Err(error)) => self.key_error = Some(error),
+            (KeyFilePurpose::MavlinkSigning, Err(error)) => self.mavlink_key_error = Some(error),
         }
     }
 
@@ -992,7 +1208,23 @@ impl NebulusApp {
         Ok(())
     }
 
-    fn apply_batch(&mut self, batch: crate::runtime::BatchMetrics) {
+    fn set_mavlink_key_file(&mut self, name: String, bytes: Vec<u8>) -> Result<(), String> {
+        let bytes = validate_mavlink_signing_key(bytes)?;
+        self.settings.telemetry.mavlink_signing_key = bytes;
+        self.mavlink_key_name = name;
+        self.mavlink_key_error = None;
+        self.log(
+            LogLevel::Info,
+            "telemetry",
+            format!("MAVLink signing key loaded from {}", self.mavlink_key_name),
+        );
+        Ok(())
+    }
+
+    fn apply_batch(&mut self, mut batch: crate::runtime::BatchMetrics) {
+        if let Some(update) = batch.telemetry.take() {
+            self.telemetry.apply(update);
+        }
         self.metrics.usb_bytes += batch.transfer_bytes as u64;
         self.metrics.usb_transfers += batch.transfers;
         self.metrics.wifi_packets += batch.packets as u64;
@@ -1135,12 +1367,17 @@ impl NebulusApp {
             time,
             self.metrics.link_score[0].max(self.metrics.link_score[1]) as f64,
         );
+        let best_rssi = self.metrics.rssi[0].max(self.metrics.rssi[1]);
+        if best_rssi < 0 {
+            self.history.rssi.push(time, f64::from(best_rssi));
+        }
         self.history
             .bitrate
             .push(time, self.metrics.bitrate_bps / 1_000_000.0);
         self.history
             .receive_fps
             .push(time, self.metrics.receive_fps);
+        self.history.decode_fps.push(time, self.metrics.decode_fps);
         let fec_total = self
             .metrics
             .fec_total_packets
@@ -1260,6 +1497,24 @@ fn validate_key(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+fn validate_mavlink_signing_key(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+    if bytes.len() == 32 {
+        return Ok(bytes);
+    }
+    let text = std::str::from_utf8(&bytes)
+        .map(str::trim)
+        .map_err(|_| "MAVLink signing key must be 32 binary bytes or 64 hexadecimal digits")?;
+    if text.len() != 64 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(
+            "MAVLink signing key must be 32 binary bytes or 64 hexadecimal digits".to_owned(),
+        );
+    }
+    (0..32)
+        .map(|index| u8::from_str_radix(&text[index * 2..index * 2 + 2], 16))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("Invalid hexadecimal MAVLink signing key: {error}"))
+}
+
 fn fec_window_percentages(total: u64, recovered: u64, lost: u64) -> (f64, f64) {
     let expected_fragments = total.saturating_add(lost);
     let unrecoverable_loss = if expected_fragments == 0 {
@@ -1310,7 +1565,10 @@ impl eframe::App for NebulusApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{fec_window_percentages, validate_key};
+    use super::{
+        fec_window_percentages, validate_key, validate_mavlink_signing_key, OsdEditHistory,
+    };
+    use crate::settings::HudSettings;
 
     #[test]
     fn default_key_is_valid() {
@@ -1324,11 +1582,64 @@ mod tests {
     }
 
     #[test]
+    fn mavlink_signing_key_accepts_binary_and_hex_files() {
+        assert_eq!(
+            validate_mavlink_signing_key(vec![7; 32]).unwrap(),
+            vec![7; 32]
+        );
+        assert_eq!(
+            validate_mavlink_signing_key(
+                b"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\n".to_vec()
+            )
+            .unwrap(),
+            (0u8..32).collect::<Vec<_>>()
+        );
+        assert!(validate_mavlink_signing_key(vec![0; 31]).is_err());
+    }
+
+    #[test]
     fn fec_window_distinguishes_recovery_from_final_loss() {
         assert_eq!(fec_window_percentages(100, 0, 0), (0.0, 0.0));
         assert_eq!(fec_window_percentages(100, 5, 0), (0.0, 100.0));
         let (loss, recovery) = fec_window_percentages(98, 3, 2);
         assert_eq!(loss, 2.0);
         assert_eq!(recovery, 60.0);
+    }
+
+    #[test]
+    fn osd_history_undoes_and_redoes_discrete_edits() {
+        let mut history = OsdEditHistory::default();
+        let mut hud = HudSettings::default();
+        let original = hud.clone();
+        history.begin_session();
+
+        let before = hud.clone();
+        hud.scale_percent = 135;
+        history.record(before, &hud);
+
+        assert!(history.undo(&mut hud));
+        assert_eq!(hud, original);
+        assert!(history.redo(&mut hud));
+        assert_eq!(hud.scale_percent, 135);
+    }
+
+    #[test]
+    fn osd_history_groups_a_pointer_gesture_into_one_step() {
+        let mut history = OsdEditHistory::default();
+        let mut hud = HudSettings::default();
+        let original = hud.clone();
+        history.begin_session();
+
+        let before = hud.clone();
+        hud.scale_percent = 110;
+        history.observe(before, &hud, true);
+        let before = hud.clone();
+        hud.scale_percent = 145;
+        history.observe(before, &hud, true);
+        history.observe(hud.clone(), &hud, false);
+
+        assert!(history.undo(&mut hud));
+        assert_eq!(hud, original);
+        assert!(!history.undo(&mut hud));
     }
 }

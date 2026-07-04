@@ -13,9 +13,12 @@ mod low_latency;
 mod model;
 mod preflight;
 mod recording;
+#[cfg(not(target_arch = "wasm32"))]
+mod recording_destination;
 mod runtime;
 mod settings;
 mod support_bundle;
+mod telemetry;
 #[cfg(not(target_arch = "wasm32"))]
 mod tun_bridge;
 mod ui;

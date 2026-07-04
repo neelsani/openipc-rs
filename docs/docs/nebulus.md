@@ -31,13 +31,16 @@ flowchart LR
     RTL2 --> Diversity
     Diversity --> Core["openipc-core<br/>WFB, crypto, FEC, RTP"]
     Core --> Video["openipc-video<br/>platform H.264/H.265 decoder"]
-    Core --> Routes["route fanout<br/>inspect, log, UDP, audio"]
+    Core --> Routes["route fanout<br/>raw payloads by radio port"]
     Core --> Record["keyframe-aligned<br/>MP4 recorder"]
     Core --> Tun["native TUN<br/>RX 0x20 / TX 0xa0"]
     Routes --> Opus["ropus<br/>Opus to PCM"]
+    Routes --> Telemetry["Nebulus telemetry<br/>MAVLink, MSP, CRSF"]
     Opus --> Audio["CPAL or Web Audio"]
+    Telemetry --> OSD["protocol-neutral<br/>video OSD state"]
     Video --> Latest["single latest-frame slot"]
     Latest --> Egui["Nebulus egui renderer"]
+    OSD --> Egui
     Core --> Link["adaptive-link quality and feedback"]
     Link --> USB1
 ```
@@ -120,8 +123,9 @@ with individual buttons that restore OpenIPC defaults.
 The Profiles section stores named receiver configurations. Each profile
 contains the primary and diversity adapters, RF channel/width/offset, Link ID, minimum epoch,
 WFB key, decoder preference, RTP reorder setting, adaptive-link settings,
-payload routes, audio volume, transfer size, and VPN state. Theme, UI scale,
-log verbosity, sidebar visibility, and HUD layout remain global.
+payload routes, telemetry policy and signing key, audio volume, transfer size,
+and VPN state. Theme, UI scale, log verbosity, sidebar visibility, and OSD
+layout remain global.
 
 ### Receive Diversity
 
@@ -254,7 +258,7 @@ application messages are available in standard application output and the
 in-app Logs tab.
 
 eframe storage is explicitly rooted in Android's internal app-data directory.
-Profiles, the key, route definitions, HUD positions, and GUI settings survive
+Profiles, the key, route definitions, OSD positions, and GUI settings survive
 activity recreation and process restarts without requesting broad filesystem
 permission. Clearing application storage resets them. File imports and support
 bundle exports use Android's Storage Access Framework.
@@ -317,11 +321,12 @@ the current Link ID, and one action:
 | ----------- | ---------------------------------------------------------------------- |
 | Inspect     | Counts recovered payloads and bytes without parsing them.              |
 | Log         | Adds a rate-limited size, sequence, and hexadecimal preview to Logs.   |
+| Telemetry to OSD | Decodes common MAVLink, MSP, or CRSF values for the video OSD.   |
 | Audio       | Selects an RTP payload type, decodes Opus with `ropus`, and plays PCM. |
 | UDP forward | Sends the unchanged recovered payload to a native UDP destination.     |
 
-UDP is unavailable in browsers and cannot be enabled there. The default routes
-match Station: telemetry on `0x10`, mixed RTP audio on video port `0x00` using
+UDP is unavailable in browsers and cannot be enabled there. The defaults are a
+Telemetry-to-OSD route on `0x10`, mixed RTP audio on video port `0x00` using
 payload type 98, and a disabled data route on `0x20`. A separate transmitter
 audio profile can instead be selected with audio port `0x30`.
 
@@ -331,6 +336,88 @@ matching RTP payload is copied into the audio action. Route topology, ports,
 actions, and codec settings are locked while receiving and apply on the next
 start. Output volume remains adjustable during reception and updates every
 active audio route on the next packet on native, Android, and Web builds.
+
+## Telemetry And Video OSD
+
+Telemetry parsing is deliberately an application concern. `openipc-core`
+decrypts and FEC-recovers a route, then returns the unchanged payload with its
+route and Channel ID metadata. A Nebulus route using **Telemetry to OSD** owns
+the streaming parser for that radio port and converts supported messages into
+one protocol-neutral state. No MAVLink, MSP, or CRSF type is hardcoded into the
+core or Realtek crates.
+
+The route format can be fixed or set to **Auto detect**. Auto mode runs the
+three streaming parsers until a supported frame passes its native checksum,
+then locks that route to the detected protocol for the receiver session. Byte
+fragments may span any number of WFB payloads. Invalid checksums and unrelated
+messages do not update the OSD or select a protocol.
+
+| Format | Accepted framing | Values currently normalized |
+| --- | --- | --- |
+| MAVLink | v1 and v2 using the generated Common dialect; optional MAVLink 2 signature verification | arm state, ArduPilot/PX4 mode, battery, GPS, position, speed, climb, heading, throttle, attitude, RC quality, status text |
+| MSP | v1 and v2 | GPS, home distance, attitude, relative altitude, vario, battery, current, consumed capacity, RSSI-derived link quality |
+| CRSF | CRC8 DVB-S2 frames | GPS, vario, battery, consumed capacity, link quality, attitude, flight mode |
+
+Nebulus converts coordinates to degrees, distance to meters, speed to meters
+per second, angles to degrees, voltage to volts, and current to amps before the
+UI sees them. Home is taken from a protocol-provided distance when available;
+otherwise the first valid position while armed becomes the local home point.
+Disarming clears that local point.
+
+The default OSD exposes arm state, mode, battery voltage/current/remaining,
+GPS fix and satellite count, altitude, ground and vertical speed, heading,
+home distance, throttle, attitude, status text, coordinates, and RC link
+quality. Ground-station link values such as RSSI, post-FEC loss, bitrate, FPS,
+and local processing latency use the same renderer. Flight indicators hide
+when their value is unavailable or the telemetry stream has been stale for
+three seconds; that behavior can be changed per indicator in the OSD editor.
+
+OpenIPC normally sends telemetry on radio port `0x10`, which is the built-in
+route default. The route manager still exposes the complete `u8` radio-port
+range, so a VTX using another port needs only a route change rather than a new
+build. Multiple telemetry routes are allowed and their partial updates merge
+into the current OSD state.
+
+Nebulus uses the generated Common dialect from the Rust
+[`mavlink` crate](https://mavlink.github.io/rust-mavlink/mavlink/) for typed
+messages, enums, CRC extras, MAVLink 2 truncated-payload handling, and signature
+calculation. This keeps the wire definitions aligned with current MAVLink XML
+instead of carrying hand-written offsets and CRC tables. Nebulus retains a
+small bounded streaming framer because one MAVLink frame can be split across
+several recovered WFB payloads, then maps selected Common messages into
+protocol-neutral OSD fields.
+
+### Telemetry Configuration
+
+Source selection remains in **Routes** because the radio port and payload
+format are properties of each WFB route. Decoder policy and live status are in
+the **Telemetry** tab:
+
+| Setting | Behavior |
+| --- | --- |
+| Stale timeout | Hides telemetry-backed OSD values after 0.5–30 seconds without a decoded message. |
+| MAVLink system/component ID | Zero accepts all sources; a non-zero value filters otherwise valid frames. |
+| MAVLink signing: Disabled | Accepts signed and unsigned packets without verifying the 13-byte signature trailer. |
+| MAVLink signing: Verify signed | Verifies every signed packet and rejects invalid, stale, or replayed signatures while accepting unsigned packets. |
+| MAVLink signing: Require signed | Also rejects MAVLink 1 and unsigned MAVLink 2 packets. |
+| MSP version | Accepts both MSP versions or restricts decoding to v1 or v2. |
+| MSP direction | Accepts all frames, only flight-controller responses/errors, or only flight-controller-bound requests. |
+| CRSF device address | Accepts every valid address or filters to a selected device address such as flight controller `0xC8`. |
+
+MAVLink verification uses a separate 32-byte key. The picker accepts either 32
+binary bytes or 64 hexadecimal digits. This key is unrelated to `gs.key`:
+`gs.key` authenticates and decrypts WFB radio data, while the MAVLink key
+authenticates the original MAVLink sender. Signature replay state is tracked per
+`(signing link ID, system ID, component ID)` and enforces the
+[MAVLink signing timestamp rules](https://mavlink.io/en/guide/message_signing.html).
+Key contents are never written to logs or support bundles; reports
+include only whether a 32-byte key was configured.
+
+The tab reports decoded message count, frame age, accepted/rejected/filtered
+frames, detected MAVLink version and source IDs, signed/unsigned/verified
+counts, invalid signatures, replays, stale timestamps, and missing-key drops.
+Protocol and security settings are captured in receiver profiles and take
+effect on the next receiver start.
 
 ## Diagnostics
 
@@ -367,7 +454,8 @@ remain bounded to avoid memory growth.
 and a short README. The report captures the build tag/commit, platform and
 decoder capabilities, selected receiver configuration, sanitized profile and
 route summaries, hardware identity, packet/FEC/RTP/audio/VPN metrics, recovery
-state, and the latest channel-scan results. Home-directory paths in logs are
+state, telemetry protocol and field availability, and the latest channel-scan
+results. Exact GPS coordinates are omitted. Home-directory paths in logs are
 shortened. Key bytes are never included; the report records only key length and
 whether the active key is the built-in default. Desktop uses a save dialog,
 Android uses the document picker, and the browser downloads the ZIP.
@@ -381,15 +469,23 @@ configuration. Settings apply immediately and persist through eframe storage:
   light palette; the other three are dark palettes.
 - **Interface scale** adjusts the complete interface from 75% to 150% in 5%
   increments without changing decoded video resolution.
-- **Link telemetry overlay** controls the ground-station video HUD.
-- **Edit video HUD** opens a 16:9 preview. Each value can be dragged to a
-  normalized video position, hidden, scaled, or given a different background
-  opacity. The default layout places resolution, FPS, bitrate, local latency,
-  RSSI, packet loss, and link score along the lower edge. Positions are clamped
-  to the visible video on small screens.
+- **Video OSD** controls the overlay shared by ground-station and flight data.
+- **Edit video OSD** opens a 16:9 preview. Each indicator can be dragged to a
+  normalized video position and hidden independently. The default layout puts
+  ground-station metrics along the lower edge and flight telemetry around the
+  upper and side edges. Positions stay clamped to the visible video on small screens.
+- Expand an indicator to configure its icon, label, value, status coloring,
+  background, size, opacity, and exact position.
+- Frame rate, bitrate, latency, RSSI, packet loss, and link score can each show
+  an optional mini graph. Its history window, width, height, and filled-area
+  style are configurable. RSSI can also show optional signal bars.
+- Mini graphs and signal bars are off by default. Enabling an indicator does
+  not implicitly enable either visualization.
+- Flight telemetry indicators can hide until a fresh decoded value exists, so
+  an absent telemetry route does not fill the video with placeholders.
 - **Controls panel visible** hides or restores the side/bottom controls. The
   header's **Controls** button always remains available to restore it.
-- **Reset GUI settings** restores Macchiato, 100% scale, the telemetry overlay,
+- **Reset GUI settings** restores Macchiato, 100% scale, the video OSD,
   and a visible controls panel.
 
 These options are shared by desktop, Android, and browser builds. They do not
@@ -417,11 +513,23 @@ recording stops. Both targets cap retained encoded media at 512 MiB. Each
 depacketized video access unit becomes exactly one MP4 sample, preserving
 multi-slice pictures and RTP's 90 kHz timing.
 
+Starting a native recording never opens a save dialog. Nebulus generates a
+unique timestamped `.mp4` name and starts arming the recorder immediately. On
+macOS, Linux, and Windows, choose the destination ahead of time under
+**Settings → Recording**. The default is a `Nebulus` folder inside Videos, then
+Documents or the home directory if Videos is unavailable. Folder selection is
+disabled while RX is active, so it cannot interrupt the receive/render loop.
+Android writes to app-owned storage without opening the document picker.
+Browser builds cannot select an arbitrary filesystem path; the MP4 download is
+started when recording stops and the browser's download settings choose where
+it is saved.
+
 ## VPN / TUN
 
-On macOS, Linux, Windows, and Android, the VPN tab can create a native
-layer-three interface at `10.5.0.3/24` when RX starts. Downlink payloads recovered on radio
-port `0x20` are length-decoded and written to TUN. Uplink IP packets are
+On macOS, Linux, Windows, and Android, the **VPN / tunnel** section in Settings
+can create a native layer-three interface at `10.5.0.3/24` when RX starts.
+Downlink payloads recovered on radio port `0x20` are length-decoded and written
+to TUN. Uplink IP packets are
 length-prefixed, passed through `WfbTransmitter`, and injected by
 `openipc-rtl88xx` on radio port `0xa0`. The transmitter refreshes its WFB
 session packet once per second and drains at most 32 queued packets per receive
@@ -434,7 +542,7 @@ duplicated into `rust-tun`; packet transport, WFB wrapping, and Realtek
 injection remain in Rust.
 
 Windows uses Wintun. GitHub release installers place the architecture-matched
-DLL beside Nebulus. When a Cargo installation has no DLL, the VPN tab shows an
+DLL beside Nebulus. When a Cargo installation has no DLL, Settings shows an
 **Install Wintun** button and download progress. Nebulus fetches the official
 [Wintun 0.14.1 archive](https://www.wintun.net/), verifies the published
 SHA-256 before extraction, and writes the DLL and its license to

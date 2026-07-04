@@ -3,7 +3,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU8, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
     thread::{self, JoinHandle},
 };
@@ -16,6 +16,27 @@ type EventQueue = Arc<Mutex<VecDeque<RuntimeEvent>>>;
 struct RecordingControl {
     start: Option<PathBuf>,
     stop: bool,
+}
+
+static RECORDING_FINALIZERS: OnceLock<Mutex<Vec<JoinHandle<()>>>> = OnceLock::new();
+
+fn recording_finalizers() -> &'static Mutex<Vec<JoinHandle<()>>> {
+    RECORDING_FINALIZERS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn reap_recording_finalizers(wait_for_all: bool) {
+    let mut finalizers = recording_finalizers()
+        .lock()
+        .expect("recording finalizer list poisoned");
+    let mut index = 0;
+    while index < finalizers.len() {
+        if wait_for_all || finalizers[index].is_finished() {
+            let finalizer = finalizers.swap_remove(index);
+            let _ = finalizer.join();
+        } else {
+            index += 1;
+        }
+    }
 }
 
 /// Native worker owner used by the egui event loop.
@@ -154,6 +175,7 @@ impl Runtime {
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
+        reap_recording_finalizers(true);
         *self.recording.lock().expect("recording control poisoned") = RecordingControl::default();
     }
 
@@ -179,6 +201,7 @@ impl Runtime {
     }
 
     pub(crate) fn drain(&self) -> impl Iterator<Item = RuntimeEvent> {
+        reap_recording_finalizers(false);
         self.events
             .lock()
             .expect("Nebulus event queue poisoned")
@@ -247,7 +270,7 @@ impl Drop for Runtime {
 
 mod worker {
     use std::{
-        fs::File,
+        fs::{self, OpenOptions},
         io::BufWriter,
         path::PathBuf,
         sync::{
@@ -440,8 +463,6 @@ mod worker {
             frame: &openipc_core::DepacketizedFrame,
             audio_config: Option<crate::recording::AudioTrackConfig>,
         ) -> Result<Self, String> {
-            let file = File::create(&path)
-                .map_err(|error| format!("create recording {} failed: {error}", path.display()))?;
             let config = crate::recording::Mp4TrackConfig::from_keyframe(frame)?;
             let codec = frame.codec;
             let first = crate::recording::RecordedAccessUnit::from(frame);
@@ -450,6 +471,21 @@ mod worker {
             let worker = std::thread::Builder::new()
                 .name("nebulus-mp4-recorder".to_owned())
                 .spawn(move || {
+                    if let Some(directory) = output_path.parent() {
+                        fs::create_dir_all(directory).map_err(|error| {
+                            format!(
+                                "create recording directory {} failed: {error}",
+                                directory.display()
+                            )
+                        })?;
+                    }
+                    let file = OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&output_path)
+                        .map_err(|error| {
+                            format!("create recording {} failed: {error}", output_path.display())
+                        })?;
                     let writer = BufWriter::with_capacity(256 * 1024, file);
                     let mut muxer = config.muxer(writer, audio_config)?;
                     muxer
@@ -1542,7 +1578,7 @@ mod worker {
             }
             route_processor.set_audio_volume(audio_volume.load(Ordering::Relaxed));
             let route_start = Instant::now();
-            let (route_updates, route_logs, recorded_audio) =
+            let (route_updates, route_logs, recorded_audio, telemetry) =
                 route_processor.process(&batch.raw_payloads, recorder.is_some());
             record_audio_packets(&mut recorder, recorded_audio, events, context);
             let route_latency_ms = route_start.elapsed().as_secs_f64() * 1000.0;
@@ -1586,6 +1622,7 @@ mod worker {
                 rtp: batch.rtp_status,
                 reorder: batch.rtp_reorder_status,
                 routes: route_updates,
+                telemetry,
                 audio: route_processor.audio_stats(),
                 vpn: tun
                     .as_ref()
@@ -1745,7 +1782,7 @@ mod worker {
                     context,
                 );
                 route_processor.set_audio_volume(audio_volume.load(Ordering::Relaxed));
-                let (route_updates, route_logs, recorded_audio) =
+                let (route_updates, route_logs, recorded_audio, telemetry) =
                     route_processor.process(&batch.raw_payloads, recorder.is_some());
                 record_audio_packets(&mut recorder, recorded_audio, events, context);
                 metrics.merge(BatchMetrics {
@@ -1753,6 +1790,7 @@ mod worker {
                     counters: batch.counters,
                     rtp: batch.rtp_status,
                     reorder: batch.rtp_reorder_status,
+                    telemetry,
                     ..BatchMetrics::default()
                 });
                 for entry in route_logs {
@@ -1919,13 +1957,27 @@ mod worker {
         let Some(active) = recorder.take() else {
             return;
         };
-        match active.finish() {
-            Ok((path, bytes)) => send(
+        let event_queue = Arc::clone(events);
+        let repaint = context.clone();
+        match std::thread::Builder::new()
+            .name("nebulus-recorder-finalizer".to_owned())
+            .spawn(move || match active.finish() {
+                Ok((path, bytes)) => send(
+                    &event_queue,
+                    &repaint,
+                    RuntimeEvent::RecordingStopped { path, bytes },
+                ),
+                Err(error) => send(&event_queue, &repaint, RuntimeEvent::RecordingFailed(error)),
+            }) {
+            Ok(finalizer) => super::recording_finalizers()
+                .lock()
+                .expect("recording finalizer list poisoned")
+                .push(finalizer),
+            Err(error) => send(
                 events,
                 context,
-                RuntimeEvent::RecordingStopped { path, bytes },
+                RuntimeEvent::RecordingFailed(format!("start recording finalizer failed: {error}")),
             ),
-            Err(error) => send(events, context, RuntimeEvent::RecordingFailed(error)),
         }
     }
 

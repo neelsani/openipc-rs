@@ -137,7 +137,8 @@ impl NebulusApp {
                 }
                 TrayCommand::OpenVpn => {
                     self.settings.show_sidebar = true;
-                    self.active_tab = PanelTab::Vpn;
+                    self.active_tab = PanelTab::Settings;
+                    self.focus_vpn_settings = true;
                     show_window(context);
                 }
                 TrayCommand::Quit => {

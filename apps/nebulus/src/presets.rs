@@ -33,7 +33,10 @@ pub(crate) struct PresetSource {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct PresetPack {
-    #[serde(rename = "$schema", default, skip_serializing_if = "Option::is_none")]
+    // Keep the normal serialized name RON-safe because installed packs live
+    // inside eframe's persisted settings. Public JSON uses `$schema` through
+    // `to_pretty_json`, while imports accept either spelling.
+    #[serde(alias = "$schema", default, skip_serializing_if = "Option::is_none")]
     pub(crate) json_schema: Option<String>,
     pub(crate) schema_version: u32,
     pub(crate) id: String,
@@ -874,7 +877,15 @@ impl PresetPack {
     }
 
     pub(crate) fn to_pretty_json(&self) -> Result<Vec<u8>, String> {
-        serde_json::to_vec_pretty(self).map_err(|error| format!("serialize preset: {error}"))
+        let mut value =
+            serde_json::to_value(self).map_err(|error| format!("serialize preset: {error}"))?;
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| "serialize preset: expected a JSON object".to_owned())?;
+        if let Some(schema) = object.remove("jsonSchema") {
+            object.insert("$schema".to_owned(), schema);
+        }
+        serde_json::to_vec_pretty(&value).map_err(|error| format!("serialize preset: {error}"))
     }
 
     pub(crate) fn source(&self) -> PresetSource {
@@ -1177,6 +1188,27 @@ const fn default_channels() -> u8 {
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    struct MemoryStorage {
+        value: Option<String>,
+    }
+
+    impl eframe::Storage for MemoryStorage {
+        fn get_string(&self, _key: &str) -> Option<String> {
+            self.value.clone()
+        }
+
+        fn set_string(&mut self, _key: &str, value: String) {
+            self.value = Some(value);
+        }
+
+        fn remove_string(&mut self, _key: &str) {
+            self.value = None;
+        }
+
+        fn flush(&mut self) {}
+    }
+
     fn draft() -> PresetExportDraft {
         PresetExportDraft {
             id: "neels.test-pack".to_owned(),
@@ -1211,6 +1243,27 @@ mod tests {
         assert!(!json.contains("/private/recordings"));
         assert!(!json.contains(&"5a".repeat(64)));
         assert!(!json.contains(&"a5".repeat(32)));
+    }
+
+    #[test]
+    fn public_json_uses_schema_keyword_but_eframe_persistence_is_ron_safe() {
+        let pack = draft().build(&Settings::default()).unwrap();
+        let json = String::from_utf8(pack.to_pretty_json().unwrap()).unwrap();
+        assert!(json.contains("\"$schema\""));
+        assert!(!json.contains("\"jsonSchema\""));
+
+        let settings = Settings {
+            installed_presets: vec![pack],
+            ..Settings::default()
+        };
+        let mut storage = MemoryStorage::default();
+        eframe::set_value(&mut storage, eframe::APP_KEY, &settings);
+
+        let encoded = storage.value.as_deref().expect("RON was stored");
+        assert!(encoded.contains("jsonSchema"));
+        assert!(!encoded.contains("$schema"));
+        let restored: Settings = eframe::get_value(&storage, eframe::APP_KEY).unwrap();
+        assert_eq!(restored.installed_presets, settings.installed_presets);
     }
 
     #[test]

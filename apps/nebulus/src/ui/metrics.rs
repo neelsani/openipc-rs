@@ -11,6 +11,53 @@ pub(crate) fn show(app: &NebulusApp, ui: &mut egui::Ui) {
         ui.set_max_width((ui.available_width() - 14.0).max(0.0));
         ui.spacing_mut().item_spacing.x = 10.0;
         ui.columns(2, |columns| {
+            if app.settings.receiver_source == crate::settings::ReceiverSource::UdpRtp {
+                plot_one(
+                    &mut columns[0],
+                    "Video bitrate (Mbps)",
+                    app.history.bitrate.points(),
+                    latest_time,
+                    PlotScale::Dynamic {
+                        non_negative: true,
+                        minimum_span: 2.0,
+                    },
+                    FIRST_SERIES_COLOR,
+                );
+                plot_one(
+                    &mut columns[1],
+                    "Delivered video FPS",
+                    app.history.receive_fps.points(),
+                    latest_time,
+                    PlotScale::Dynamic {
+                        non_negative: true,
+                        minimum_span: 10.0,
+                    },
+                    SECOND_SERIES_COLOR,
+                );
+                plot_one(
+                    &mut columns[0],
+                    "Decoded video FPS",
+                    app.history.decode_fps.points(),
+                    latest_time,
+                    PlotScale::Dynamic {
+                        non_negative: true,
+                        minimum_span: 10.0,
+                    },
+                    FIRST_SERIES_COLOR,
+                );
+                plot_one(
+                    &mut columns[1],
+                    "Local processing (ms)",
+                    app.history.local_processing_ms.points(),
+                    latest_time,
+                    PlotScale::Dynamic {
+                        non_negative: true,
+                        minimum_span: 2.0,
+                    },
+                    SECOND_SERIES_COLOR,
+                );
+                return;
+            }
             plot_one(
                 &mut columns[0],
                 "Link score",
@@ -114,7 +161,7 @@ fn metrics_summary(app: &NebulusApp, ui: &mut egui::Ui) {
             metric_row(ui, "Decode", &format!("{:.1} fps", app.metrics.decode_fps));
             metric_row(ui, "Render", &format!("{:.1} fps", app.metrics.render_fps));
             metric_row(ui, "Bitrate", &format_bitrate(app.metrics.bitrate_bps));
-            metric_row(ui, "Radio", &radio);
+            metric_row(ui, "Input", &radio);
         });
 
         metric_group(
@@ -144,13 +191,17 @@ fn metrics_summary(app: &NebulusApp, ui: &mut egui::Ui) {
                 metric_row(
                     ui,
                     "RSSI / SNR",
-                    &format!(
-                        "{}/{} dBm  {}/{} dB",
-                        app.metrics.rssi[0],
-                        app.metrics.rssi[1],
-                        app.metrics.snr[0],
-                        app.metrics.snr[1]
-                    ),
+                    &if app.settings.receiver_source == crate::settings::ReceiverSource::UdpRtp {
+                        "Not available for UDP RTP".to_owned()
+                    } else {
+                        format!(
+                            "{}/{} dBm  {}/{} dB",
+                            app.metrics.rssi[0],
+                            app.metrics.rssi[1],
+                            app.metrics.snr[0],
+                            app.metrics.snr[1]
+                        )
+                    },
                 );
                 metric_row(
                     ui,

@@ -53,6 +53,12 @@ impl OsdEditHistory {
         self.pending_gesture = None;
     }
 
+    pub(crate) fn reset(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
+        self.pending_gesture = None;
+    }
+
     pub(crate) fn can_undo(&self) -> bool {
         self.pending_gesture.is_some() || !self.undo.is_empty()
     }
@@ -339,6 +345,9 @@ impl NebulusApp {
                 .video_renderer
                 .as_ref()
                 .map(crate::video::PlatformVideoRenderer::output_window),
+            receiver_source: self.settings.receiver_source,
+            udp_bind_address: self.settings.udp_bind_address.clone(),
+            udp_bind_port: self.settings.udp_bind_port,
             primary_device_id: self.settings.device_id.clone(),
             device_ids: self.settings.selected_device_ids(),
             channel: self.settings.channel,
@@ -349,11 +358,14 @@ impl NebulusApp {
             transfer_size: self.settings.transfer_size,
             codec_preference: self.settings.codec_preference,
             rtp_reorder: self.settings.rtp_reorder,
-            adaptive_link: self.settings.adaptive_link,
+            adaptive_link: self.settings.adaptive_link
+                && self.settings.receiver_source == crate::settings::ReceiverSource::Usb,
             tx_power: self.settings.tx_power,
             key_bytes: self.settings.key_bytes.clone(),
             audio_volume: self.settings.audio_volume,
-            vpn_enabled: self.settings.vpn_enabled && self.vpn_available(),
+            vpn_enabled: self.settings.vpn_enabled
+                && self.settings.receiver_source == crate::settings::ReceiverSource::Usb
+                && self.vpn_available(),
             payload_routes: self.settings.payload_routes.clone(),
             telemetry: self.settings.telemetry.clone(),
         }
@@ -562,6 +574,60 @@ impl NebulusApp {
             "profile",
             format!("Deleted receiver profile {name}"),
         );
+    }
+
+    pub(crate) fn apply_osd_profile(&mut self, id: u64) -> bool {
+        if !self.settings.apply_osd_profile(id) {
+            return false;
+        }
+        self.osd_edit_history.reset();
+        let name = self
+            .settings
+            .osd_profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .map_or_else(|| format!("OSD {id}"), |profile| profile.name.clone());
+        self.log(LogLevel::Info, "osd", format!("Applied OSD profile {name}"));
+        true
+    }
+
+    pub(crate) fn create_osd_profile(&mut self) {
+        self.settings.sync_active_osd_profile();
+        let id = self.settings.next_osd_profile_id();
+        let name = format!("OSD {id}");
+        self.settings
+            .osd_profiles
+            .push(crate::settings::OsdProfile::capture(
+                id,
+                name.clone(),
+                &self.settings.hud,
+            ));
+        self.settings.active_osd_profile_id = Some(id);
+        self.osd_edit_history.reset();
+        self.log(LogLevel::Info, "osd", format!("Created OSD profile {name}"));
+    }
+
+    pub(crate) fn delete_active_osd_profile(&mut self) {
+        if self.settings.osd_profiles.len() <= 1 {
+            return;
+        }
+        let Some(id) = self.settings.active_osd_profile_id else {
+            return;
+        };
+        let Some(index) = self
+            .settings
+            .osd_profiles
+            .iter()
+            .position(|profile| profile.id == id)
+        else {
+            return;
+        };
+        let name = self.settings.osd_profiles.remove(index).name;
+        let replacement =
+            self.settings.osd_profiles[index.min(self.settings.osd_profiles.len() - 1)].id;
+        self.settings.active_osd_profile_id = None;
+        self.apply_osd_profile(replacement);
+        self.log(LogLevel::Info, "osd", format!("Deleted OSD profile {name}"));
     }
 
     pub(crate) fn vpn_available(&self) -> bool {
@@ -1248,16 +1314,27 @@ impl NebulusApp {
         accumulate_counters(&mut self.diagnostics.counters, batch.counters);
         self.diagnostics.rtp = batch.rtp;
         self.diagnostics.reorder = batch.reorder;
-        self.diagnostics.observe("USB wait", batch.usb_latency_ms);
-        self.diagnostics
-            .observe("Realtek parse", batch.parse_latency_ms);
-        self.diagnostics
-            .observe("WFB + RTP", batch.pipeline_latency_ms);
+        if self.settings.receiver_source == crate::settings::ReceiverSource::UdpRtp {
+            self.diagnostics
+                .observe("UDP socket wait", batch.usb_latency_ms);
+            self.diagnostics
+                .observe("RTP pipeline", batch.pipeline_latency_ms);
+        } else {
+            self.diagnostics.observe("USB wait", batch.usb_latency_ms);
+            self.diagnostics
+                .observe("Realtek parse", batch.parse_latency_ms);
+            self.diagnostics
+                .observe("WFB + RTP", batch.pipeline_latency_ms);
+        }
         self.diagnostics.observe("Routes", batch.route_latency_ms);
         self.diagnostics
             .observe("Decode submit", batch.decode_submit_latency_ms);
         self.diagnostics.observe(
-            "USB completion to decode submit",
+            if self.settings.receiver_source == crate::settings::ReceiverSource::UdpRtp {
+                "UDP datagram to decode submit"
+            } else {
+                "USB completion to decode submit"
+            },
             batch.video_submit_path_ms,
         );
         self.diagnostics
@@ -1559,6 +1636,7 @@ impl eframe::App for NebulusApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.settings.sync_active_osd_profile();
         eframe::set_value(storage, eframe::APP_KEY, &self.settings);
     }
 }

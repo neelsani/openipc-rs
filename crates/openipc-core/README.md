@@ -150,6 +150,39 @@ fn receive_with_rtp_tap(
 }
 ```
 
+Applications that already have recovered RTP, such as a native UDP listener,
+can enter after WFB without maintaining a separate depacketizer:
+
+```rust
+use openipc_core::{
+    ChannelId, FrameLayout, PayloadRouteId, ReceiverBatchOptions, ReceiverRuntime,
+};
+
+fn handle_udp_rtp(rtp_datagram: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut receiver = ReceiverRuntime::with_direct_video_route(
+        FrameLayout::WithFcs,
+        PayloadRouteId::new(1),
+        ChannelId::default_video(),
+        0,
+    );
+    let batch = receiver.push_direct_payload(
+        receiver.video_runtime(),
+        1,
+        rtp_datagram,
+        &ReceiverBatchOptions::default(),
+    )?;
+    for frame in batch.frames {
+        println!("decoded access unit input: {} bytes", frame.data.len());
+    }
+    Ok(())
+}
+```
+
+`with_direct_video_route` bypasses only 802.11, WFB decryption, and FEC. Route
+fanout, optional RTP reordering, codec configuration tracking, and H.264/H.265
+depacketization are unchanged. The older `with_mock_video_route` and
+`push_mock_payload` names remain aliases for development code.
+
 Add another route for a non-video WFB channel when you want recovered telemetry,
 IP/VPN, or custom bytes:
 

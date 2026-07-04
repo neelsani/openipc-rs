@@ -35,6 +35,7 @@ zip = { version = "4.6.1", default-features = false, features = ["deflate"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 cpal = { version = "0.18.1", features = ["realtime"] }
+socket2 = "0.6.4"
 tun = { version = "0.8", features = ["async", "verify_binary_signature"] }
 
 [target.'cfg(all(unix, not(target_arch = "wasm32")))'.dependencies]
@@ -150,3 +151,6 @@ actions = ["android.net.VpnService"]
 [[package.metadata.android.uses_feature]]
 name = "android.hardware.usb.host"
 required = true
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.INTERNET"

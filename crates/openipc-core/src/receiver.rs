@@ -167,20 +167,32 @@ impl ReceiverRuntime {
         Ok(Self::from_routes(routes, video_runtime, video_route_id))
     }
 
-    /// Create a runtime with a fully synthetic video payload route.
+    /// Create a runtime whose video route accepts already-recovered payloads.
     ///
-    /// Use [`Self::push_mock_payload`] to inject recovered payload bytes. The
-    /// bytes still pass through route fanout and the built-in RTP depacketizer,
-    /// so this is useful for no-hardware video, audio, and route tests.
-    pub fn with_mock_video_route(
+    /// Use [`Self::push_direct_payload`] to inject RTP or other recovered
+    /// payload bytes. They still pass through route fanout and the built-in RTP
+    /// depacketizer, making this suitable for UDP input and no-hardware tests.
+    pub fn with_direct_video_route(
         frame_layout: FrameLayout,
         video_route_id: PayloadRouteId,
         channel_id: ChannelId,
         key_slot: u64,
     ) -> Self {
         let mut routes = PayloadRouteManager::new(frame_layout);
-        let video_runtime = routes.add_mock_route(video_route_id, channel_id, key_slot);
+        let video_runtime = routes.add_direct_route(video_route_id, channel_id, key_slot);
         Self::from_routes(routes, video_runtime, video_route_id)
+    }
+
+    /// Create a synthetic video payload route for tests and development.
+    ///
+    /// This is an alias for [`Self::with_direct_video_route`].
+    pub fn with_mock_video_route(
+        frame_layout: FrameLayout,
+        video_route_id: PayloadRouteId,
+        channel_id: ChannelId,
+        key_slot: u64,
+    ) -> Self {
+        Self::with_direct_video_route(frame_layout, video_route_id, channel_id, key_slot)
     }
 
     /// Return the route-manager runtime key used for video.
@@ -294,14 +306,26 @@ impl ReceiverRuntime {
             .add_keyed_route(route_id, channel_id, key_slot, keypair, minimum_epoch)
     }
 
-    /// Add a synthetic raw-payload route.
+    /// Add a route that accepts already-recovered payloads directly.
+    pub fn add_direct_route(
+        &mut self,
+        route_id: PayloadRouteId,
+        channel_id: ChannelId,
+        key_slot: u64,
+    ) -> PayloadRuntimeKey {
+        self.routes.add_direct_route(route_id, channel_id, key_slot)
+    }
+
+    /// Add a synthetic raw-payload route for tests and development.
+    ///
+    /// This is an alias for [`Self::add_direct_route`].
     pub fn add_mock_route(
         &mut self,
         route_id: PayloadRouteId,
         channel_id: ChannelId,
         key_slot: u64,
     ) -> PayloadRuntimeKey {
-        self.routes.add_mock_route(route_id, channel_id, key_slot)
+        self.add_direct_route(route_id, channel_id, key_slot)
     }
 
     /// Return cumulative FEC counters for the video runtime.
@@ -426,8 +450,8 @@ impl ReceiverRuntime {
         Ok(batch)
     }
 
-    /// Process one fully synthetic recovered payload.
-    pub fn push_mock_payload(
+    /// Process one already-recovered payload through routes and RTP handling.
+    pub fn push_direct_payload(
         &mut self,
         runtime: PayloadRuntimeKey,
         packet_seq: u64,
@@ -437,10 +461,23 @@ impl ReceiverRuntime {
         let mut batch = self.empty_batch();
         let events = self
             .routes
-            .push_mock_payload(runtime, packet_seq, payload)?;
+            .push_direct_payload(runtime, packet_seq, payload)?;
         self.apply_route_events(events, options, &mut batch);
         batch.fec_counters = self.video_fec_counters();
         Ok(batch)
+    }
+
+    /// Process one synthetic recovered payload for tests and development.
+    ///
+    /// This is an alias for [`Self::push_direct_payload`].
+    pub fn push_mock_payload(
+        &mut self,
+        runtime: PayloadRuntimeKey,
+        packet_seq: u64,
+        payload: &[u8],
+        options: &ReceiverBatchOptions,
+    ) -> Result<ReceiverBatch, PayloadRouteError> {
+        self.push_direct_payload(runtime, packet_seq, payload, options)
     }
 
     fn empty_batch(&self) -> ReceiverBatch {
@@ -705,9 +742,9 @@ mod tests {
     }
 
     #[test]
-    fn mock_payload_runtime_uses_same_video_route_and_rtp_depacketizer() {
+    fn direct_payload_runtime_uses_same_video_route_and_rtp_depacketizer() {
         let video_route = PayloadRouteId::new(1);
-        let mut runtime = ReceiverRuntime::with_mock_video_route(
+        let mut runtime = ReceiverRuntime::with_direct_video_route(
             FrameLayout::WithFcs,
             video_route,
             ChannelId::default_video(),
@@ -716,7 +753,7 @@ mod tests {
 
         let packet = h264_stap_a_rtp();
         let batch = runtime
-            .push_mock_payload(
+            .push_direct_payload(
                 runtime.video_runtime(),
                 123,
                 &packet,

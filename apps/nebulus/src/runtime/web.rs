@@ -80,6 +80,15 @@ impl Runtime {
         }
         *self.recording.borrow_mut() = RecordingControl::default();
 
+        if request.receiver_source == crate::settings::ReceiverSource::UdpRtp {
+            self.events.borrow_mut().push_back(RuntimeEvent::Failed(
+                "Direct UDP RTP input is unavailable in browsers; use WebUSB or the native app"
+                    .to_owned(),
+            ));
+            context.request_repaint();
+            return;
+        }
+
         let route_processor = match super::route_runtime::RouteProcessor::new(&request) {
             Ok(processor) => processor,
             Err(error) => {

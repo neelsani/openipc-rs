@@ -50,6 +50,9 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
 
     ui.add_space(14.0);
     ui.strong("Display");
+    ui.label("OSD profile");
+    osd_profile_controls(app, ui, "gui");
+    ui.add_space(6.0);
     ui.checkbox(&mut app.settings.show_osd, "Video OSD");
     ui.horizontal(|ui| {
         if ui.button("Edit video OSD").clicked() {
@@ -57,6 +60,7 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
         }
         if ui.button("Reset OSD").clicked() {
             app.settings.hud.reset_layout();
+            app.settings.sync_active_osd_profile();
         }
     });
     if ui
@@ -79,9 +83,79 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
         app.settings.show_osd = true;
         app.settings.show_sidebar = true;
         app.settings.hud.reset_layout();
+        app.settings.sync_active_osd_profile();
         super::theme::apply(ui.ctx(), app.settings.gui_theme);
         ui.ctx().set_zoom_factor(1.0);
     }
+}
+
+fn osd_profile_controls(app: &mut NebulusApp, ui: &mut egui::Ui, id_salt: &'static str) -> bool {
+    let active_id = app
+        .settings
+        .active_osd_profile_id
+        .or_else(|| app.settings.osd_profiles.first().map(|profile| profile.id));
+    let selected_name = active_id
+        .and_then(|id| {
+            app.settings
+                .osd_profiles
+                .iter()
+                .find(|profile| profile.id == id)
+        })
+        .map(|profile| profile.name.clone())
+        .unwrap_or_else(|| "No OSD profile".to_owned());
+    let mut selected = active_id;
+    let mut duplicate = false;
+    let mut delete = false;
+    ui.horizontal_wrapped(|ui| {
+        egui::ComboBox::from_id_salt(("osd-profile", id_salt))
+            .selected_text(selected_name)
+            .width(180.0)
+            .show_ui(ui, |ui| {
+                for profile in &app.settings.osd_profiles {
+                    ui.selectable_value(&mut selected, Some(profile.id), &profile.name);
+                }
+            });
+        duplicate = ui.small_button("Duplicate").clicked();
+        delete = ui
+            .add_enabled(
+                app.settings.osd_profiles.len() > 1,
+                egui::Button::new("Delete").small(),
+            )
+            .clicked();
+    });
+
+    let mut changed = false;
+    if selected != active_id {
+        if let Some(id) = selected {
+            changed |= app.apply_osd_profile(id);
+        }
+    }
+    if duplicate {
+        app.create_osd_profile();
+        changed = true;
+    } else if delete {
+        app.delete_active_osd_profile();
+        changed = true;
+    }
+
+    if let Some(id) = app.settings.active_osd_profile_id {
+        if let Some(profile) = app
+            .settings
+            .osd_profiles
+            .iter_mut()
+            .find(|profile| profile.id == id)
+        {
+            ui.horizontal(|ui| {
+                ui.label("Name");
+                ui.add(
+                    egui::TextEdit::singleline(&mut profile.name)
+                        .desired_width(180.0)
+                        .char_limit(48),
+                );
+            });
+        }
+    }
+    changed
 }
 
 pub(crate) fn osd_editor(app: &mut NebulusApp, context: &egui::Context) {
@@ -90,26 +164,30 @@ pub(crate) fn osd_editor(app: &mut NebulusApp, context: &egui::Context) {
         return;
     }
     app.osd_edit_history.begin_session();
-    handle_editor_shortcuts(app, context);
+    let shortcut_changed = handle_editor_shortcuts(app, context);
     let hud_before = app.settings.hud.clone();
 
     let screen = context.content_rect();
-    let default_size = egui::vec2(
-        (screen.width() - 32.0).clamp(360.0, 1_050.0),
-        (screen.height() - 32.0).clamp(460.0, 760.0),
-    );
+    let default_size = osd_editor_default_size(screen);
     let mut open = true;
     let mut done = false;
     let mut toolbar_undo = false;
+    let mut profile_changed = false;
     let can_undo = app.osd_edit_history.can_undo();
     egui::Window::new("Video OSD editor")
-        .id(egui::Id::new("video-osd-editor-v2"))
+        // The new ID discards the old near-full-screen persisted geometry.
+        .id(egui::Id::new("video-osd-editor-v3"))
         .open(&mut open)
         .resizable(true)
         .default_size(default_size)
-        .min_width(360.0)
-        .max_height((screen.height() - 16.0).max(420.0))
+        .min_size(egui::vec2(360.0, 420.0))
+        .max_size(egui::vec2(
+            (screen.width() - 16.0).max(360.0),
+            (screen.height() - 16.0).max(420.0),
+        ))
         .show(context, |ui| {
+            profile_changed |= osd_profile_controls(app, ui, "editor");
+            ui.separator();
             editor_toolbar(
                 ui,
                 &mut app.settings.hud,
@@ -137,14 +215,18 @@ pub(crate) fn osd_editor(app: &mut NebulusApp, context: &egui::Context) {
                 );
             }
         });
+    let hud_changed = hud_before != app.settings.hud;
     if toolbar_undo {
         if app.osd_edit_history.undo(&mut app.settings.hud) {
             context.request_repaint();
         }
-    } else {
+    } else if !profile_changed {
         let pointer_down = context.input(|input| input.pointer.any_down());
         app.osd_edit_history
             .observe(hud_before, &app.settings.hud, pointer_down);
+    }
+    if shortcut_changed || profile_changed || toolbar_undo || hud_changed {
+        app.settings.sync_active_osd_profile();
     }
     app.show_osd_editor = open && !done;
     if !app.show_osd_editor {
@@ -152,7 +234,19 @@ pub(crate) fn osd_editor(app: &mut NebulusApp, context: &egui::Context) {
     }
 }
 
-fn handle_editor_shortcuts(app: &mut NebulusApp, context: &egui::Context) {
+fn osd_editor_default_size(screen: egui::Rect) -> egui::Vec2 {
+    let maximum = egui::vec2(
+        (screen.width() - 32.0).max(360.0),
+        (screen.height() - 32.0).max(420.0),
+    );
+    egui::vec2(
+        (screen.width() * 0.72).clamp(440.0, 900.0),
+        (screen.height() * 0.78).clamp(460.0, 720.0),
+    )
+    .min(maximum)
+}
+
+fn handle_editor_shortcuts(app: &mut NebulusApp, context: &egui::Context) -> bool {
     let (redo, undo, delete) = context.input_mut(|input| {
         let redo = input.consume_key(
             egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
@@ -175,6 +269,7 @@ fn handle_editor_shortcuts(app: &mut NebulusApp, context: &egui::Context) {
         context.request_repaint();
     }
 
+    let mut deleted = false;
     if delete {
         let before = app.settings.hud.clone();
         if let Some(item) = app
@@ -185,10 +280,12 @@ fn handle_editor_shortcuts(app: &mut NebulusApp, context: &egui::Context) {
             .find(|item| item.metric == app.selected_hud_metric)
         {
             item.visible = false;
+            deleted = true;
         }
         app.osd_edit_history.record(before, &app.settings.hud);
         context.request_repaint();
     }
+    restored || deleted
 }
 
 fn editor_toolbar(

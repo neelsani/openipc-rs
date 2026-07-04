@@ -762,6 +762,17 @@ fn preview_metric_color(metric: HudMetric) -> egui::Color32 {
 }
 
 fn hud_value(app: &NebulusApp, metric: HudMetric, compact: bool) -> Option<String> {
+    if app.settings.receiver_source == crate::settings::ReceiverSource::UdpRtp
+        && matches!(
+            metric,
+            HudMetric::Signal
+                | HudMetric::PacketLoss
+                | HudMetric::LinkScore
+                | HudMetric::LinkHealth
+        )
+    {
+        return None;
+    }
     if metric.requires_telemetry()
         && !app
             .telemetry

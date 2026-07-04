@@ -4,10 +4,11 @@ Nebulus is a pure-Rust OpenIPC FPV ground station built with
 [egui](https://github.com/emilk/egui). It opens one or more supported Realtek
 USB WiFi adapters, reconstructs WFB video, decodes H.264 or H.265 with the
 operating system's video API, and always presents the newest decoded frame.
+Native builds can instead receive an already-recovered RTP stream from UDP.
 
 It shares the same Rust application, protocol pipeline, settings, metrics, and
-UI across desktop, Android, and the browser. Only USB access and video-surface
-presentation are target-specific.
+UI across desktop, Android, and the browser. USB access, native UDP sockets,
+and video-surface presentation are target-specific.
 
 Nebulus is the primary ground station distributed by this repository. Tagged
 releases include Linux x64/arm64 executables, macOS Apple Silicon/Intel disk
@@ -45,6 +46,22 @@ revision, USB speed, selected bulk endpoints, initialization result, firmware
 download status, and active RF/Link ID configuration. The summary is cleared
 when the receiver disconnects.
 
+### Receive RTP From UDP
+
+In **Settings → Receiver**, select **UDP RTP** and choose a local bind address
+and port. The default is `0.0.0.0:5600`. Each UDP datagram must contain one
+complete RTP packet. H.264 and H.265 payloads use the same reorder,
+depacketizer, decoder, metrics, OSD, and MP4 recording path as USB reception;
+Opus carried on the configured mixed-audio RTP payload type uses the normal
+audio route.
+
+UDP input is available on desktop and Android. It receives RTP after the radio
+transport, so it intentionally bypasses Realtek initialization, 802.11/WFB
+filtering, decryption, and FEC. Adaptive-link uplink, VPN/TUN, diversity,
+channel scanning, and routes on non-video radio ports therefore require the
+USB source. Browsers cannot bind arbitrary UDP sockets and continue to use
+WebUSB.
+
 The GUI tab contains presentation-only settings. It offers Catppuccin Latte,
 Frappé, Macchiato, and Mocha themes, a persistent 75–150% interface scale,
 an editable video OSD, control-panel visibility, and a one-click GUI reset.
@@ -54,14 +71,16 @@ status coloring, background, size, and opacity can be configured independently.
 Supported indicators can optionally include a mini graph with a configurable
 history window and dimensions; RSSI can optionally include signal bars. Graphs
 and bars are off by default. Changes apply immediately on desktop, Android,
-and the browser.
+and the browser. OSD layouts have their own named profiles. **Duplicate** starts
+a new layout from the current one, edits auto-save to the selected layout, and
+the same OSD profile can be reused with any receiver profile.
 
 Settings includes named receiver profiles. A profile snapshots the primary and
 diversity adapters, radio, Link ID, keys, routes, telemetry policy, audio, VPN,
 and decoder choices; GUI appearance stays global. Use **Save current** after
 changing a profile. **Run preflight** checks the selected adapters, keys, radio
 values, routes, decoder state, VPN, and adaptive-link configuration before RX
-starts.
+starts. Receiver profiles do not select or overwrite OSD profiles.
 
 **Scan channels** opens an idle-only survey. The Rust driver initializes the
 adapter once, retunes it across the selected channels, and reports traffic,
@@ -129,8 +148,8 @@ Rust `log` output is mirrored to standard Android application output and the
 in-app Logs tab.
 
 Android settings use an app-private eframe RON file under the activity's
-internal data directory. Profiles, the selected key, routes, OSD layout, and
-GUI preferences therefore survive process death and device restart without
+internal data directory. Receiver profiles, OSD profiles, the selected key,
+routes, and GUI preferences therefore survive process death and device restart without
 requiring storage permission. Support bundles use Android's document picker,
 so the user chooses where the ZIP is written.
 
@@ -141,10 +160,13 @@ control before adding `--release` for distribution builds.
 ## Data Path
 
 ```text
-USB bulk IN from each selected adapter
-  -> per-adapter openipc-rtl88xx RX descriptor parsing
-  -> first-valid-copy diversity selection when multiple radios are active
-  -> openipc-core 802.11 filtering, WFB crypto, FEC, route fanout
+USB: bulk IN from each selected adapter
+  -> openipc-rtl88xx RX descriptor parsing and optional diversity
+  -> openipc-core 802.11 filtering, WFB crypto, and FEC
+
+UDP: one already-recovered RTP packet per datagram
+
+Either source -> openipc-core route fanout
      -> video RTP depacketizing -> openipc-video H.264/H.265 decoder
      -> telemetry route -> MAVLink/MSP/CRSF decoder -> video OSD
      -> audio route -> Opus decoder -> audio device
@@ -235,6 +257,7 @@ codec. Native audio requests a 256-frame output buffer and keeps no more than
 ## Included Controls
 
 - Supported-adapter discovery and refresh
+- Native direct H.264/H.265 RTP reception from a configurable UDP listener
 - Packet-level receive diversity across multiple adapters of the same or mixed
   supported Realtek families
 - RF channel, width, offset, link ID, epoch, and USB transfer size
@@ -256,8 +279,8 @@ codec. Native audio requests a 256-frame output buffer and keeps no more than
 - Catppuccin Macchiato theme and persisted receiver settings
 - Sanitized ZIP support bundle with build, platform, pipeline, scan, and logs
 
-UDP forwarding and VPN/TUN are native-only. Their controls are unavailable in
-browser builds. Android requests `VpnService` consent and passes the resulting
+Direct UDP input, UDP forwarding, and VPN/TUN are native-only. Their controls
+are unavailable in browser builds. Android requests `VpnService` consent and passes the resulting
 TUN file descriptor into the same Rust bridge used by desktop targets.
 Automatic receiver recovery is native-only because starting a WebUSB device
 selection requires a browser user gesture. Native recovery begins only after a

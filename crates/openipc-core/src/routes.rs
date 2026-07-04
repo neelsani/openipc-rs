@@ -301,12 +301,13 @@ impl PayloadRouteManager {
         Ok(key)
     }
 
-    /// Add a fully synthetic route for no-hardware tests and development.
+    /// Add a direct recovered-payload route.
     ///
-    /// Mock routes skip 802.11, WFB decrypt, and FEC. Push recovered payload
-    /// bytes with [`Self::push_mock_payload`]; downstream route fanout and RTP
-    /// handling still run exactly like real routes.
-    pub fn add_mock_route(
+    /// Direct routes skip 802.11, WFB decryption, and FEC. Push payload bytes
+    /// with [`Self::push_direct_payload`]; downstream route fanout and RTP
+    /// handling still run exactly like radio-backed routes. This is suitable
+    /// for RTP arriving from UDP as well as no-hardware tests.
+    pub fn add_direct_route(
         &mut self,
         route_id: PayloadRouteId,
         channel_id: ChannelId,
@@ -321,6 +322,18 @@ impl PayloadRouteManager {
         self.runtimes
             .insert(key, PayloadChannelRuntime::mock(channel_id, route_id));
         key
+    }
+
+    /// Add a synthetic route for no-hardware tests and development.
+    ///
+    /// This is an alias for [`Self::add_direct_route`].
+    pub fn add_mock_route(
+        &mut self,
+        route_id: PayloadRouteId,
+        channel_id: ChannelId,
+        key_slot: u64,
+    ) -> PayloadRuntimeKey {
+        self.add_direct_route(route_id, channel_id, key_slot)
     }
 
     /// Return route ids attached to a runtime key.
@@ -424,8 +437,8 @@ impl PayloadRouteManager {
         Ok(map_pipeline_events(key, runtime.route_ids(), events))
     }
 
-    /// Push a fully synthetic recovered payload into one mock runtime.
-    pub fn push_mock_payload(
+    /// Push an already-recovered payload into one direct runtime.
+    pub fn push_direct_payload(
         &mut self,
         key: PayloadRuntimeKey,
         packet_seq: u64,
@@ -437,6 +450,18 @@ impl PayloadRouteManager {
             .ok_or(PayloadRouteError::UnknownRuntime(key))?;
         let events = runtime.pipeline.push_mock_payload(packet_seq, data);
         Ok(map_pipeline_events(key, runtime.route_ids(), events))
+    }
+
+    /// Push a synthetic recovered payload into one mock runtime.
+    ///
+    /// This is an alias for [`Self::push_direct_payload`].
+    pub fn push_mock_payload(
+        &mut self,
+        key: PayloadRuntimeKey,
+        packet_seq: u64,
+        data: &[u8],
+    ) -> Result<Vec<PayloadRouteEvent>, PayloadRouteError> {
+        self.push_direct_payload(key, packet_seq, data)
     }
 }
 

@@ -255,6 +255,30 @@ for packet in batch.raw_payloads {
 }
 ```
 
+When another transport already supplies recovered RTP, use a direct video
+route instead of constructing fake 802.11 or WFB packets:
+
+```rust
+let mut receiver = ReceiverRuntime::with_direct_video_route(
+    FrameLayout::WithFcs,
+    VIDEO_ROUTE,
+    ChannelId::default_video(),
+    0,
+);
+
+let batch = receiver.push_direct_payload(
+    receiver.video_runtime(),
+    datagram_sequence,
+    udp_rtp_datagram,
+    &ReceiverBatchOptions::default(),
+)?;
+```
+
+This bypasses channel filtering, WFB decryption, and FEC only. Route fanout,
+RTP payload taps, optional reordering, codec state, and H.264/H.265 access-unit
+assembly are shared with radio reception. `with_mock_video_route` and
+`push_mock_payload` remain compatible aliases intended for test fixtures.
+
 The lower-level `PayloadPipeline` still exists for tools that want to stop
 exactly at recovered WFB bytes:
 

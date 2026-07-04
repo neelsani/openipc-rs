@@ -3,7 +3,7 @@ use eframe::egui;
 use crate::{
     app::NebulusApp,
     model::{ReceiverState, RouteStats},
-    settings::{PayloadRouteSettings, RouteAction},
+    settings::{PayloadRouteSettings, ReceiverSource, RouteAction},
     telemetry::TelemetryProtocol,
 };
 const PORTS: &[(u8, &str)] = &[
@@ -44,9 +44,11 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
         ));
     });
     ui.label(
-        egui::RichText::new(
-            "Each enabled route receives its radio port under the current Link ID.",
-        )
+        egui::RichText::new(if app.settings.receiver_source == ReceiverSource::UdpRtp {
+            "Direct UDP input feeds the Video / mixed RTP port. Routes on other radio ports remain inactive."
+        } else {
+            "Each enabled route receives its radio port under the current Link ID."
+        })
         .small()
         .color(ui.visuals().weak_text_color()),
     );

@@ -21,13 +21,17 @@ The health view follows this order:
 7. Codec parameter sets complete.
 8. Encoded access units extracted.
 9. Platform decoder active.
+10. Optional audio and VPN routes healthy.
+
+With **UDP RTP** selected, the first five USB/WFB rows are replaced by **UDP
+listener initialized** and **UDP datagrams arriving**. RTP and every downstream
+row retain the same meaning.
 
 With receive diversity enabled, the same view includes a **Receive adapters**
 section. Check each radio's online state, USB errors, queue drops, RSSI/SNR,
 first-copy wins, and duplicates. Queue drops should remain zero. A secondary
 with few wins can still be useful if those wins occur during primary antenna
 shadowing.
-10. Optional audio and VPN routes healthy.
 
 A pending marker means that stage has not been observed in the current receiver
 session. It is not automatically an error: audio and VPN remain pending when
@@ -49,6 +53,11 @@ The rolling graphs intentionally focus on six operational signals:
 RSSI and SNR remain in the video OSD because they are useful while flying.
 Audio packet rate and queue depth live with route diagnostics rather than the
 main graph grid.
+
+Direct UDP input has no RSSI, WFB loss, or FEC state. In that mode the graph
+grid shows encoded bitrate, delivered FPS, decoded FPS, and local processing
+latency instead of empty radio graphs; radio-only OSD values display as
+unavailable.
 
 ## RTP Diagnostics
 
@@ -73,8 +82,11 @@ cannot recover packets that never arrived.
 | USB wait                        | Time until a bulk transfer completes; high idle values may simply mean no traffic. |
 | Realtek parse                   | Splitting the USB aggregate and interpreting RX descriptors.                       |
 | WFB/RTP                         | Filtering, session crypto, FEC, route fanout, and video depacketization.           |
+| UDP socket wait                 | Native wait for the next RTP datagram; replaces USB wait for direct UDP input.     |
+| RTP pipeline                    | Direct route fanout, optional reorder, and depacketization for UDP input.          |
 | Decoder submit                  | Preparing and handing an access unit to the platform decoder.                      |
 | USB completion to decode submit | Critical receive path before auxiliary route work.                                 |
+| UDP datagram to decode submit   | Equivalent direct-UDP critical path.                                               |
 | Hardware decode                 | Submit-to-output latency reported by `openipc-video`.                              |
 | Decode to GPU upload            | Latest-frame event wait plus platform texture upload/latch.                        |
 | Routes                          | Inspect/log/UDP/audio processing for recovered payload routes.                     |
@@ -107,12 +119,12 @@ process-wide Rust `log` subscriber. Records emitted by
 written to stderr/Logcat or the browser console and copied into the bounded Logs
 tab. The tab can filter by minimum severity and search both target and message.
 
-| Verbosity     | Captured levels                  | Intended use                                      |
-| ------------- | -------------------------------- | ------------------------------------------------- |
-| Low           | Warn, Error                      | Flight use when only actionable failures matter  |
-| Normal        | Info, Warn, Error                | Everyday startup and session state                |
-| High          | Debug and above                  | Adapter, WFB, FEC, RTP, and decoder investigation |
-| Very verbose  | Trace, Debug, Info, Warn, Error  | Register, USB transfer, and per-packet tracing    |
+| Verbosity    | Captured levels                 | Intended use                                      |
+| ------------ | ------------------------------- | ------------------------------------------------- |
+| Low          | Warn, Error                     | Flight use when only actionable failures matter   |
+| Normal       | Info, Warn, Error               | Everyday startup and session state                |
+| High         | Debug and above                 | Adapter, WFB, FEC, RTP, and decoder investigation |
+| Very verbose | Trace, Debug, Info, Warn, Error | Register, USB transfer, and per-packet tracing    |
 
 Packet-level Trace records from RTP, WFB, and USB targets are sampled one in
 128 before formatting. Counters and stage metrics still account for every

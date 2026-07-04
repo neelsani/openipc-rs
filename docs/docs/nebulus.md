@@ -29,10 +29,12 @@ flowchart LR
     USB2["Realtek USB adapter B"] --> RTL2["RX aggregate parser B"]
     RTL1 --> Diversity["first-valid-copy selector"]
     RTL2 --> Diversity
-    Diversity --> Core["openipc-core<br/>WFB, crypto, FEC, RTP"]
-    Core --> Video["openipc-video<br/>platform H.264/H.265 decoder"]
-    Core --> Routes["route fanout<br/>raw payloads by radio port"]
-    Core --> Record["keyframe-aligned<br/>MP4 recorder"]
+    Diversity --> Core["openipc-core<br/>WFB, crypto, FEC"]
+    UDP["native UDP RTP listener"] --> Fanout["direct payload route<br/>fanout and RTP"]
+    Core --> Fanout
+    Fanout --> Video["openipc-video<br/>platform H.264/H.265 decoder"]
+    Fanout --> Routes["route fanout<br/>raw payloads by radio port"]
+    Fanout --> Record["keyframe-aligned<br/>MP4 recorder"]
     Core --> Tun["native TUN<br/>RX 0x20 / TX 0xa0"]
     Routes --> Opus["ropus<br/>Opus to PCM"]
     Routes --> Telemetry["Nebulus telemetry<br/>MAVLink, MSP, CRSF"]
@@ -51,6 +53,13 @@ transfers in flight. The shared worker selects unique WFB packets, advances the 
 submits complete access units to the decoder, and sends compact state updates
 to egui. The UI thread never waits on USB or codec work.
 
+Native builds can alternatively run one blocking UDP worker. Each datagram is
+treated as one already-recovered RTP packet and enters `openipc-core` at the
+direct-payload boundary. From that point it uses the same RTP reorder,
+H.264/H.265 depacketizer, audio route, recorder, metrics, decoder, and latest
+frame presenter as USB video. This mode intentionally skips Realtek, 802.11,
+WFB crypto, and FEC.
+
 The browser follows the same stages and races one completion future per
 authorized adapter on the browser's local async executor.
 WebUSB and WebCodecs objects cannot cross Rust threads, so Nebulus polls them
@@ -59,13 +68,13 @@ the UI does not busy-loop while idle.
 
 ## Platform Boundaries
 
-| Target  | USB access                                 | Video decode                   | Audio output   |
-| ------- | ------------------------------------------ | ------------------------------ | -------------- |
-| macOS   | `nusb`                                     | VideoToolbox                   | CPAL/CoreAudio |
-| Linux   | `nusb`                                     | VA-API through `cros-codecs`   | CPAL/ALSA      |
-| Windows | `nusb`                                     | Media Foundation and D3D11     | CPAL/WASAPI    |
-| Android | `UsbManager`, then `nusb::Device::from_fd` | MediaCodec to SurfaceTexture   | CPAL/AAudio    |
-| Browser | `nusb-webusb` / WebUSB                     | WebCodecs                      | Web Audio      |
+| Target  | USB access                                 | UDP RTP input | Video decode                 | Audio output   |
+| ------- | ------------------------------------------ | ------------- | ---------------------------- | -------------- |
+| macOS   | `nusb`                                     | yes           | VideoToolbox                 | CPAL/CoreAudio |
+| Linux   | `nusb`                                     | yes           | VA-API through `cros-codecs` | CPAL/ALSA      |
+| Windows | `nusb`                                     | yes           | Media Foundation and D3D11   | CPAL/WASAPI    |
+| Android | `UsbManager`, then `nusb::Device::from_fd` | yes           | MediaCodec to SurfaceTexture | CPAL/AAudio    |
+| Browser | `nusb-webusb` / WebUSB                     | no            | WebCodecs                    | Web Audio      |
 
 Android's JNI bridge only handles discovery, permission, and opening the USB
 file descriptor. Radio control transfers and streaming transfers are still
@@ -121,11 +130,36 @@ with individual buttons that restore OpenIPC defaults.
 ### Profiles
 
 The Profiles section stores named receiver configurations. Each profile
-contains the primary and diversity adapters, RF channel/width/offset, Link ID, minimum epoch,
-WFB key, decoder preference, RTP reorder setting, adaptive-link settings,
-payload routes, telemetry policy and signing key, audio volume, transfer size,
-and VPN state. Theme, UI scale, log verbosity, sidebar visibility, and OSD
-layout remain global.
+contains the receiver source and UDP endpoint, primary and diversity adapters,
+RF channel/width/offset, Link ID, minimum epoch, WFB key, decoder preference,
+RTP reorder setting, adaptive-link settings, payload routes, telemetry policy
+and signing key, audio volume, transfer size, and VPN state. Theme, UI scale,
+log verbosity, and sidebar visibility remain application-wide. OSD layouts use
+their own named profiles and are selected independently, so one layout can be
+reused across several aircraft or radio configurations.
+
+### UDP RTP Input
+
+Native desktop and Android builds expose **UDP RTP** under
+**Settings → Receiver**. The default listener is `0.0.0.0:5600`; use a specific
+local interface address when the listener should not accept datagrams from
+every interface. The sender must put one complete RTP packet in each UDP
+datagram. The RTP payload can contain H.264 or H.265 video, and the configured
+mixed-audio payload type can carry Opus in the same RTP stream.
+
+The socket requests a 4 MiB operating-system receive buffer and uses a bounded
+read timeout so **Stop RX** and automatic recovery cannot hang behind a blocked
+read. The receiver logs the bound endpoint, actual socket-buffer size when the
+platform reports it, and the first sending peer. Packet and byte rates, RTP
+diagnostics, stage latency, decoding, OSD, audio, and MP4 recording remain
+available.
+
+This is a post-radio input. It does not accept USB aggregates, raw 802.11, or
+encrypted WFB packets. It therefore has no RF channel, WFB key, FEC, receive
+diversity, adaptive-link uplink, channel scanner, or VPN/TUN path. Direct
+datagrams enter the video/mixed-RTP port, so routes configured on telemetry,
+tunnel, or standalone-audio radio ports remain inactive. Browser builds cannot
+open arbitrary UDP sockets and keep WebUSB as their receiver source.
 
 ### Receive Diversity
 
@@ -146,9 +180,8 @@ should become the profile. **New** copies the values currently on screen and
 
 **Run preflight** opens a report without touching the adapter. It validates:
 
-- selected-device visibility,
-- WFB key structure,
-- channel, width, offset, and Link ID ranges,
+- selected-device visibility for USB or the bind address and port for UDP,
+- WFB key structure and radio values when USB is selected,
 - duplicate or invalid route definitions,
 - browser-incompatible UDP routes,
 - VPN/TUN availability,
@@ -224,8 +257,10 @@ no USB adapter and is omitted from release builds.
 
 ## Android
 
-Nebulus uses Android NativeActivity and declares USB-host support through
-Cargo APK metadata.
+Nebulus uses Android NativeActivity and declares USB-host support plus the
+normal `INTERNET` network permission through Cargo APK metadata. The latter is
+required for native UDP RTP sockets and does not trigger a runtime permission
+dialog.
 
 ```sh
 ./scripts/android-nebulus-dev.sh
@@ -258,10 +293,10 @@ application messages are available in standard application output and the
 in-app Logs tab.
 
 eframe storage is explicitly rooted in Android's internal app-data directory.
-Profiles, the key, route definitions, OSD positions, and GUI settings survive
-activity recreation and process restarts without requesting broad filesystem
-permission. Clearing application storage resets them. File imports and support
-bundle exports use Android's Storage Access Framework.
+Receiver and OSD profiles, the key, route definitions, and GUI settings
+survive activity recreation and process restarts without requesting broad
+filesystem permission. Clearing application storage resets them. File imports
+and support bundle exports use Android's Storage Access Framework.
 
 The default build uses Android's debug key. A distribution build additionally
 needs a release keystore configured through
@@ -317,13 +352,13 @@ The Routes tab configures application outputs without changing protocol
 parsing in `openipc-core`. A route has a stable numeric ID, a radio port under
 the current Link ID, and one action:
 
-| Action      | Behavior                                                               |
-| ----------- | ---------------------------------------------------------------------- |
-| Inspect     | Counts recovered payloads and bytes without parsing them.              |
-| Log         | Adds a rate-limited size, sequence, and hexadecimal preview to Logs.   |
-| Telemetry to OSD | Decodes common MAVLink, MSP, or CRSF values for the video OSD.   |
-| Audio       | Selects an RTP payload type, decodes Opus with `ropus`, and plays PCM. |
-| UDP forward | Sends the unchanged recovered payload to a native UDP destination.     |
+| Action           | Behavior                                                               |
+| ---------------- | ---------------------------------------------------------------------- |
+| Inspect          | Counts recovered payloads and bytes without parsing them.              |
+| Log              | Adds a rate-limited size, sequence, and hexadecimal preview to Logs.   |
+| Telemetry to OSD | Decodes common MAVLink, MSP, or CRSF values for the video OSD.         |
+| Audio            | Selects an RTP payload type, decodes Opus with `ropus`, and plays PCM. |
+| UDP forward      | Sends the unchanged recovered payload to a native UDP destination.     |
 
 UDP is unavailable in browsers and cannot be enabled there. The defaults are a
 Telemetry-to-OSD route on `0x10`, mixed RTP audio on video port `0x00` using
@@ -336,6 +371,12 @@ matching RTP payload is copied into the audio action. Route topology, ports,
 actions, and codec settings are locked while receiving and apply on the next
 start. Output volume remains adjustable during reception and updates every
 active audio route on the next packet on native, Android, and Web builds.
+
+With **UDP RTP** selected, the incoming datagram is already the recovered video
+payload. Nebulus feeds it into the direct video route, so video depacketization,
+the mixed-audio tap, inspection, logging, and UDP forwarding on port `0x00`
+still work. Routes on other radio ports cannot match because no WFB Channel ID
+or radio-port envelope arrives over this socket.
 
 ## Telemetry And Video OSD
 
@@ -352,11 +393,11 @@ then locks that route to the detected protocol for the receiver session. Byte
 fragments may span any number of WFB payloads. Invalid checksums and unrelated
 messages do not update the OSD or select a protocol.
 
-| Format | Accepted framing | Values currently normalized |
-| --- | --- | --- |
+| Format  | Accepted framing                                                                        | Values currently normalized                                                                                               |
+| ------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | MAVLink | v1 and v2 using the generated Common dialect; optional MAVLink 2 signature verification | arm state, ArduPilot/PX4 mode, battery, GPS, position, speed, climb, heading, throttle, attitude, RC quality, status text |
-| MSP | v1 and v2 | GPS, home distance, attitude, relative altitude, vario, battery, current, consumed capacity, RSSI-derived link quality |
-| CRSF | CRC8 DVB-S2 frames | GPS, vario, battery, consumed capacity, link quality, attitude, flight mode |
+| MSP     | v1 and v2                                                                               | GPS, home distance, attitude, relative altitude, vario, battery, current, consumed capacity, RSSI-derived link quality    |
+| CRSF    | CRC8 DVB-S2 frames                                                                      | GPS, vario, battery, consumed capacity, link quality, attitude, flight mode                                               |
 
 Nebulus converts coordinates to degrees, distance to meters, speed to meters
 per second, angles to degrees, voltage to volts, and current to amps before the
@@ -371,6 +412,13 @@ quality. Ground-station link values such as RSSI, post-FEC loss, bitrate, FPS,
 and local processing latency use the same renderer. Flight indicators hide
 when their value is unavailable or the telemetry stream has been stale for
 three seconds; that behavior can be changed per indicator in the OSD editor.
+
+OSD layouts are stored as named profiles, separate from receiver profiles.
+Changing an indicator, position, graph, scale, or opacity automatically updates
+the selected OSD profile. **Duplicate** copies the current layout before an
+experiment; **Delete** removes the selected layout while always retaining at
+least one. Switching profiles also starts a fresh editor undo history, so undo
+cannot apply coordinates from a different layout.
 
 OpenIPC normally sends telemetry on radio port `0x10`, which is the built-in
 route default. The route manager still exposes the complete `u8` radio-port
@@ -393,16 +441,16 @@ Source selection remains in **Routes** because the radio port and payload
 format are properties of each WFB route. Decoder policy and live status are in
 the **Telemetry** tab:
 
-| Setting | Behavior |
-| --- | --- |
-| Stale timeout | Hides telemetry-backed OSD values after 0.5–30 seconds without a decoded message. |
-| MAVLink system/component ID | Zero accepts all sources; a non-zero value filters otherwise valid frames. |
-| MAVLink signing: Disabled | Accepts signed and unsigned packets without verifying the 13-byte signature trailer. |
-| MAVLink signing: Verify signed | Verifies every signed packet and rejects invalid, stale, or replayed signatures while accepting unsigned packets. |
-| MAVLink signing: Require signed | Also rejects MAVLink 1 and unsigned MAVLink 2 packets. |
-| MSP version | Accepts both MSP versions or restricts decoding to v1 or v2. |
-| MSP direction | Accepts all frames, only flight-controller responses/errors, or only flight-controller-bound requests. |
-| CRSF device address | Accepts every valid address or filters to a selected device address such as flight controller `0xC8`. |
+| Setting                         | Behavior                                                                                                          |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Stale timeout                   | Hides telemetry-backed OSD values after 0.5–30 seconds without a decoded message.                                 |
+| MAVLink system/component ID     | Zero accepts all sources; a non-zero value filters otherwise valid frames.                                        |
+| MAVLink signing: Disabled       | Accepts signed and unsigned packets without verifying the 13-byte signature trailer.                              |
+| MAVLink signing: Verify signed  | Verifies every signed packet and rejects invalid, stale, or replayed signatures while accepting unsigned packets. |
+| MAVLink signing: Require signed | Also rejects MAVLink 1 and unsigned MAVLink 2 packets.                                                            |
+| MSP version                     | Accepts both MSP versions or restricts decoding to v1 or v2.                                                      |
+| MSP direction                   | Accepts all frames, only flight-controller responses/errors, or only flight-controller-bound requests.            |
+| CRSF device address             | Accepts every valid address or filters to a selected device address such as flight controller `0xC8`.             |
 
 MAVLink verification uses a separate 32-byte key. The picker accepts either 32
 binary bytes or 64 hexadecimal digits. This key is unrelated to `gs.key`:
@@ -453,7 +501,8 @@ remain bounded to avoid memory growth.
 **Export support bundle** writes a ZIP containing `report.json`, `logs.txt`,
 and a short README. The report captures the build tag/commit, platform and
 decoder capabilities, selected receiver configuration, sanitized profile and
-route summaries, hardware identity, packet/FEC/RTP/audio/VPN metrics, recovery
+route summaries, OSD profile summaries, hardware identity,
+packet/FEC/RTP/audio/VPN metrics, recovery
 state, telemetry protocol and field availability, and the latest channel-scan
 results. Exact GPS coordinates are omitted. Home-directory paths in logs are
 shortened. Key bytes are never included; the report records only key length and
@@ -470,6 +519,10 @@ configuration. Settings apply immediately and persist through eframe storage:
 - **Interface scale** adjusts the complete interface from 75% to 150% in 5%
   increments without changing decoded video resolution.
 - **Video OSD** controls the overlay shared by ground-station and flight data.
+- **OSD profile** selects an independently persisted named layout. Rename it in
+  place, use **Duplicate** to branch from the current design, or delete layouts
+  that are no longer needed. Layout edits auto-save; no separate save action is
+  required.
 - **Edit video OSD** opens a 16:9 preview. Each indicator can be dragged to a
   normalized video position and hidden independently. The default layout puts
   ground-station metrics along the lower edge and flight telemetry around the
@@ -490,7 +543,7 @@ configuration. Settings apply immediately and persist through eframe storage:
 
 These options are shared by desktop, Android, and browser builds. They do not
 change radio initialization, WFB processing, decoder selection, or recording
-output.
+output. Receiver-profile changes do not change the selected OSD profile.
 
 ## Recording
 

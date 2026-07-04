@@ -49,11 +49,31 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
 
 fn health(app: &NebulusApp, ui: &mut egui::Ui) {
     let counters = app.diagnostics.counters;
-    health_row(ui, "USB adapter initialized", app.receiver_info.is_some());
-    health_row(ui, "USB transfers arriving", app.metrics.usb_transfers > 0);
-    health_row(ui, "802.11 packets parsed", app.metrics.wifi_packets > 0);
-    health_row(ui, "Frames accepted", counters.accepted_packets > 0);
-    health_row(ui, "WFB payload recovered", counters.wfb_payloads > 0);
+    match app
+        .receiver_info
+        .as_ref()
+        .map(|receiver| receiver.transport)
+    {
+        Some(crate::runtime::ReceiverTransport::UdpRtp) => {
+            health_row(ui, "UDP listener initialized", true);
+            health_row(ui, "UDP datagrams arriving", app.metrics.usb_transfers > 0);
+        }
+        Some(crate::runtime::ReceiverTransport::Synthetic) => {
+            health_row(ui, "Synthetic RTP source initialized", true);
+            health_row(
+                ui,
+                "Synthetic packets arriving",
+                app.metrics.usb_transfers > 0,
+            );
+        }
+        Some(crate::runtime::ReceiverTransport::Usb) | None => {
+            health_row(ui, "USB adapter initialized", app.receiver_info.is_some());
+            health_row(ui, "USB transfers arriving", app.metrics.usb_transfers > 0);
+            health_row(ui, "802.11 packets parsed", app.metrics.wifi_packets > 0);
+            health_row(ui, "Frames accepted", counters.accepted_packets > 0);
+            health_row(ui, "WFB payload recovered", counters.wfb_payloads > 0);
+        }
+    }
     health_row(ui, "RTP packets arriving", app.metrics.rtp_packets > 0);
     health_row(ui, "Codec configuration ready", codec_config_ready(app));
     health_row(

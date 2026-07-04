@@ -6,6 +6,10 @@ The repo contains the shared Rust packet pipeline, Realtek USB WiFi driver,
 adaptive-link feedback, a WASM/WebUSB SDK, and Nebulus, the primary ground
 station for desktop, Android, and the browser.
 
+Native Nebulus builds can also listen for already-recovered H.264/H.265 RTP on
+UDP and send it through the same depacketizer, decoder, audio, metrics, and
+recording path used by USB reception.
+
 Nebulus supports packet-level receive diversity: several USB radios can feed
 one low-latency WFB/FEC/RTP pipeline while the first valid packet copy wins.
 

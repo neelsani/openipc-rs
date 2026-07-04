@@ -43,6 +43,9 @@ pub(crate) fn build(app: &NebulusApp) -> Result<SupportBundle, String> {
             json!({
                 "id": profile.id,
                 "name": profile.name,
+                "receiver_source": profile.receiver_source.label(),
+                "udp_bind_address": profile.udp_bind_address,
+                "udp_bind_port": profile.udp_bind_port,
                 "device_id": profile.device_id,
                 "diversity_device_ids": profile.diversity_device_ids,
                 "channel": profile.channel,
@@ -55,6 +58,26 @@ pub(crate) fn build(app: &NebulusApp) -> Result<SupportBundle, String> {
                 "key_bytes": profile.key_bytes.len(),
                 "telemetry_signing": profile.telemetry.mavlink_signing.label(),
                 "telemetry_signing_key_bytes": profile.telemetry.mavlink_signing_key.len(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let osd_profiles = app
+        .settings
+        .osd_profiles
+        .iter()
+        .map(|profile| {
+            json!({
+                "id": profile.id,
+                "name": profile.name,
+                "indicators": profile.hud.items.len(),
+                "visible_indicators": profile
+                    .hud
+                    .items
+                    .iter()
+                    .filter(|item| item.visible)
+                    .count(),
+                "scale_percent": profile.hud.scale_percent,
+                "background_opacity": profile.hud.background_opacity,
             })
         })
         .collect::<Vec<_>>();
@@ -78,6 +101,7 @@ pub(crate) fn build(app: &NebulusApp) -> Result<SupportBundle, String> {
         .iter()
         .map(|receiver| {
             json!({
+                "transport": format!("{:?}", receiver.transport),
                 "id": receiver.id,
                 "source_id": receiver.source_id,
                 "label": receiver.label,
@@ -195,6 +219,7 @@ pub(crate) fn build(app: &NebulusApp) -> Result<SupportBundle, String> {
         "application": {
             "state": format!("{:?}", app.state),
             "active_profile_id": app.settings.active_profile_id,
+            "active_osd_profile_id": app.settings.active_osd_profile_id,
             "auto_recover": app.settings.auto_recover,
             "recovery_attempt": app.recovery.attempt,
             "last_recovery_error": sanitize(&app.recovery.last_error),
@@ -214,6 +239,9 @@ pub(crate) fn build(app: &NebulusApp) -> Result<SupportBundle, String> {
         },
         "receivers": receivers,
         "configuration": {
+            "receiver_source": app.settings.receiver_source.label(),
+            "udp_bind_address": app.settings.udp_bind_address,
+            "udp_bind_port": app.settings.udp_bind_port,
             "device_id": app.settings.device_id,
             "diversity_device_ids": app.settings.diversity_device_ids,
             "channel": app.settings.channel,
@@ -233,8 +261,12 @@ pub(crate) fn build(app: &NebulusApp) -> Result<SupportBundle, String> {
             "telemetry": telemetry_configuration,
             "routes": routes,
             "profiles": profiles,
+            "osd_profiles": osd_profiles,
         },
         "metrics": {
+            "input_bytes": app.metrics.usb_bytes,
+            "input_events": app.metrics.usb_transfers,
+            "input_packets": app.metrics.wifi_packets,
             "usb_bytes": app.metrics.usb_bytes,
             "usb_transfers": app.metrics.usb_transfers,
             "wifi_packets": app.metrics.wifi_packets,

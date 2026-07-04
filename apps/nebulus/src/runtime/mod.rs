@@ -10,6 +10,8 @@ pub(crate) mod codec_mock;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
+#[cfg(not(target_arch = "wasm32"))]
+mod udp_input;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 mod web;
 

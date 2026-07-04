@@ -95,14 +95,27 @@ impl Runtime {
                     crate::low_latency::tune_receiver_thread();
                     queue(&events, RuntimeEvent::Connecting);
                     context.request_repaint();
-                    if let Err(error) = super::native::worker::run(
-                        request,
-                        &stop,
-                        &audio_volume,
-                        &recording,
-                        &events,
-                        &context,
-                    ) {
+                    let result = match request.receiver_source {
+                        crate::settings::ReceiverSource::Usb => super::native::worker::run(
+                            request,
+                            &stop,
+                            &audio_volume,
+                            &recording,
+                            &events,
+                            &context,
+                        ),
+                        crate::settings::ReceiverSource::UdpRtp => {
+                            super::native::worker::run_udp_rtp(
+                                request,
+                                &stop,
+                                &audio_volume,
+                                &recording,
+                                &events,
+                                &context,
+                            )
+                        }
+                    };
+                    if let Err(error) = result {
                         queue(&events, RuntimeEvent::Failed(error));
                         context.request_repaint();
                     }
@@ -308,6 +321,26 @@ mod worker {
             RuntimeEvent, ScanRequest, StartRequest, VpnMetrics,
         },
     };
+
+    mod udp;
+
+    pub(super) fn run_udp_rtp(
+        request: StartRequest,
+        stop: &AtomicBool,
+        audio_volume: &AtomicU8,
+        recording_control: &Mutex<super::RecordingControl>,
+        events: &super::EventQueue,
+        context: &eframe::egui::Context,
+    ) -> Result<(), String> {
+        udp::run(
+            request,
+            stop,
+            audio_volume,
+            recording_control,
+            events,
+            context,
+        )
+    }
 
     pub(super) fn scan(
         request: ScanRequest,

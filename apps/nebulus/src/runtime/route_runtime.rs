@@ -376,8 +376,8 @@ pub(super) fn configure_receiver(
     Ok(options)
 }
 
-#[cfg(debug_assertions)]
-pub(super) fn configure_mock_receiver(
+#[cfg(any(debug_assertions, not(target_arch = "wasm32")))]
+pub(super) fn configure_direct_receiver(
     receiver: &mut ReceiverRuntime,
     request: &StartRequest,
 ) -> ReceiverBatchOptions {
@@ -394,7 +394,7 @@ pub(super) fn configure_mock_receiver(
         }
 
         let route_id = PayloadRouteId::new(route.id);
-        receiver.add_mock_route(route_id, channel_id, 0);
+        receiver.add_direct_route(route_id, channel_id, 0);
         if route.action == RouteAction::Audio {
             options.rtp_payload_taps.push(RtpPayloadTap {
                 route_id,
@@ -405,6 +405,14 @@ pub(super) fn configure_mock_receiver(
         }
     }
     options
+}
+
+#[cfg(debug_assertions)]
+pub(super) fn configure_mock_receiver(
+    receiver: &mut ReceiverRuntime,
+    request: &StartRequest,
+) -> ReceiverBatchOptions {
+    configure_direct_receiver(receiver, request)
 }
 
 fn log_due(last: &mut Option<Instant>) -> bool {
@@ -450,6 +458,9 @@ mod tests {
         StartRequest {
             #[cfg(target_os = "android")]
             video_output: None,
+            receiver_source: settings.receiver_source,
+            udp_bind_address: settings.udp_bind_address.clone(),
+            udp_bind_port: settings.udp_bind_port,
             primary_device_id: None,
             device_ids: Vec::new(),
             channel: settings.channel,

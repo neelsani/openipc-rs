@@ -6,13 +6,24 @@ use web_time::Instant;
 
 use crate::{
     model::LogLevel,
-    settings::{CodecPreference, PayloadRouteSettings},
+    settings::{CodecPreference, PayloadRouteSettings, ReceiverSource},
     telemetry::{TelemetrySettings, TelemetryUpdate},
 };
+
+/// Physical or synthetic transport behind a connected receiver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReceiverTransport {
+    Usb,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    UdpRtp,
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    Synthetic,
+}
 
 /// Hardware and initialization details captured when a receiver connects.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReceiverInfo {
+    pub(crate) transport: ReceiverTransport,
     pub(crate) id: String,
     pub(crate) source_id: u16,
     pub(crate) label: String,
@@ -52,6 +63,7 @@ impl ReceiverInfo {
             Some(_) | None => "Not reported",
         };
         Self {
+            transport: ReceiverTransport::Usb,
             id,
             source_id,
             label,
@@ -72,9 +84,30 @@ impl ReceiverInfo {
         }
     }
 
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn udp_rtp(local_address: String) -> Self {
+        Self {
+            transport: ReceiverTransport::UdpRtp,
+            id: local_address.clone(),
+            source_id: 0,
+            label: format!("UDP RTP {local_address}"),
+            vendor_id: None,
+            product_id: None,
+            chip: "Direct RTP".to_owned(),
+            rf_paths: "Not applicable".to_owned(),
+            cut_version: None,
+            usb_speed: "UDP socket".to_owned(),
+            bulk_in_endpoint: None,
+            bulk_out_endpoint: None,
+            initialization: "Listening for RTP datagrams".to_owned(),
+            firmware_downloaded: None,
+        }
+    }
+
     #[cfg(debug_assertions)]
     pub(crate) fn codec_mock() -> Self {
         Self {
+            transport: ReceiverTransport::Synthetic,
             id: "codec-mock".to_owned(),
             source_id: 0,
             label: "Pre-recorded 1080p H.264 + Opus".to_owned(),
@@ -118,6 +151,11 @@ pub(crate) struct UsbDeviceInfo {
 pub(crate) struct StartRequest {
     #[cfg(target_os = "android")]
     pub(crate) video_output: Option<ndk::native_window::NativeWindow>,
+    pub(crate) receiver_source: ReceiverSource,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) udp_bind_address: String,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) udp_bind_port: u16,
     pub(crate) primary_device_id: Option<String>,
     pub(crate) device_ids: Vec<String>,
     pub(crate) channel: u8,

@@ -128,11 +128,16 @@ flowchart TD
     C --> D["WFB session/data decrypt"]
     D --> E["Reed-Solomon FEC recovery"]
     E --> P["ReceiverRuntime<br/>route fanout"]
+    U["Native UDP<br/>one recovered RTP packet/datagram"] --> P
     P --> F["RTP depacketizer<br/>video route"]
     F --> G["Annex-B H.264/H.265 frames"]
     G --> H["WebCodecs, file output, or UDP mirror"]
     P --> J["raw telemetry/data bytes<br/>non-video channels"]
 ```
+
+The UDP branch uses `with_direct_video_route` and `push_direct_payload`. It
+bypasses the radio-specific stages above `ReceiverRuntime`, while retaining
+route taps, RTP reordering, codec tracking, and H.264/H.265 depacketization.
 
 Adaptive-link feedback flows the other direction:
 

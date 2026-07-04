@@ -4,7 +4,7 @@ use openipc_core::channel::DEFAULT_LINK_ID;
 use crate::{
     app::NebulusApp,
     model::ReceiverState,
-    settings::{DEFAULT_CHANNEL, DEFAULT_CHANNEL_OFFSET, MAX_LINK_ID},
+    settings::{ReceiverSource, DEFAULT_CHANNEL, DEFAULT_CHANNEL_OFFSET, MAX_LINK_ID},
 };
 
 pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
@@ -16,99 +16,25 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
         section(ui, "Profiles", |ui| profile_editor(app, ui));
 
         section(ui, "Receiver", |ui| {
-            ui.label(
-                egui::RichText::new("Primary receiver and uplink")
-                    .small()
-                    .color(ui.visuals().weak_text_color()),
-            );
-            ui.horizontal(|ui| {
-                egui::ComboBox::from_id_salt("usb-device")
-                    .selected_text(selected_device_label(app))
-                    .width(230.0)
-                    .show_ui(ui, |ui| {
-                        for device in &app.devices {
-                            let changed = ui
-                                .selectable_value(
-                                    &mut app.settings.device_id,
-                                    Some(device.id.clone()),
-                                    format!("{} — {}", device.label, device.location),
-                                )
-                                .changed();
-                            if changed {
-                                app.settings
-                                    .diversity_device_ids
-                                    .retain(|id| Some(id) != app.settings.device_id.as_ref());
-                            }
-                        }
-                    });
-                if ui.button("Refresh").clicked() {
-                    app.refresh_devices();
-                }
-                #[cfg(target_arch = "wasm32")]
-                if ui.button("Add adapter").clicked() {
-                    app.authorize_webusb_adapter();
-                }
-            });
-            if app.devices.is_empty() {
-                ui.label(
-                    egui::RichText::new("No supported USB adapter found")
-                        .small()
-                        .color(ui.visuals().weak_text_color()),
-                );
-            }
-            if app.devices.len() > 1 {
-                ui.add_space(6.0);
-                ui.label(
-                    egui::RichText::new("Diversity receivers")
-                        .small()
-                        .color(ui.visuals().weak_text_color()),
-                );
-                for device in &app.devices {
-                    if app.settings.device_id.as_deref() == Some(device.id.as_str()) {
-                        continue;
-                    }
-                    let mut selected = app
-                        .settings
-                        .diversity_device_ids
-                        .iter()
-                        .any(|id| id == &device.id);
-                    if ui
-                        .checkbox(
-                            &mut selected,
-                            format!("{} — {}", device.label, device.location),
-                        )
-                        .changed()
-                    {
-                        if selected {
-                            app.settings.diversity_device_ids.push(device.id.clone());
-                        } else {
-                            app.settings
-                                .diversity_device_ids
-                                .retain(|id| id != &device.id);
-                        }
-                        app.settings.normalize();
-                    }
-                }
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{} adapters selected; first valid WFB packet wins",
-                        app.settings.selected_device_ids().len()
-                    ))
-                    .small()
-                    .color(ui.visuals().weak_text_color()),
-                );
+            receiver_source_selector(app, ui);
+            match app.settings.receiver_source {
+                ReceiverSource::Usb => usb_receiver_settings(app, ui),
+                ReceiverSource::UdpRtp => udp_receiver_settings(app, ui),
             }
             ui.horizontal(|ui| {
                 if ui.button("Run preflight").clicked() {
                     app.run_preflight();
                 }
-                if ui.button("Scan channels").clicked() {
+                if app.settings.receiver_source == ReceiverSource::Usb
+                    && ui.button("Scan channels").clicked()
+                {
                     app.show_channel_scanner = true;
                 }
             });
         });
 
-        section(ui, "Radio", |ui| {
+        if app.settings.receiver_source == ReceiverSource::Usb {
+            section(ui, "Radio", |ui| {
             egui::Grid::new("radio-settings")
                 .num_columns(3)
                 .spacing([18.0, 8.0])
@@ -159,15 +85,26 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
                     }
                     ui.end_row();
                 });
-        });
+            });
+        }
 
         section(ui, "Link", |ui| {
             ui.checkbox(&mut app.settings.rtp_reorder, "RTP reorder buffer");
-            ui.checkbox(&mut app.settings.adaptive_link, "Adaptive link feedback");
             ui.checkbox(
                 &mut app.settings.auto_recover,
                 "Automatically recover a dropped receiver",
             );
+            if app.settings.receiver_source == ReceiverSource::Usb {
+                ui.checkbox(&mut app.settings.adaptive_link, "Adaptive link feedback");
+            } else {
+                ui.label(
+                    egui::RichText::new(
+                        "UDP input uses the RTP sequence number for optional reordering; WFB adaptive feedback is not applicable.",
+                    )
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+                );
+            }
             if cfg!(target_arch = "wasm32") {
                 ui.label(
                     egui::RichText::new(
@@ -198,7 +135,7 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
                     }
                 });
             }
-            if app.settings.adaptive_link {
+            if app.settings.receiver_source == ReceiverSource::Usb && app.settings.adaptive_link {
                 ui.horizontal(|ui| {
                     ui.label("Uplink TX power");
                     ui.add(egui::Slider::new(&mut app.settings.tx_power, 0..=127));
@@ -206,7 +143,8 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
             }
         });
 
-        section(ui, "Receiver key", |ui| {
+        if app.settings.receiver_source == ReceiverSource::Usb {
+            section(ui, "Receiver key", |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Open file").clicked() {
                     app.open_key_file(ui.ctx());
@@ -232,7 +170,8 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
                         .color(ui.visuals().weak_text_color()),
                 );
             }
-        });
+            });
+        }
 
         section(ui, "Video", |ui| {
             ui.horizontal(|ui| {
@@ -261,27 +200,39 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
 
         section(ui, "Recording", |ui| recording_settings(app, ui));
 
-        section(ui, "Advanced", |ui| {
-            egui::Grid::new("advanced-settings")
-                .num_columns(2)
-                .show(ui, |ui| {
-                    ui.label("Minimum epoch");
-                    ui.add(egui::DragValue::new(&mut app.settings.minimum_epoch));
-                    ui.end_row();
-                    ui.label("USB transfer size");
-                    ui.add(
-                        egui::DragValue::new(&mut app.settings.transfer_size)
-                            .range(4_096..=1_048_576),
-                    );
-                    ui.end_row();
-                });
-        });
+        if app.settings.receiver_source == ReceiverSource::Usb {
+            section(ui, "Advanced", |ui| {
+                egui::Grid::new("advanced-settings")
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        ui.label("Minimum epoch");
+                        ui.add(egui::DragValue::new(&mut app.settings.minimum_epoch));
+                        ui.end_row();
+                        ui.label("USB transfer size");
+                        ui.add(
+                            egui::DragValue::new(&mut app.settings.transfer_size)
+                                .range(4_096..=1_048_576),
+                        );
+                        ui.end_row();
+                    });
+            });
+        }
     });
     let vpn_section = egui::CollapsingHeader::new("VPN / tunnel")
         .default_open(true)
         .show(ui, |ui| {
             ui.add_space(3.0);
-            super::vpn(app, ui);
+            if app.settings.receiver_source == ReceiverSource::Usb {
+                super::vpn(app, ui);
+            } else {
+                ui.label(
+                    egui::RichText::new(
+                        "VPN/TUN requires the bidirectional WFB radio transport and is unavailable for direct UDP RTP input.",
+                    )
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+                );
+            }
             ui.add_space(6.0);
         });
     if std::mem::take(&mut app.focus_vpn_settings) {
@@ -289,6 +240,159 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
             .header_response
             .scroll_to_me(Some(egui::Align::TOP));
     }
+}
+
+fn receiver_source_selector(app: &mut NebulusApp, ui: &mut egui::Ui) {
+    #[cfg(not(target_arch = "wasm32"))]
+    ui.horizontal(|ui| {
+        ui.label("Source");
+        ui.selectable_value(
+            &mut app.settings.receiver_source,
+            ReceiverSource::Usb,
+            ReceiverSource::Usb.label(),
+        );
+        ui.selectable_value(
+            &mut app.settings.receiver_source,
+            ReceiverSource::UdpRtp,
+            ReceiverSource::UdpRtp.label(),
+        );
+    });
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        app.settings.receiver_source = ReceiverSource::Usb;
+        ui.horizontal(|ui| {
+            ui.label("Source");
+            ui.strong("WebUSB");
+        });
+    }
+}
+
+fn usb_receiver_settings(app: &mut NebulusApp, ui: &mut egui::Ui) {
+    ui.label(
+        egui::RichText::new("Primary receiver and uplink")
+            .small()
+            .color(ui.visuals().weak_text_color()),
+    );
+    ui.horizontal(|ui| {
+        egui::ComboBox::from_id_salt("usb-device")
+            .selected_text(selected_device_label(app))
+            .width(230.0)
+            .show_ui(ui, |ui| {
+                for device in &app.devices {
+                    let changed = ui
+                        .selectable_value(
+                            &mut app.settings.device_id,
+                            Some(device.id.clone()),
+                            format!("{} — {}", device.label, device.location),
+                        )
+                        .changed();
+                    if changed {
+                        app.settings
+                            .diversity_device_ids
+                            .retain(|id| Some(id) != app.settings.device_id.as_ref());
+                    }
+                }
+            });
+        if ui.button("Refresh").clicked() {
+            app.refresh_devices();
+        }
+        #[cfg(target_arch = "wasm32")]
+        if ui.button("Add adapter").clicked() {
+            app.authorize_webusb_adapter();
+        }
+    });
+    if app.devices.is_empty() {
+        ui.label(
+            egui::RichText::new("No supported USB adapter found")
+                .small()
+                .color(ui.visuals().weak_text_color()),
+        );
+    }
+    if app.devices.len() > 1 {
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new("Diversity receivers")
+                .small()
+                .color(ui.visuals().weak_text_color()),
+        );
+        for device in &app.devices {
+            if app.settings.device_id.as_deref() == Some(device.id.as_str()) {
+                continue;
+            }
+            let mut selected = app
+                .settings
+                .diversity_device_ids
+                .iter()
+                .any(|id| id == &device.id);
+            if ui
+                .checkbox(
+                    &mut selected,
+                    format!("{} — {}", device.label, device.location),
+                )
+                .changed()
+            {
+                if selected {
+                    app.settings.diversity_device_ids.push(device.id.clone());
+                } else {
+                    app.settings
+                        .diversity_device_ids
+                        .retain(|id| id != &device.id);
+                }
+                app.settings.normalize();
+            }
+        }
+        ui.label(
+            egui::RichText::new(format!(
+                "{} adapters selected; first valid WFB packet wins",
+                app.settings.selected_device_ids().len()
+            ))
+            .small()
+            .color(ui.visuals().weak_text_color()),
+        );
+    }
+}
+
+fn udp_receiver_settings(_app: &mut NebulusApp, ui: &mut egui::Ui) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        egui::Grid::new("udp-rtp-listener")
+            .num_columns(3)
+            .spacing([12.0, 7.0])
+            .show(ui, |ui| {
+                ui.label("Bind address");
+                ui.add(
+                    egui::TextEdit::singleline(&mut _app.settings.udp_bind_address)
+                        .desired_width(150.0)
+                        .char_limit(64),
+                );
+                if ui.small_button("Default").clicked() {
+                    _app.settings.udp_bind_address = "0.0.0.0".to_owned();
+                }
+                ui.end_row();
+
+                ui.label("Port");
+                ui.add(egui::DragValue::new(&mut _app.settings.udp_bind_port).range(1..=65_535));
+                if ui.small_button("Default").clicked() {
+                    _app.settings.udp_bind_port = crate::settings::DEFAULT_UDP_RTP_PORT;
+                }
+                ui.end_row();
+            });
+        ui.label(
+            egui::RichText::new(
+                "Listens for one RTP packet per UDP datagram. H.264/H.265, mixed Opus audio, recording, and payload routes use the normal receive pipeline.",
+            )
+            .small()
+            .color(ui.visuals().weak_text_color()),
+        );
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    ui.label(
+        egui::RichText::new("Direct UDP sockets are unavailable in browsers")
+            .small()
+            .color(ui.visuals().warn_fg_color),
+    );
 }
 
 fn recording_settings(_app: &mut NebulusApp, ui: &mut egui::Ui) {
@@ -398,7 +502,7 @@ fn profile_editor(app: &mut NebulusApp, ui: &mut egui::Ui) {
     });
     ui.label(
         egui::RichText::new(
-            "Profiles include adapters, radio, link, keys, routes, telemetry, audio, VPN, and decoder settings.",
+            "Profiles include the receiver source and endpoint, adapters, radio, link, keys, routes, telemetry, audio, VPN, and decoder settings.",
         )
         .small()
         .color(ui.visuals().weak_text_color()),
@@ -408,8 +512,13 @@ fn profile_editor(app: &mut NebulusApp, ui: &mut egui::Ui) {
 fn connected_receiver(app: &NebulusApp, ui: &mut egui::Ui) {
     section(ui, "Connected receivers", |ui| {
         for receiver in &app.receiver_infos {
+            let source_label = if receiver.transport == crate::runtime::ReceiverTransport::Usb {
+                "Radio"
+            } else {
+                "Input"
+            };
             ui.strong(format!(
-                "Radio {} · {}",
+                "{source_label} {} · {}",
                 receiver.source_id + 1,
                 receiver.label
             ));
@@ -419,49 +528,70 @@ fn connected_receiver(app: &NebulusApp, ui: &mut egui::Ui) {
                 .spacing([18.0, 7.0])
                 .show(ui, |ui| {
                     receiver_row(ui, "Adapter", &receiver.label);
-                    receiver_row(ui, "Device", &receiver.id);
-                    receiver_row(
-                        ui,
-                        "USB ID",
-                        &match (receiver.vendor_id, receiver.product_id) {
-                            (Some(vendor), Some(product)) => format!("{vendor:04x}:{product:04x}"),
-                            _ => "Not applicable".to_owned(),
-                        },
-                    );
-                    receiver_row(ui, "Chipset", &receiver.chip);
-                    receiver_row(ui, "RF paths", &receiver.rf_paths);
-                    receiver_row(
-                        ui,
-                        "Cut revision",
-                        &receiver
-                            .cut_version
-                            .map_or_else(|| "Not reported".to_owned(), |cut| cut.to_string()),
-                    );
-                    receiver_row(ui, "USB link", &receiver.usb_speed);
-                    receiver_row(
-                        ui,
-                        "Bulk endpoints",
-                        &match (receiver.bulk_in_endpoint, receiver.bulk_out_endpoint) {
-                            (Some(input), Some(output)) => {
-                                format!("IN 0x{input:02x} / OUT 0x{output:02x}")
-                            }
-                            _ => "Not applicable".to_owned(),
-                        },
-                    );
+                    match receiver.transport {
+                        crate::runtime::ReceiverTransport::Usb => {
+                            receiver_row(ui, "Device", &receiver.id);
+                            receiver_row(
+                                ui,
+                                "USB ID",
+                                &match (receiver.vendor_id, receiver.product_id) {
+                                    (Some(vendor), Some(product)) => {
+                                        format!("{vendor:04x}:{product:04x}")
+                                    }
+                                    _ => "Not applicable".to_owned(),
+                                },
+                            );
+                            receiver_row(ui, "Chipset", &receiver.chip);
+                            receiver_row(ui, "RF paths", &receiver.rf_paths);
+                            receiver_row(
+                                ui,
+                                "Cut revision",
+                                &receiver.cut_version.map_or_else(
+                                    || "Not reported".to_owned(),
+                                    |cut| cut.to_string(),
+                                ),
+                            );
+                            receiver_row(ui, "USB link", &receiver.usb_speed);
+                            receiver_row(
+                                ui,
+                                "Bulk endpoints",
+                                &match (receiver.bulk_in_endpoint, receiver.bulk_out_endpoint) {
+                                    (Some(input), Some(output)) => {
+                                        format!("IN 0x{input:02x} / OUT 0x{output:02x}")
+                                    }
+                                    _ => "Not applicable".to_owned(),
+                                },
+                            );
+                        }
+                        crate::runtime::ReceiverTransport::UdpRtp => {
+                            receiver_row(ui, "Listen address", &receiver.id);
+                            receiver_row(ui, "Transport", "UDP / RTP");
+                            receiver_row(ui, "Processing", "Direct RTP depacketization");
+                        }
+                        crate::runtime::ReceiverTransport::Synthetic => {
+                            receiver_row(ui, "Source", &receiver.id);
+                            receiver_row(ui, "Transport", "Synthetic RTP");
+                            receiver_row(ui, "Processing", &receiver.chip);
+                        }
+                    }
                     receiver_row(ui, "Initialization", &receiver.initialization);
-                    receiver_row(
-                        ui,
-                        "Firmware downloaded",
-                        match receiver.firmware_downloaded {
-                            Some(true) => "Yes",
-                            Some(false) => "No",
-                            None => "Not applicable",
-                        },
-                    );
+                    if receiver.transport == crate::runtime::ReceiverTransport::Usb {
+                        receiver_row(
+                            ui,
+                            "Firmware downloaded",
+                            match receiver.firmware_downloaded {
+                                Some(true) => "Yes",
+                                Some(false) => "No",
+                                None => "Not applicable",
+                            },
+                        );
+                    }
                     receiver_row(
                         ui,
                         "Role",
-                        if receiver.source_id == 0 {
+                        if receiver.transport != crate::runtime::ReceiverTransport::Usb {
+                            "Video/audio receive"
+                        } else if receiver.source_id == 0 {
                             "Primary RX and uplink"
                         } else {
                             "Diversity RX"
@@ -470,31 +600,33 @@ fn connected_receiver(app: &NebulusApp, ui: &mut egui::Ui) {
                 });
             ui.add_space(8.0);
         }
-        egui::Grid::new("connected-radio-config")
-            .num_columns(2)
-            .striped(true)
-            .spacing([18.0, 7.0])
-            .show(ui, |ui| {
-                receiver_row(
-                    ui,
-                    "RF configuration",
-                    &format!(
-                        "channel {} / {} MHz / offset {}",
-                        app.settings.channel,
-                        app.settings.channel_width_mhz,
-                        app.settings.channel_offset
-                    ),
-                );
-                receiver_row(
-                    ui,
-                    "Video channel",
-                    &format!(
-                        "Link 0x{:06x} / port 0x{:02x}",
-                        app.settings.link_id,
-                        openipc_core::RadioPort::Video.as_u8()
-                    ),
-                );
-            });
+        if app.settings.receiver_source == ReceiverSource::Usb {
+            egui::Grid::new("connected-radio-config")
+                .num_columns(2)
+                .striped(true)
+                .spacing([18.0, 7.0])
+                .show(ui, |ui| {
+                    receiver_row(
+                        ui,
+                        "RF configuration",
+                        &format!(
+                            "channel {} / {} MHz / offset {}",
+                            app.settings.channel,
+                            app.settings.channel_width_mhz,
+                            app.settings.channel_offset
+                        ),
+                    );
+                    receiver_row(
+                        ui,
+                        "Video channel",
+                        &format!(
+                            "Link 0x{:06x} / port 0x{:02x}",
+                            app.settings.link_id,
+                            openipc_core::RadioPort::Video.as_u8()
+                        ),
+                    );
+                });
+        }
     });
 }
 

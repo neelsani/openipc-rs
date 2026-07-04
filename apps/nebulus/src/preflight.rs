@@ -1,6 +1,6 @@
 use crate::{
     app::NebulusApp,
-    settings::{RouteAction, MAX_LINK_ID},
+    settings::{ReceiverSource, RouteAction, MAX_LINK_ID},
 };
 
 /// Result severity for one preflight check.
@@ -34,35 +34,58 @@ impl PreflightReport {
             .filter(|id| !app.devices.iter().any(|device| &device.id == *id))
             .cloned()
             .collect::<Vec<_>>();
-        checks.push(if selected.is_empty() && cfg!(target_arch = "wasm32") {
-            warning(
+        checks.push(match app.settings.receiver_source {
+            ReceiverSource::Usb if selected.is_empty() && cfg!(target_arch = "wasm32") => warning(
                 "Receiver",
                 "The browser will open its WebUSB device picker when RX starts".to_owned(),
-            )
-        } else if selected.is_empty() && app.devices.is_empty() {
-            fail(
+            ),
+            ReceiverSource::Usb if selected.is_empty() && app.devices.is_empty() => fail(
                 "Receiver",
                 "No supported USB adapter is selected or visible".to_owned(),
-            )
-        } else if selected.is_empty() {
-            fail("Receiver", "Select a USB adapter".to_owned())
-        } else if missing.is_empty() {
-            pass(
+            ),
+            ReceiverSource::Usb if selected.is_empty() => {
+                fail("Receiver", "Select a USB adapter".to_owned())
+            }
+            ReceiverSource::Usb if missing.is_empty() => pass(
                 "Receiver",
                 format!("All {} selected adapter(s) are available", selected.len()),
-            )
-        } else {
-            warning(
+            ),
+            ReceiverSource::Usb => warning(
                 "Receiver",
                 format!(
                     "{} selected adapter(s) are unavailable: {}",
                     missing.len(),
                     missing.join(", ")
                 ),
-            )
+            ),
+            ReceiverSource::UdpRtp if cfg!(target_arch = "wasm32") => fail(
+                "Receiver",
+                "Browsers cannot bind arbitrary UDP sockets; use the native app or WebUSB"
+                    .to_owned(),
+            ),
+            ReceiverSource::UdpRtp => {
+                match app
+                    .settings
+                    .udp_bind_address
+                    .trim()
+                    .parse::<std::net::IpAddr>()
+                {
+                    Ok(address) if app.settings.udp_bind_port != 0 => pass(
+                        "Receiver",
+                        format!(
+                            "UDP RTP listener will bind {address}:{}",
+                            app.settings.udp_bind_port
+                        ),
+                    ),
+                    _ => fail(
+                        "Receiver",
+                        "Enter a local IP address and a UDP port from 1 to 65535".to_owned(),
+                    ),
+                }
+            }
         });
 
-        if selected.len() > 1 {
+        if app.settings.receiver_source == ReceiverSource::Usb && selected.len() > 1 {
             checks.push(pass(
                 "Receive diversity",
                 format!(
@@ -72,15 +95,20 @@ impl PreflightReport {
             ));
         }
 
-        checks.push(
+        checks.push(if app.settings.receiver_source == ReceiverSource::UdpRtp {
+            pass(
+                "WFB processing",
+                "Direct RTP input bypasses 802.11, WFB decryption, and FEC".to_owned(),
+            )
+        } else {
             match openipc_core::WfbKeypair::from_bytes(&app.settings.key_bytes) {
                 Ok(_) => pass(
                     "Ground-station key",
                     format!("Valid {}-byte WFB key", app.settings.key_bytes.len()),
                 ),
                 Err(error) => fail("Ground-station key", error.to_string()),
-            },
-        );
+            }
+        });
 
         checks.push(
             if app.settings.telemetry.mavlink_signing.requires_key()
@@ -103,29 +131,32 @@ impl PreflightReport {
             },
         );
 
-        checks.push(
-            if (1..=177).contains(&app.settings.channel)
-                && [5, 10, 20, 40, 80].contains(&app.settings.channel_width_mhz)
-                && app.settings.channel_offset <= 4
-                && app.settings.link_id <= MAX_LINK_ID
-            {
-                pass(
-                    "Radio configuration",
-                    format!(
-                        "Channel {} / {} MHz / offset {} / link 0x{:06x}",
-                        app.settings.channel,
-                        app.settings.channel_width_mhz,
-                        app.settings.channel_offset,
-                        app.settings.link_id
-                    ),
-                )
-            } else {
-                fail(
-                    "Radio configuration",
-                    "Channel, width, offset, or link ID is outside the supported range".to_owned(),
-                )
-            },
-        );
+        checks.push(if app.settings.receiver_source == ReceiverSource::UdpRtp {
+            pass(
+                "Radio configuration",
+                "Not used by direct UDP RTP input".to_owned(),
+            )
+        } else if (1..=177).contains(&app.settings.channel)
+            && [5, 10, 20, 40, 80].contains(&app.settings.channel_width_mhz)
+            && app.settings.channel_offset <= 4
+            && app.settings.link_id <= MAX_LINK_ID
+        {
+            pass(
+                "Radio configuration",
+                format!(
+                    "Channel {} / {} MHz / offset {} / link 0x{:06x}",
+                    app.settings.channel,
+                    app.settings.channel_width_mhz,
+                    app.settings.channel_offset,
+                    app.settings.link_id
+                ),
+            )
+        } else {
+            fail(
+                "Radio configuration",
+                "Channel, width, offset, or link ID is outside the supported range".to_owned(),
+            )
+        });
 
         let enabled_routes = app
             .settings
@@ -166,7 +197,27 @@ impl PreflightReport {
             fail("Payload routes", route_errors.join("; "))
         });
 
-        checks.push(if app.settings.vpn_enabled && !app.vpn_available() {
+        if app.settings.receiver_source == ReceiverSource::UdpRtp {
+            let inactive_routes = enabled_routes
+                .iter()
+                .filter(|route| route.radio_port != openipc_core::RadioPort::Video.as_u8())
+                .count();
+            if inactive_routes > 0 {
+                checks.push(warning(
+                    "Direct RTP routes",
+                    format!(
+                        "{inactive_routes} enabled route(s) use non-video radio ports and will not receive direct RTP datagrams"
+                    ),
+                ));
+            }
+        }
+
+        checks.push(if app.settings.receiver_source == ReceiverSource::UdpRtp {
+            pass(
+                "VPN/TUN",
+                "Not available without the WFB radio transport".to_owned(),
+            )
+        } else if app.settings.vpn_enabled && !app.vpn_available() {
             fail(
                 "VPN/TUN",
                 "VPN is enabled but this target has no available TUN backend".to_owned(),
@@ -180,7 +231,12 @@ impl PreflightReport {
             pass("VPN/TUN", "Disabled".to_owned())
         });
 
-        checks.push(if app.settings.adaptive_link {
+        checks.push(if app.settings.receiver_source == ReceiverSource::UdpRtp {
+            pass(
+                "Adaptive link",
+                "Not available without a radio uplink".to_owned(),
+            )
+        } else if app.settings.adaptive_link {
             pass(
                 "Adaptive link",
                 format!(

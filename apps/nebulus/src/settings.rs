@@ -11,7 +11,27 @@ pub(crate) const DEFAULT_KEY_BYTES: &[u8; 64] = &[
 ];
 pub(crate) const DEFAULT_CHANNEL: u8 = 161;
 pub(crate) const DEFAULT_CHANNEL_OFFSET: u8 = 0;
+pub(crate) const DEFAULT_UDP_RTP_PORT: u16 = 5_600;
 pub(crate) const MAX_LINK_ID: u32 = 0x00ff_ffff;
+
+/// Transport that supplies the encoded video payload stream.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum ReceiverSource {
+    /// Receive encrypted WFB frames through a supported Realtek USB adapter.
+    #[default]
+    Usb,
+    /// Receive already-recovered RTP packets from a native UDP socket.
+    UdpRtp,
+}
+
+impl ReceiverSource {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Usb => "Realtek USB",
+            Self::UdpRtp => "UDP RTP",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum CodecPreference {
@@ -437,6 +457,35 @@ impl Default for HudSettings {
     }
 }
 
+/// A named video OSD layout that can be reused across receiver profiles.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct OsdProfile {
+    pub(crate) id: u64,
+    pub(crate) name: String,
+    pub(crate) hud: HudSettings,
+}
+
+impl OsdProfile {
+    pub(crate) fn capture(id: u64, name: String, hud: &HudSettings) -> Self {
+        Self {
+            id,
+            name,
+            hud: hud.clone(),
+        }
+    }
+}
+
+impl Default for OsdProfile {
+    fn default() -> Self {
+        Self {
+            id: 1,
+            name: "Default OSD".to_owned(),
+            hud: HudSettings::default(),
+        }
+    }
+}
+
 fn default_hud_item(metric: HudMetric, index: usize) -> HudItemSettings {
     let (visible, x, y) = match metric {
         HudMetric::LinkHealth => (false, 0.50, 0.10),
@@ -477,6 +526,9 @@ fn default_hud_item(metric: HudMetric, index: usize) -> HudItemSettings {
 pub(crate) struct ReceiverProfile {
     pub(crate) id: u64,
     pub(crate) name: String,
+    pub(crate) receiver_source: ReceiverSource,
+    pub(crate) udp_bind_address: String,
+    pub(crate) udp_bind_port: u16,
     pub(crate) device_id: Option<String>,
     pub(crate) diversity_device_ids: Vec<String>,
     pub(crate) channel: u8,
@@ -501,6 +553,9 @@ impl ReceiverProfile {
         Self {
             id,
             name,
+            receiver_source: settings.receiver_source,
+            udp_bind_address: settings.udp_bind_address.clone(),
+            udp_bind_port: settings.udp_bind_port,
             device_id: settings.device_id.clone(),
             diversity_device_ids: settings.diversity_device_ids.clone(),
             channel: settings.channel,
@@ -522,6 +577,9 @@ impl ReceiverProfile {
     }
 
     pub(crate) fn apply(&self, settings: &mut Settings) {
+        settings.receiver_source = self.receiver_source;
+        settings.udp_bind_address.clone_from(&self.udp_bind_address);
+        settings.udp_bind_port = self.udp_bind_port;
         settings.device_id.clone_from(&self.device_id);
         settings
             .diversity_device_ids
@@ -550,6 +608,9 @@ impl Default for ReceiverProfile {
         Self {
             id: 1,
             name: "Default FPV".to_owned(),
+            receiver_source: ReceiverSource::Usb,
+            udp_bind_address: "0.0.0.0".to_owned(),
+            udp_bind_port: DEFAULT_UDP_RTP_PORT,
             device_id: None,
             diversity_device_ids: Vec::new(),
             channel: DEFAULT_CHANNEL,
@@ -635,6 +696,9 @@ fn normalize_payload_routes(routes: &mut [PayloadRouteSettings]) {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct Settings {
+    pub(crate) receiver_source: ReceiverSource,
+    pub(crate) udp_bind_address: String,
+    pub(crate) udp_bind_port: u16,
     pub(crate) device_id: Option<String>,
     /// Additional receive adapters combined with the primary adapter.
     pub(crate) diversity_device_ids: Vec<String>,
@@ -666,6 +730,10 @@ pub(crate) struct Settings {
     pub(crate) active_profile_id: Option<u64>,
     pub(crate) auto_recover: bool,
     pub(crate) hud: HudSettings,
+    #[serde(default)]
+    pub(crate) osd_profiles: Vec<OsdProfile>,
+    #[serde(default)]
+    pub(crate) active_osd_profile_id: Option<u64>,
 }
 
 impl Settings {
@@ -680,6 +748,48 @@ impl Settings {
             .max()
             .unwrap_or(0)
             .saturating_add(1)
+    }
+
+    pub(crate) fn next_osd_profile_id(&self) -> u64 {
+        self.osd_profiles
+            .iter()
+            .map(|profile| profile.id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+    }
+
+    /// Writes the live OSD editor state back to the selected named layout.
+    pub(crate) fn sync_active_osd_profile(&mut self) {
+        let Some(id) = self.active_osd_profile_id else {
+            return;
+        };
+        if let Some(profile) = self
+            .osd_profiles
+            .iter_mut()
+            .find(|profile| profile.id == id)
+        {
+            profile.hud.clone_from(&self.hud);
+        }
+    }
+
+    /// Selects a named OSD layout after preserving edits to the current one.
+    pub(crate) fn apply_osd_profile(&mut self, id: u64) -> bool {
+        if self.active_osd_profile_id == Some(id) {
+            return self.osd_profiles.iter().any(|profile| profile.id == id);
+        }
+        self.sync_active_osd_profile();
+        let Some(profile) = self
+            .osd_profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .cloned()
+        else {
+            return false;
+        };
+        self.hud = profile.hud;
+        self.active_osd_profile_id = Some(id);
+        true
     }
 
     pub(crate) fn selected_device_ids(&self) -> Vec<String> {
@@ -697,6 +807,21 @@ impl Settings {
 
     pub(crate) fn normalize(&mut self) {
         self.hud.normalize();
+        for profile in &mut self.osd_profiles {
+            profile.hud.normalize();
+        }
+        normalize_osd_profiles(&mut self.osd_profiles);
+        if self.osd_profiles.is_empty() {
+            self.osd_profiles
+                .push(OsdProfile::capture(1, "Default OSD".to_owned(), &self.hud));
+        }
+        if self
+            .active_osd_profile_id
+            .is_none_or(|id| !self.osd_profiles.iter().any(|profile| profile.id == id))
+        {
+            self.active_osd_profile_id = self.osd_profiles.first().map(|profile| profile.id);
+        }
+        self.sync_active_osd_profile();
         self.telemetry.normalize();
         normalize_payload_routes(&mut self.payload_routes);
         for profile in &mut self.profiles {
@@ -729,6 +854,9 @@ impl Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            receiver_source: ReceiverSource::Usb,
+            udp_bind_address: "0.0.0.0".to_owned(),
+            udp_bind_port: DEFAULT_UDP_RTP_PORT,
             device_id: None,
             diversity_device_ids: Vec::new(),
             channel: DEFAULT_CHANNEL,
@@ -756,6 +884,36 @@ impl Default for Settings {
             active_profile_id: Some(1),
             auto_recover: true,
             hud: HudSettings::default(),
+            osd_profiles: vec![OsdProfile::default()],
+            active_osd_profile_id: Some(1),
+        }
+    }
+}
+
+fn normalize_osd_profiles(profiles: &mut [OsdProfile]) {
+    let mut reserved_ids = profiles
+        .iter()
+        .map(|profile| profile.id)
+        .filter(|id| *id != 0)
+        .collect::<Vec<_>>();
+    reserved_ids.sort_unstable();
+    reserved_ids.dedup();
+    let mut seen_ids = Vec::with_capacity(profiles.len());
+    let mut next_id = 1_u64;
+    for profile in profiles {
+        if profile.id == 0 || seen_ids.contains(&profile.id) {
+            while reserved_ids.contains(&next_id) {
+                next_id += 1;
+            }
+            profile.id = next_id;
+            reserved_ids.push(next_id);
+            next_id += 1;
+        }
+        seen_ids.push(profile.id);
+        if profile.name.trim().is_empty() {
+            profile.name = format!("OSD {}", profile.id);
+        } else if profile.name.chars().count() > 48 {
+            profile.name = profile.name.chars().take(48).collect();
         }
     }
 }
@@ -767,12 +925,16 @@ mod tests {
     use crate::telemetry::MavlinkSigningPolicy;
 
     use super::{
-        GuiTheme, HudMetric, PayloadRouteSettings, ReceiverProfile, RouteAction, Settings,
+        GuiTheme, HudMetric, OsdProfile, PayloadRouteSettings, ReceiverProfile, ReceiverSource,
+        RouteAction, Settings, DEFAULT_UDP_RTP_PORT,
     };
 
     #[test]
     fn profile_restores_receiver_fields_without_replacing_gui_preferences() {
         let mut settings = Settings {
+            receiver_source: ReceiverSource::UdpRtp,
+            udp_bind_address: "127.0.0.1".to_owned(),
+            udp_bind_port: 5_601,
             channel: 149,
             link_id: 0x12_34_56,
             device_id: Some("0bda:8812@bus/1".to_owned()),
@@ -783,9 +945,14 @@ mod tests {
         };
         settings.telemetry.mavlink_signing = MavlinkSigningPolicy::RequireSigned;
         settings.telemetry.mavlink_signing_key = vec![7; 32];
+        settings.hud.scale_percent = 125;
+        settings.active_osd_profile_id = Some(1);
         let profile = ReceiverProfile::capture(42, "Race quad".to_owned(), &settings);
         settings.channel = 36;
         settings.link_id = 1;
+        settings.receiver_source = ReceiverSource::Usb;
+        settings.udp_bind_address = "0.0.0.0".to_owned();
+        settings.udp_bind_port = DEFAULT_UDP_RTP_PORT;
         settings.gui_theme = GuiTheme::Mocha;
         settings.recording_directory = "current-recording-folder".to_owned();
         settings.diversity_device_ids.clear();
@@ -796,8 +963,13 @@ mod tests {
 
         assert_eq!(settings.channel, 149);
         assert_eq!(settings.link_id, 0x12_34_56);
+        assert_eq!(settings.receiver_source, ReceiverSource::UdpRtp);
+        assert_eq!(settings.udp_bind_address, "127.0.0.1");
+        assert_eq!(settings.udp_bind_port, 5_601);
         assert_eq!(settings.gui_theme, GuiTheme::Mocha);
         assert_eq!(settings.recording_directory, "current-recording-folder");
+        assert_eq!(settings.hud.scale_percent, 125);
+        assert_eq!(settings.active_osd_profile_id, Some(1));
         assert_eq!(
             settings.diversity_device_ids,
             ["0bda:8812@bus/2".to_owned()]
@@ -818,8 +990,69 @@ mod tests {
         assert!(settings.auto_recover);
         assert!(!settings.profiles.is_empty());
         assert!(settings.recording_directory.is_empty());
+        assert_eq!(settings.receiver_source, ReceiverSource::Usb);
+        assert_eq!(settings.udp_bind_address, "0.0.0.0");
+        assert_eq!(settings.udp_bind_port, DEFAULT_UDP_RTP_PORT);
         assert_eq!(settings.profiles[0].channel, 149);
         assert_eq!(settings.hud.items.len(), HudMetric::ALL.len());
+        assert_eq!(settings.osd_profiles.len(), 1);
+        assert_eq!(settings.active_osd_profile_id, Some(1));
+        assert_eq!(settings.osd_profiles[0].hud, settings.hud);
+    }
+
+    #[test]
+    fn legacy_hud_becomes_the_default_osd_profile() {
+        let mut settings: Settings = serde_json::from_str(
+            r#"{
+                "hud": {
+                    "scale_percent": 137,
+                    "background_opacity": 111,
+                    "items": [
+                        {"metric":"Resolution","visible":true,"x":0.27,"y":0.81}
+                    ]
+                }
+            }"#,
+        )
+        .expect("legacy settings deserialize");
+
+        settings.normalize();
+
+        assert_eq!(settings.osd_profiles.len(), 1);
+        assert_eq!(settings.osd_profiles[0].name, "Default OSD");
+        assert_eq!(settings.osd_profiles[0].hud, settings.hud);
+        assert_eq!(settings.osd_profiles[0].hud.scale_percent, 137);
+        let resolution = settings.osd_profiles[0]
+            .hud
+            .items
+            .iter()
+            .find(|item| item.metric == HudMetric::Resolution)
+            .expect("resolution indicator");
+        assert_eq!(resolution.x, 0.27);
+        assert_eq!(resolution.y, 0.81);
+    }
+
+    #[test]
+    fn named_osd_profiles_preserve_independent_layouts() {
+        let mut settings = Settings::default();
+        settings.hud.scale_percent = 115;
+        settings.sync_active_osd_profile();
+        settings.osd_profiles.push(OsdProfile::capture(
+            2,
+            "Long range".to_owned(),
+            &settings.hud,
+        ));
+
+        assert!(settings.apply_osd_profile(2));
+        settings.hud.scale_percent = 145;
+        settings.hud.background_opacity = 80;
+        settings.sync_active_osd_profile();
+
+        assert!(settings.apply_osd_profile(1));
+        assert_eq!(settings.hud.scale_percent, 115);
+        assert_eq!(settings.hud.background_opacity, 205);
+        assert!(settings.apply_osd_profile(2));
+        assert_eq!(settings.hud.scale_percent, 145);
+        assert_eq!(settings.hud.background_opacity, 80);
     }
 
     #[test]

@@ -437,6 +437,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Install Bun
+        if: env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != ''
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
       - name: Download site artifact
         uses: actions/download-artifact@v8
         with:
@@ -449,6 +455,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          packageManager: bun
           workingDirectory: ${{ matrix.working_directory }}
           command: pages deploy ${{ matrix.output_directory }} --project-name=${{ matrix.project }} --branch=master
 

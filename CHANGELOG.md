@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.30 - 2026-07-04
+
+### Features
+- Feat(nebulus): add UDP RTP input and OSD profiles (f0ea653)
+- Feat(nebulus): isolate browser decode pipeline (32db48e)
+- Feat: sync latest devourer support and add presets
+
+Add Jaguar2 RTL8822B bring-up, current Jaguar3 bandwidth and narrowband behavior, beamforming, tone-mask controls, and USB recovery parity through devourer bad37a8. Add installable Nebulus preset packs and registry support with documentation and tests. (44c57b4)
+- Feat(nebulus): streamline controls and OSD editing (67b06f1)
+
+### Fixes
+- Fix(nebulus): keep preset schema RON-safe
+
+Persist installed preset metadata with the valid jsonSchema identifier while preserving the standard  key in exported JSON files. Add an eframe storage round-trip regression test. (b74a994)
+- Fix(nebulus): recover from WebUSB picker dismissal
+
+Treat chooser cancellation as a normal idle transition, add a focus fallback for Chromium requests that remain pending after rapid dismissal, and suppress stale receiver completion events. (172272d)
+- Fix vscode conf (a7a3b97)
+
+
 ## 0.1.29 - 2026-07-04
 
 ### Changes

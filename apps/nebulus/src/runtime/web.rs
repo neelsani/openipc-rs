@@ -4,8 +4,10 @@ use std::{
     rc::Rc,
 };
 
-use wasm_bindgen::JsValue;
-use wasm_bindgen_futures::spawn_local;
+use futures_channel::oneshot;
+use futures_util::future::{select as select_future, Either as FutureEither};
+use wasm_bindgen::{closure::Closure, JsCast as _, JsValue};
+use wasm_bindgen_futures::{spawn_local, JsFuture};
 
 use super::{RuntimeEvent, ScanRequest, StartRequest, UsbDeviceInfo};
 
@@ -13,6 +15,64 @@ use super::{RuntimeEvent, ScanRequest, StartRequest, UsbDeviceInfo};
 struct RecordingControl {
     start: bool,
     stop: bool,
+}
+
+enum PermissionOutcome {
+    Granted(web_sys::UsbDevice),
+    Dismissed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PickerExit {
+    Focused,
+    TimedOut,
+}
+
+/// Owns the WebUSB chooser promise and a focus listener installed before the
+/// chooser opens. Some Chromium builds can leave `requestDevice()` pending
+/// when the chooser is dismissed immediately; focus returning to the page is
+/// the fallback signal that selection ended.
+struct WebUsbPermissionRequest {
+    permission: Option<JsFuture<web_sys::UsbDevice>>,
+    focus: Option<oneshot::Receiver<()>>,
+    window: web_sys::Window,
+    focus_listener: Closure<dyn FnMut()>,
+}
+
+impl WebUsbPermissionRequest {
+    async fn resolve(mut self) -> Result<PermissionOutcome, String> {
+        let permission = Box::pin(
+            self.permission
+                .take()
+                .expect("WebUSB permission future is present"),
+        );
+        let picker_exit = Box::pin(wait_for_picker_exit(
+            self.focus.take().expect("WebUSB focus receiver is present"),
+        ));
+
+        match select_future(permission, picker_exit).await {
+            FutureEither::Left((result, _)) => permission_result(result),
+            FutureEither::Right((PickerExit::Focused | PickerExit::TimedOut, permission)) => {
+                // Chromium normally settles requestDevice before or directly
+                // after restoring focus. Give that microtask a short grace
+                // period before treating the focus return as dismissal.
+                let grace = Box::pin(permission_delay(500));
+                match select_future(permission, grace).await {
+                    FutureEither::Left((result, _)) => permission_result(result),
+                    FutureEither::Right(((), _)) => Ok(PermissionOutcome::Dismissed),
+                }
+            }
+        }
+    }
+}
+
+impl Drop for WebUsbPermissionRequest {
+    fn drop(&mut self) {
+        let _ = self.window.remove_event_listener_with_callback(
+            "focus",
+            self.focus_listener.as_ref().unchecked_ref(),
+        );
+    }
 }
 
 /// Browser receiver owner. WebUSB/WFB work stays on the app's local executor;
@@ -49,8 +109,8 @@ impl Runtime {
     }
 
     pub(crate) fn authorize_device(&self) {
-        let promise = match request_device(None) {
-            Ok(promise) => promise,
+        let permission = match request_device(None) {
+            Ok(permission) => permission,
             Err(error) => {
                 emit(
                     &self.events,
@@ -63,12 +123,13 @@ impl Runtime {
         let events = Rc::clone(&self.events);
         let context = self.context.clone();
         spawn_local(async move {
-            let event = match wasm_bindgen_futures::JsFuture::from(promise).await {
-                Ok(_) => discover_web_devices()
+            let event = match permission.resolve().await {
+                Ok(PermissionOutcome::Granted(_)) => discover_web_devices()
                     .await
                     .map(RuntimeEvent::Devices)
                     .unwrap_or_else(RuntimeEvent::DiscoveryFailed),
-                Err(error) => RuntimeEvent::DiscoveryFailed(js_error(error)),
+                Ok(PermissionOutcome::Dismissed) => return,
+                Err(error) => RuntimeEvent::DiscoveryFailed(error),
             };
             emit(&events, &context, event);
         });
@@ -124,7 +185,7 @@ impl Runtime {
         let audio_volume = Rc::clone(&self.audio_volume);
         let events = Rc::clone(&self.events);
         let recording = Rc::clone(&self.recording);
-        emit(&events, &context, RuntimeEvent::Connecting);
+        let completion_cancel = Rc::clone(&cancel);
 
         spawn_local(async move {
             let completion_events = Rc::clone(&events);
@@ -137,6 +198,9 @@ impl Runtime {
                 context,
             };
             let result = worker::run(permission, request, route_processor, handles).await;
+            if completion_cancel.get() {
+                return;
+            }
             if let Err(error) = result {
                 emit(
                     &completion_events,
@@ -203,6 +267,7 @@ impl Runtime {
         self.audio_volume.set(request.audio_volume.min(100));
         let audio_volume = Rc::clone(&self.audio_volume);
         let events = Rc::clone(&self.events);
+        let completion_cancel = Rc::clone(&cancel);
         let recording = Rc::clone(&self.recording);
         emit(&events, &context, RuntimeEvent::Connecting);
         spawn_local(async move {
@@ -216,6 +281,9 @@ impl Runtime {
                 context,
             };
             let result = worker::run_codec_mock(request, route_processor, handles).await;
+            if completion_cancel.get() {
+                return;
+            }
             if let Err(error) = result {
                 emit(
                     &completion_events,
@@ -235,9 +303,8 @@ impl Runtime {
     pub(crate) fn stop(&mut self) {
         if let Some(cancel) = self.cancel.take() {
             cancel.set(true);
-        } else {
-            self.events.borrow_mut().push_back(RuntimeEvent::Stopped);
         }
+        emit(&self.events, &self.context, RuntimeEvent::Stopped);
         *self.recording.borrow_mut() = RecordingControl::default();
     }
 
@@ -296,7 +363,7 @@ async fn discover_web_devices() -> Result<Vec<UsbDeviceInfo>, String> {
         .collect())
 }
 
-fn request_device(selected: Option<&str>) -> Result<js_sys::Promise<web_sys::UsbDevice>, JsValue> {
+fn request_device(selected: Option<&str>) -> Result<WebUsbPermissionRequest, JsValue> {
     let filters = selected
         .and_then(parse_device_id)
         .map(|(vendor_id, product_id)| vec![(vendor_id, product_id)])
@@ -315,11 +382,63 @@ fn request_device(selected: Option<&str>) -> Result<js_sys::Promise<web_sys::Usb
         })
         .collect::<Vec<_>>();
     let options = web_sys::UsbDeviceRequestOptions::new(&filters);
-    let usb = web_sys::window()
-        .ok_or_else(|| JsValue::from_str("browser window is unavailable"))?
-        .navigator()
-        .usb();
-    Ok(usb.request_device(&options))
+    let window =
+        web_sys::window().ok_or_else(|| JsValue::from_str("browser window is unavailable"))?;
+    let (focus_sender, focus) = oneshot::channel();
+    let focus_sender = Rc::new(RefCell::new(Some(focus_sender)));
+    let focus_listener = Closure::wrap(Box::new(move || {
+        if let Some(sender) = focus_sender.borrow_mut().take() {
+            let _ = sender.send(());
+        }
+    }) as Box<dyn FnMut()>);
+    window.add_event_listener_with_callback("focus", focus_listener.as_ref().unchecked_ref())?;
+    let permission = JsFuture::from(window.navigator().usb().request_device(&options));
+    Ok(WebUsbPermissionRequest {
+        permission: Some(permission),
+        focus: Some(focus),
+        window,
+        focus_listener,
+    })
+}
+
+async fn wait_for_picker_exit(focus: oneshot::Receiver<()>) -> PickerExit {
+    // The absolute bound prevents a browser bug from retaining a dead chooser
+    // forever even when it does not restore a focus event.
+    let focus = Box::pin(focus);
+    let timeout = Box::pin(permission_delay(60_000));
+    match select_future(focus, timeout).await {
+        FutureEither::Left((_result, _)) => PickerExit::Focused,
+        FutureEither::Right(((), _)) => PickerExit::TimedOut,
+    }
+}
+
+async fn permission_delay(milliseconds: i32) {
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        if let Some(window) = web_sys::window() {
+            let _ = window
+                .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, milliseconds);
+        } else {
+            let _ = resolve.call0(&JsValue::UNDEFINED);
+        }
+    });
+    let _ = JsFuture::from(promise).await;
+}
+
+fn permission_result(
+    result: Result<web_sys::UsbDevice, JsValue>,
+) -> Result<PermissionOutcome, String> {
+    match result {
+        Ok(device) => Ok(PermissionOutcome::Granted(device)),
+        Err(error) if permission_was_dismissed(&error) => Ok(PermissionOutcome::Dismissed),
+        Err(error) => Err(js_error(error)),
+    }
+}
+
+fn permission_was_dismissed(error: &JsValue) -> bool {
+    js_sys::Reflect::get(error, &JsValue::from_str("name"))
+        .ok()
+        .and_then(|name| name.as_string())
+        .is_some_and(|name| super::is_webusb_dismissal_name(&name))
 }
 
 fn web_device_info_id(device: &nusb::DeviceInfo, index: usize) -> String {
@@ -430,7 +549,7 @@ mod worker {
     }
 
     pub(super) async fn scan(
-        permission: js_sys::Promise<web_sys::UsbDevice>,
+        permission: super::WebUsbPermissionRequest,
         request: ScanRequest,
         cancel: Rc<Cell<bool>>,
         events: &Rc<RefCell<VecDeque<RuntimeEvent>>>,
@@ -439,7 +558,12 @@ mod worker {
         if request.channels.is_empty() {
             return Err("Select at least one channel to scan".to_owned());
         }
-        let web_device = JsFuture::from(permission).await.map_err(super::js_error)?;
+        let super::PermissionOutcome::Granted(web_device) = permission.resolve().await? else {
+            return Ok(());
+        };
+        if cancel.get() {
+            return Ok(());
+        }
         let device = RealtekDevice::from_web_usb_device(web_device)
             .await
             .map_err(|error| error.to_string())?;
@@ -766,7 +890,7 @@ mod worker {
     }
 
     pub(super) async fn run(
-        permission: Option<js_sys::Promise<web_sys::UsbDevice>>,
+        permission: Option<super::WebUsbPermissionRequest>,
         request: StartRequest,
         mut route_processor: RouteProcessor,
         handles: WorkerHandles,
@@ -778,8 +902,24 @@ mod worker {
         let context = &handles.context;
         let recording_audio_config = route_processor.recording_audio_config();
         if let Some(permission) = permission {
-            JsFuture::from(permission).await.map_err(super::js_error)?;
+            match permission.resolve().await? {
+                super::PermissionOutcome::Granted(_) => {}
+                super::PermissionOutcome::Dismissed => {
+                    log(
+                        events,
+                        context,
+                        LogLevel::Info,
+                        "usb",
+                        "WebUSB device selection dismissed",
+                    );
+                    return Ok(());
+                }
+            }
         }
+        if cancel.get() {
+            return Ok(());
+        }
+        super::emit(events, context, RuntimeEvent::Connecting);
         let mut discovered = nusb::list_devices()
             .await
             .map_err(|error| format!("WebUSB discovery failed: {error}"))?

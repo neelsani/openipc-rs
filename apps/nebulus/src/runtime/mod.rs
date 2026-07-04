@@ -79,6 +79,11 @@ fn is_lifecycle_barrier(event: &RuntimeEvent) -> bool {
     )
 }
 
+#[cfg(any(test, all(target_arch = "wasm32", target_os = "unknown")))]
+fn is_webusb_dismissal_name(name: &str) -> bool {
+    matches!(name, "NotFoundError" | "AbortError")
+}
+
 #[derive(Default)]
 struct ChannelScanAccumulator {
     packets: u64,
@@ -142,7 +147,17 @@ impl ChannelScanAccumulator {
 mod tests {
     use std::collections::VecDeque;
 
-    use super::{queue_event, BatchMetrics, ChannelScanAccumulator, RuntimeEvent};
+    use super::{
+        is_webusb_dismissal_name, queue_event, BatchMetrics, ChannelScanAccumulator, RuntimeEvent,
+    };
+
+    #[test]
+    fn only_webusb_cancellation_errors_are_dismissals() {
+        assert!(is_webusb_dismissal_name("NotFoundError"));
+        assert!(is_webusb_dismissal_name("AbortError"));
+        assert!(!is_webusb_dismissal_name("SecurityError"));
+        assert!(!is_webusb_dismissal_name("NetworkError"));
+    }
 
     #[test]
     fn pending_batches_are_merged_without_losing_counts() {

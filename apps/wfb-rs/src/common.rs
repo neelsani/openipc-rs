@@ -145,6 +145,7 @@ fn open_claimed_radio(config: &RadioDeviceConfig, device: RealtekDevice) -> CliR
 pub fn tx_options(config: &RadioDeviceConfig, chip_family: ChipFamily) -> RealtekTxOptions {
     RealtekTxOptions {
         current_channel: config.radio.channel,
+        configured_channel_width: config.radio.channel_width,
         descriptor: RealtekTxDescriptor::for_chip_family(chip_family),
         legacy_8812_descriptor: config.tx_legacy_8812_descriptor,
         ..RealtekTxOptions::default()

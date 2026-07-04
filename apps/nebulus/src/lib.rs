@@ -12,9 +12,11 @@ mod logging;
 mod low_latency;
 mod model;
 mod preflight;
+mod presets;
 mod recording;
 #[cfg(not(target_arch = "wasm32"))]
 mod recording_destination;
+mod remote_presets;
 mod runtime;
 mod settings;
 mod support_bundle;

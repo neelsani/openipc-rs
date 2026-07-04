@@ -135,10 +135,15 @@ The Profiles section stores named receiver configurations. Each profile
 contains the receiver source and UDP endpoint, primary and diversity adapters,
 RF channel/width/offset, Link ID, minimum epoch, WFB key, decoder preference,
 RTP reorder setting, adaptive-link settings, payload routes, telemetry policy
-and signing key, audio volume, transfer size, and VPN state. Theme, UI scale,
-log verbosity, and sidebar visibility remain application-wide. OSD layouts use
-their own named profiles and are selected independently, so one layout can be
-reused across several aircraft or radio configurations.
+and signing key, audio volume, transfer size, VPN state, and a reference to a
+reusable OSD profile. Theme, UI scale, log verbosity, and sidebar visibility
+remain application-wide. Switching receiver profiles also selects the OSD
+saved with that profile.
+
+Community [preset packs](./presets.md) can install OSD, theme, route, telemetry,
+and performance components without carrying secrets or machine-specific
+configuration. Every component is previewed before application, and installed
+versions never update an active receiver profile automatically.
 
 ### UDP RTP Input
 

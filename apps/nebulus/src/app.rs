@@ -7,6 +7,11 @@ use web_time::Instant;
 
 #[cfg(target_arch = "wasm32")]
 type PendingKeyFile = Rc<RefCell<Option<Result<(String, Vec<u8>), String>>>>;
+#[cfg(target_arch = "wasm32")]
+type PendingPresetFile = Rc<RefCell<Option<Result<(String, Vec<u8>), String>>>>;
+#[cfg(target_arch = "wasm32")]
+type PendingRemotePreset =
+    Rc<RefCell<Option<Result<crate::remote_presets::RemoteDownload, String>>>>;
 
 #[cfg(any(target_arch = "wasm32", target_os = "android"))]
 #[derive(Debug, Clone, Copy)]
@@ -21,6 +26,8 @@ use crate::{
         MetricHistory, ReceiverState, RecordingState, RecordingStatus, RecoveryStatus, RouteStats,
         VpnStatus,
     },
+    presets::{PresetExportDraft, PresetInstallDraft, PresetPack},
+    remote_presets::{PresetRegistry, RemotePresetContent, RemoteRequest},
     runtime::{
         AdapterRuntimeMetrics, ReceiverInfo, Runtime, RuntimeEvent, StartRequest, UsbDeviceInfo,
     },
@@ -170,6 +177,19 @@ pub struct NebulusApp {
     pending_key_purpose: Option<KeyFilePurpose>,
     #[cfg(target_arch = "wasm32")]
     key_file_result: PendingKeyFile,
+    #[cfg(target_arch = "wasm32")]
+    preset_file_result: PendingPresetFile,
+    #[cfg(target_arch = "wasm32")]
+    remote_preset_result: PendingRemotePreset,
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+    remote_preset_result:
+        Option<std::sync::mpsc::Receiver<Result<crate::remote_presets::RemoteDownload, String>>>,
+    pub(crate) show_preset_manager: bool,
+    pub(crate) preset_install: Option<PresetInstallDraft>,
+    pub(crate) preset_export: Option<PresetExportDraft>,
+    pub(crate) preset_registry: Option<PresetRegistry>,
+    pub(crate) preset_remote_loading: Option<String>,
+    pub(crate) preset_error: Option<String>,
     pub(crate) video_fullscreen: bool,
     pub(crate) show_about: bool,
     pub(crate) show_osd_editor: bool,
@@ -257,6 +277,18 @@ impl NebulusApp {
             pending_key_purpose: None,
             #[cfg(target_arch = "wasm32")]
             key_file_result: Rc::new(RefCell::new(None)),
+            #[cfg(target_arch = "wasm32")]
+            preset_file_result: Rc::new(RefCell::new(None)),
+            #[cfg(target_arch = "wasm32")]
+            remote_preset_result: Rc::new(RefCell::new(None)),
+            #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+            remote_preset_result: None,
+            show_preset_manager: false,
+            preset_install: None,
+            preset_export: None,
+            preset_registry: None,
+            preset_remote_loading: None,
+            preset_error: None,
             video_fullscreen: false,
             show_about: false,
             show_osd_editor: false,
@@ -625,9 +657,231 @@ impl NebulusApp {
         let name = self.settings.osd_profiles.remove(index).name;
         let replacement =
             self.settings.osd_profiles[index.min(self.settings.osd_profiles.len() - 1)].id;
+        for profile in &mut self.settings.profiles {
+            if profile.osd_profile_id == Some(id) {
+                profile.osd_profile_id = Some(replacement);
+            }
+        }
         self.settings.active_osd_profile_id = None;
         self.apply_osd_profile(replacement);
         self.log(LogLevel::Info, "osd", format!("Deleted OSD profile {name}"));
+    }
+
+    pub(crate) fn begin_preset_export(&mut self) {
+        self.settings.sync_active_osd_profile();
+        self.preset_export = Some(PresetExportDraft::from_settings(&self.settings));
+        self.preset_error = None;
+    }
+
+    pub(crate) fn preview_installed_preset(&mut self, index: usize) {
+        let Some(pack) = self.settings.installed_presets.get(index).cloned() else {
+            return;
+        };
+        self.preset_install = Some(PresetInstallDraft::new(pack));
+        self.preset_error = None;
+    }
+
+    pub(crate) fn remove_installed_preset(&mut self, index: usize) {
+        let Some(pack) = (index < self.settings.installed_presets.len())
+            .then(|| self.settings.installed_presets.remove(index))
+        else {
+            return;
+        };
+        self.log(
+            LogLevel::Info,
+            "preset",
+            format!(
+                "Removed installed preset {} {}; derived local profiles were kept",
+                pack.name, pack.version
+            ),
+        );
+    }
+
+    pub(crate) fn apply_preset_install(&mut self, context: &egui::Context) {
+        let Some(draft) = self.preset_install.take() else {
+            return;
+        };
+        let pack = draft.pack.clone();
+        let result = match draft.apply_to(&mut self.settings) {
+            Ok(result) => result,
+            Err(error) => {
+                self.preset_error = Some(error);
+                self.preset_install = Some(draft);
+                return;
+            }
+        };
+        if result.osd_changed {
+            self.osd_edit_history.reset();
+        }
+        if result.theme_changed {
+            crate::ui::theme::apply(context, self.settings.gui_theme);
+        }
+        self.preset_error = None;
+        self.log(
+            LogLevel::Info,
+            "preset",
+            format!("Applied preset {} {}", pack.name, pack.version),
+        );
+    }
+
+    pub(crate) fn finish_preset_export(&mut self) {
+        let Some(draft) = self.preset_export.take() else {
+            return;
+        };
+        let result = draft
+            .build(&self.settings)
+            .and_then(|pack| crate::presets::save(&pack));
+        match result {
+            Ok(message) => {
+                self.preset_error = None;
+                self.log(LogLevel::Info, "preset", message);
+            }
+            Err(error) => {
+                self.preset_error = Some(error);
+                self.preset_export = Some(draft);
+            }
+        }
+    }
+
+    fn preview_preset_bytes(&mut self, name: String, bytes: Vec<u8>) {
+        match PresetPack::parse(&bytes) {
+            Ok(pack) => {
+                self.preset_error = None;
+                self.preset_install = Some(PresetInstallDraft::new(pack));
+                self.show_preset_manager = true;
+                self.log(LogLevel::Info, "preset", format!("Loaded preset {name}"));
+            }
+            Err(error) => {
+                self.preset_error = Some(format!("Could not load {name}: {error}"));
+                self.show_preset_manager = true;
+            }
+        }
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+    pub(crate) fn open_preset_file(&mut self, _context: &egui::Context) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Install Nebulus preset pack")
+            .add_filter("Nebulus preset", &["json", "nebulus-preset"])
+            .pick_file()
+        else {
+            return;
+        };
+        let name = path
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("preset.nebulus-preset.json")
+            .to_owned();
+        if std::fs::metadata(&path)
+            .is_ok_and(|metadata| metadata.len() > crate::presets::MAX_PRESET_BYTES as u64)
+        {
+            self.preset_error = Some(format!(
+                "Could not load {name}: preset exceeds {} bytes",
+                crate::presets::MAX_PRESET_BYTES
+            ));
+            return;
+        }
+        match std::fs::read(&path) {
+            Ok(bytes) => self.preview_preset_bytes(name, bytes),
+            Err(error) => {
+                self.preset_error = Some(format!("Could not read {}: {error}", path.display()))
+            }
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn open_preset_file(&mut self, context: &egui::Context) {
+        if let Err(error) = crate::android::open_preset_file(context.clone()) {
+            self.preset_error = Some(error);
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn open_preset_file(&mut self, context: &egui::Context) {
+        let result = Rc::clone(&self.preset_file_result);
+        let context = context.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let Some(file) = rfd::AsyncFileDialog::new()
+                .set_title("Install Nebulus preset pack")
+                .add_filter("Nebulus preset", &["json", "nebulus-preset"])
+                .pick_file()
+                .await
+            else {
+                return;
+            };
+            *result.borrow_mut() = Some(Ok((file.file_name(), file.read().await)));
+            context.request_repaint();
+        });
+    }
+
+    pub(crate) fn open_preset_url(&mut self, context: &egui::Context) {
+        match RemoteRequest::direct(&self.settings.preset_source_url) {
+            Ok(request) => self.start_remote_preset_request(request, context),
+            Err(error) => self.preset_error = Some(error),
+        }
+    }
+
+    pub(crate) fn install_registry_preset(&mut self, index: usize, context: &egui::Context) {
+        let Some(request) = self
+            .preset_registry
+            .as_ref()
+            .and_then(|registry| registry.presets.get(index))
+            .map(crate::remote_presets::RegistryPreset::request)
+        else {
+            self.preset_error = Some("registry entry is no longer available".to_owned());
+            return;
+        };
+        self.start_remote_preset_request(request, context);
+    }
+
+    fn start_remote_preset_request(&mut self, request: RemoteRequest, context: &egui::Context) {
+        if !matches!(self.state, ReceiverState::Idle | ReceiverState::Failed) {
+            self.preset_error = Some("stop the receiver before downloading presets".to_owned());
+            return;
+        }
+        if self.preset_remote_loading.is_some() {
+            return;
+        }
+        let url = request.url.clone();
+        self.preset_error = None;
+        self.show_preset_manager = true;
+
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+        {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let context = context.clone();
+            let worker = std::thread::Builder::new()
+                .name("nebulus-preset-download".to_owned())
+                .spawn(move || {
+                    let _ = sender.send(crate::remote_presets::download(request));
+                    context.request_repaint();
+                });
+            match worker {
+                Ok(_) => self.remote_preset_result = Some(receiver),
+                Err(error) => {
+                    self.preset_error = Some(format!("could not start preset download: {error}"));
+                    return;
+                }
+            }
+        }
+
+        #[cfg(target_os = "android")]
+        if let Err(error) = crate::android::download_remote_preset(request, context.clone()) {
+            self.preset_error = Some(error);
+            return;
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let result = Rc::clone(&self.remote_preset_result);
+            let context = context.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                *result.borrow_mut() = Some(crate::remote_presets::download(request).await);
+                context.request_repaint();
+            });
+        }
+
+        self.preset_remote_loading = Some(url);
     }
 
     pub(crate) fn vpn_available(&self) -> bool {
@@ -674,6 +928,8 @@ impl NebulusApp {
         #[cfg(target_os = "windows")]
         self.process_wintun_events();
         self.process_key_file_result();
+        self.process_preset_file_result();
+        self.process_remote_preset_result();
         self.process_dropped_files(context);
         if self.video_fullscreen && context.input(|input| input.key_pressed(egui::Key::Escape)) {
             self.set_video_fullscreen(context, false);
@@ -1034,7 +1290,9 @@ impl NebulusApp {
                     .and_then(|path| std::fs::read(path).ok())
             });
             if let Some(bytes) = bytes {
-                if let Err(error) = self.set_key_file(name, bytes) {
+                if crate::presets::is_preset_filename(&name) {
+                    self.preview_preset_bytes(name, bytes);
+                } else if let Err(error) = self.set_key_file(name, bytes) {
                     self.log(LogLevel::Warn, "key", error);
                 }
             }
@@ -1236,6 +1494,82 @@ impl NebulusApp {
         #[cfg(target_arch = "wasm32")]
         if let Some(result) = result {
             self.apply_selected_key_result(result);
+        }
+    }
+
+    fn process_preset_file_result(&mut self) {
+        #[cfg(target_os = "android")]
+        if let Some(result) = crate::android::take_preset_file_result() {
+            match result {
+                Ok(file) => self.preview_preset_bytes(file.name, file.bytes),
+                Err(error) => self.preset_error = Some(error),
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        let result = { self.preset_file_result.borrow_mut().take() };
+        #[cfg(target_arch = "wasm32")]
+        if let Some(result) = result {
+            match result {
+                Ok((name, bytes)) => self.preview_preset_bytes(name, bytes),
+                Err(error) => self.preset_error = Some(error),
+            }
+        }
+    }
+
+    fn process_remote_preset_result(&mut self) {
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+        let result =
+            self.remote_preset_result
+                .as_ref()
+                .and_then(|receiver| match receiver.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        Some(Err("preset download worker stopped unexpectedly".to_owned()))
+                    }
+                });
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+        if result.is_some() {
+            self.remote_preset_result = None;
+        }
+
+        #[cfg(target_os = "android")]
+        let result = crate::android::take_remote_preset_result();
+
+        #[cfg(target_arch = "wasm32")]
+        let result = { self.remote_preset_result.borrow_mut().take() };
+
+        let Some(result) = result else {
+            return;
+        };
+        self.preset_remote_loading = None;
+        match result.and_then(crate::remote_presets::RemoteDownload::parse) {
+            Ok(RemotePresetContent::Preset(pack)) => {
+                self.preset_error = None;
+                self.log(
+                    LogLevel::Info,
+                    "preset",
+                    format!("Downloaded preset {} {}", pack.name, pack.version),
+                );
+                self.preset_install = Some(PresetInstallDraft::new(pack));
+            }
+            Ok(RemotePresetContent::Registry(registry)) => {
+                self.settings
+                    .preset_source_url
+                    .clone_from(&registry.source_url);
+                self.preset_error = None;
+                self.log(
+                    LogLevel::Info,
+                    "preset",
+                    format!(
+                        "Loaded preset registry {} ({} entries)",
+                        registry.name,
+                        registry.presets.len()
+                    ),
+                );
+                self.preset_registry = Some(registry);
+            }
+            Err(error) => self.preset_error = Some(error),
         }
     }
 

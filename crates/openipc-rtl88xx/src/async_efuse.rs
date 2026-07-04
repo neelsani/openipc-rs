@@ -153,15 +153,27 @@ impl RealtekDevice {
     ) -> Result<[u8; EFUSE_MAP_LEN_JAGUAR], DriverError> {
         if chip.family == ChipFamily::Rtl8822e {
             let map = self.read_efuse_logical_map_8822e_async().await?;
-            let _ = self.jaguar3_efuse.set(map);
+            let _ = self.efuse_logical_map.set(map);
             return Ok(map);
         }
         self.read_efuse_autoload_probe_bytes_async().await?;
         self.efuse_power_switch_async(false, true).await?;
-        let result = self.read_efuse_logical_map_powered_async().await;
+        let physical_limit = if chip.family == ChipFamily::Rtl8822b {
+            1024
+        } else {
+            EFUSE_REAL_CONTENT_LEN_JAGUAR
+        };
+        let result = self
+            .read_efuse_logical_map_powered_async(physical_limit)
+            .await;
         let power_off = self.efuse_power_switch_async(false, false).await;
         match (result, power_off) {
-            (Ok(map), Ok(())) => Ok(map),
+            (Ok(map), Ok(())) => {
+                if chip.family == ChipFamily::Rtl8822b {
+                    let _ = self.efuse_logical_map.set(map);
+                }
+                Ok(map)
+            }
             (Err(err), _) => Err(err),
             (Ok(_), Err(err)) => Err(err),
         }
@@ -336,6 +348,7 @@ impl RealtekDevice {
 
     async fn read_efuse_logical_map_powered_async(
         &self,
+        physical_limit: u16,
     ) -> Result<[u8; EFUSE_MAP_LEN_JAGUAR], DriverError> {
         let mut words = [[0xffffu16; EFUSE_MAX_WORD_UNIT_JAGUAR]; EFUSE_MAX_SECTION_JAGUAR];
         let mut physical_addr = 0u16;
@@ -346,7 +359,7 @@ impl RealtekDevice {
         }
         physical_addr += 1;
 
-        while header != 0xff && physical_addr < EFUSE_REAL_CONTENT_LEN_JAGUAR {
+        while header != 0xff && physical_addr < physical_limit {
             let (offset, word_enable) = if is_extended_header(header) {
                 let offset_low = (header & 0xe0) >> 5;
                 let extended = self.read_efuse_byte_async(physical_addr).await?;
@@ -354,7 +367,7 @@ impl RealtekDevice {
 
                 if all_words_disabled(extended) {
                     header = self.read_efuse_byte_async(physical_addr).await?;
-                    if header != 0xff && physical_addr < EFUSE_REAL_CONTENT_LEN_JAGUAR {
+                    if header != 0xff && physical_addr < physical_limit {
                         physical_addr += 1;
                     }
                     continue;
@@ -372,14 +385,14 @@ impl RealtekDevice {
                         let lo = self.read_efuse_byte_async(physical_addr).await?;
                         physical_addr += 1;
                         *word = lo as u16;
-                        if physical_addr >= EFUSE_REAL_CONTENT_LEN_JAGUAR {
+                        if physical_addr >= physical_limit {
                             break;
                         }
 
                         let hi = self.read_efuse_byte_async(physical_addr).await?;
                         physical_addr += 1;
                         *word |= (hi as u16) << 8;
-                        if physical_addr >= EFUSE_REAL_CONTENT_LEN_JAGUAR {
+                        if physical_addr >= physical_limit {
                             break;
                         }
                     }
@@ -388,11 +401,11 @@ impl RealtekDevice {
                 for word_index in 0..EFUSE_MAX_WORD_UNIT_JAGUAR {
                     if word_enable & (1u8 << word_index) == 0 {
                         physical_addr += 1;
-                        if physical_addr >= EFUSE_REAL_CONTENT_LEN_JAGUAR {
+                        if physical_addr >= physical_limit {
                             break;
                         }
                         physical_addr += 1;
-                        if physical_addr >= EFUSE_REAL_CONTENT_LEN_JAGUAR {
+                        if physical_addr >= physical_limit {
                             break;
                         }
                     }
@@ -400,7 +413,7 @@ impl RealtekDevice {
             }
 
             header = self.read_efuse_byte_async(physical_addr).await?;
-            if header != 0xff && physical_addr < EFUSE_REAL_CONTENT_LEN_JAGUAR {
+            if header != 0xff && physical_addr < physical_limit {
                 physical_addr += 1;
             }
         }
@@ -506,7 +519,7 @@ fn mac_from_efuse_map(chip: ChipInfo, map: &[u8; EFUSE_MAP_LEN_JAGUAR]) -> Optio
         ChipFamily::Rtl8812 => EEPROM_MAC_ADDR_8812AU,
         ChipFamily::Rtl8814 => EEPROM_MAC_ADDR_8814AU,
         ChipFamily::Rtl8821 => EEPROM_MAC_ADDR_8821AU,
-        ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => return None,
+        ChipFamily::Rtl8822b | ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => return None,
     };
     let bytes = map.get(offset..offset + 6)?;
 
@@ -526,7 +539,7 @@ fn rfe_type_from_efuse_map(
 ) -> u8 {
     let rfe_option = map[EEPROM_RFE_OPTION_8812];
     match chip.family {
-        ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
+        ChipFamily::Rtl8822b | ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
             if rfe_option == 0xff {
                 0
             } else {
@@ -1183,7 +1196,7 @@ fn tx_power_base_byte(family: ChipFamily, map: &[u8; EFUSE_MAP_LEN_JAGUAR], offs
         ChipFamily::Rtl8812 => Some(tx_power_defaults::RTL8812A),
         ChipFamily::Rtl8814 => Some(tx_power_defaults::RTL8814A),
         ChipFamily::Rtl8821 => Some(tx_power_defaults::RTL8821A),
-        ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => None,
+        ChipFamily::Rtl8822b | ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => None,
     }) else {
         return programmed;
     };
@@ -1237,7 +1250,9 @@ mod tests {
                 ChipFamily::Rtl8812 => RfType::TwoTTwoR,
                 ChipFamily::Rtl8814 => RfType::FourTFourR,
                 ChipFamily::Rtl8821 => RfType::OneTOneR,
-                ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => RfType::TwoTTwoR,
+                ChipFamily::Rtl8822b | ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
+                    RfType::TwoTTwoR
+                }
             },
             cut_version: 0,
             sys_cfg: 0,

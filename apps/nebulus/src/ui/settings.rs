@@ -14,6 +14,7 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
     let editable = matches!(app.state, ReceiverState::Idle | ReceiverState::Failed);
     ui.add_enabled_ui(editable, |ui| {
         section(ui, "Profiles", |ui| profile_editor(app, ui));
+        section(ui, "Preset packs", |ui| super::presets::section(app, ui));
 
         section(ui, "Receiver", |ui| {
             receiver_source_selector(app, ui);
@@ -489,6 +490,42 @@ fn profile_editor(app: &mut NebulusApp, ui: &mut egui::Ui) {
             });
         }
     }
+    let active_osd = app.settings.active_osd_profile_id;
+    let selected_osd_name = active_osd
+        .and_then(|id| {
+            app.settings
+                .osd_profiles
+                .iter()
+                .find(|profile| profile.id == id)
+        })
+        .map_or("No OSD", |profile| profile.name.as_str());
+    let mut selected_osd = active_osd;
+    ui.horizontal(|ui| {
+        ui.label("OSD");
+        egui::ComboBox::from_id_salt("receiver-profile-osd")
+            .selected_text(selected_osd_name)
+            .width(180.0)
+            .show_ui(ui, |ui| {
+                for profile in &app.settings.osd_profiles {
+                    ui.selectable_value(&mut selected_osd, Some(profile.id), &profile.name);
+                }
+            });
+    });
+    if selected_osd != active_osd {
+        if let Some(osd_id) = selected_osd {
+            app.apply_osd_profile(osd_id);
+            if let Some(profile_id) = app.settings.active_profile_id {
+                if let Some(profile) = app
+                    .settings
+                    .profiles
+                    .iter_mut()
+                    .find(|profile| profile.id == profile_id)
+                {
+                    profile.osd_profile_id = Some(osd_id);
+                }
+            }
+        }
+    }
     ui.horizontal(|ui| {
         if ui.button("Save current").clicked() {
             app.save_active_profile();
@@ -502,7 +539,7 @@ fn profile_editor(app: &mut NebulusApp, ui: &mut egui::Ui) {
     });
     ui.label(
         egui::RichText::new(
-            "Profiles include the receiver source and endpoint, adapters, radio, link, keys, routes, telemetry, audio, VPN, and decoder settings.",
+            "Profiles include receiver hardware, radio, keys, routes, telemetry, audio, VPN, decoder settings, and a reference to a reusable OSD profile.",
         )
         .small()
         .color(ui.visuals().weak_text_color()),

@@ -15,13 +15,16 @@ import android.view.WindowManager;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 
 public final class NebulusActivity extends NativeActivity {
     private static final int OPEN_KEY_REQUEST = 0x4753;
+    private static final int OPEN_PRESET_REQUEST = 0x5052;
     private static final int OPEN_VPN_REQUEST = 0x5650;
-    private static final int SAVE_SUPPORT_REQUEST = 0x5352;
+    private static final int SAVE_DOCUMENT_REQUEST = 0x5352;
 
-    private byte[] pendingSupportBundle;
+    private byte[] pendingDocument;
 
     private SurfaceTexture videoSurfaceTexture;
     private Surface videoSurface;
@@ -29,6 +32,10 @@ public final class NebulusActivity extends NativeActivity {
 
     private static native void nativeKeySelected(String name, byte[] bytes);
     private static native void nativeKeyError(String message);
+    private static native void nativePresetSelected(String name, byte[] bytes);
+    private static native void nativePresetError(String message);
+    private static native void nativeRemotePresetDownloaded(String finalUrl, byte[] bytes);
+    private static native void nativeRemotePresetError(String message);
     static native void nativeVpnOpened(int fd, String interfaceName);
     static native void nativeVpnError(String message);
 
@@ -105,6 +112,86 @@ public final class NebulusActivity extends NativeActivity {
         runOnUiThread(this::openKeyFileOnUiThread);
     }
 
+    public void openPresetFile() {
+        runOnUiThread(() -> {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.setType("application/json");
+            intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[] {
+                "application/json",
+                "text/json",
+                "text/plain",
+                "*/*"
+            });
+            startActivityForResult(intent, OPEN_PRESET_REQUEST);
+        });
+    }
+
+    public void downloadPresetUrl(String url) {
+        new Thread(() -> {
+            HttpURLConnection connection = null;
+            try {
+                URL current = new URL(url);
+                for (int redirects = 0; redirects <= 5; redirects++) {
+                    if (!isAllowedPresetUrl(current)) {
+                        throw new IllegalArgumentException(
+                            "Preset redirects require HTTPS; HTTP is allowed only on loopback");
+                    }
+                    connection = (HttpURLConnection) current.openConnection();
+                    connection.setInstanceFollowRedirects(false);
+                    connection.setConnectTimeout(10_000);
+                    connection.setReadTimeout(30_000);
+                    connection.setRequestProperty("Accept", "application/json");
+                    connection.setRequestProperty("User-Agent", "Nebulus/Android");
+                    int status = connection.getResponseCode();
+                    if (status >= 300 && status < 400) {
+                        String location = connection.getHeaderField("Location");
+                        connection.disconnect();
+                        connection = null;
+                        if (location == null) {
+                            throw new IllegalStateException("Preset redirect has no Location header");
+                        }
+                        current = new URL(current, location);
+                        continue;
+                    }
+                    if (status < 200 || status >= 300) {
+                        throw new IllegalStateException("Preset request returned HTTP " + status);
+                    }
+                    long length = connection.getContentLengthLong();
+                    if (length > 512 * 1024) {
+                        throw new IllegalArgumentException("Remote preset document is too large");
+                    }
+                    try (InputStream input = connection.getInputStream()) {
+                        nativeRemotePresetDownloaded(
+                            connection.getURL().toString(), readStream(input, 512 * 1024));
+                    }
+                    return;
+                }
+                throw new IllegalStateException("Preset request exceeded five redirects");
+            } catch (Exception error) {
+                nativeRemotePresetError("Remote preset request failed: " + error.getMessage());
+            } finally {
+                if (connection != null) {
+                    connection.disconnect();
+                }
+            }
+        }, "nebulus-preset-download").start();
+    }
+
+    private static boolean isAllowedPresetUrl(URL url) {
+        if ("https".equalsIgnoreCase(url.getProtocol())) {
+            return true;
+        }
+        if (!"http".equalsIgnoreCase(url.getProtocol())) {
+            return false;
+        }
+        String host = url.getHost();
+        return "localhost".equalsIgnoreCase(host)
+            || "127.0.0.1".equals(host)
+            || "::1".equals(host)
+            || "[::1]".equals(host);
+    }
+
     private void openKeyFileOnUiThread() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
@@ -128,14 +215,14 @@ public final class NebulusActivity extends NativeActivity {
         });
     }
 
-    public void saveSupportBundle(String filename, byte[] bytes) {
+    public void saveDocument(String filename, String mimeType, byte[] bytes) {
         runOnUiThread(() -> {
-            pendingSupportBundle = bytes;
+            pendingDocument = bytes;
             Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
             intent.addCategory(Intent.CATEGORY_OPENABLE);
-            intent.setType("application/zip");
+            intent.setType(mimeType);
             intent.putExtra(Intent.EXTRA_TITLE, filename);
-            startActivityForResult(intent, SAVE_SUPPORT_REQUEST);
+            startActivityForResult(intent, SAVE_DOCUMENT_REQUEST);
         });
     }
 
@@ -165,9 +252,9 @@ public final class NebulusActivity extends NativeActivity {
             }
             return;
         }
-        if (requestCode == SAVE_SUPPORT_REQUEST) {
-            byte[] bytes = pendingSupportBundle;
-            pendingSupportBundle = null;
+        if (requestCode == SAVE_DOCUMENT_REQUEST) {
+            byte[] bytes = pendingDocument;
+            pendingDocument = null;
             if (resultCode == RESULT_OK && data != null && data.getData() != null && bytes != null) {
                 try (OutputStream output = getContentResolver().openOutputStream(data.getData())) {
                     if (output != null) {
@@ -180,6 +267,18 @@ public final class NebulusActivity extends NativeActivity {
             }
             return;
         }
+        if (requestCode == OPEN_PRESET_REQUEST) {
+            if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+                return;
+            }
+            Uri uri = data.getData();
+            try {
+                nativePresetSelected(displayName(uri), readDocument(uri, 512 * 1024));
+            } catch (Exception error) {
+                nativePresetError("Could not read preset: " + error.getMessage());
+            }
+            return;
+        }
         if (requestCode != OPEN_KEY_REQUEST || resultCode != RESULT_OK || data == null) {
             return;
         }
@@ -188,20 +287,33 @@ public final class NebulusActivity extends NativeActivity {
             nativeKeyError("Android file picker returned no document");
             return;
         }
-        try (InputStream input = getContentResolver().openInputStream(uri);
-             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+        try {
+            nativeKeySelected(displayName(uri), readDocument(uri, 1024 * 1024));
+        } catch (Exception error) {
+            nativeKeyError("Could not read selected key: " + error.getMessage());
+        }
+    }
+
+    private byte[] readDocument(Uri uri, int maximumBytes) throws Exception {
+        try (InputStream input = getContentResolver().openInputStream(uri)) {
             if (input == null) {
-                nativeKeyError("Android could not open the selected key");
-                return;
+                throw new IllegalStateException("Android could not open the selected document");
             }
+            return readStream(input, maximumBytes);
+        }
+    }
+
+    private static byte[] readStream(InputStream input, int maximumBytes) throws Exception {
+        try (ByteArrayOutputStream output = new ByteArrayOutputStream()) {
             byte[] buffer = new byte[4096];
             int count;
             while ((count = input.read(buffer)) != -1) {
+                if (output.size() + count > maximumBytes) {
+                    throw new IllegalArgumentException("selected document is too large");
+                }
                 output.write(buffer, 0, count);
             }
-            nativeKeySelected(displayName(uri), output.toByteArray());
-        } catch (Exception error) {
-            nativeKeyError("Could not read selected key: " + error.getMessage());
+            return output.toByteArray();
         }
     }
 

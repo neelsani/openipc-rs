@@ -42,8 +42,12 @@ the next release.
 - Done: RTL8812 thermal power tracking, RTL8812 IQK, RTL8814 IQK, and the
   monitor-mode PHYDM DIG watchdog.
 - Done: Jaguar3 RTL8812CU/EU and RTL8822CU/EU detection, firmware/tables,
-  descriptors, narrowband channel setup, EFUSE/RFE handling, DACK/IQK,
+  descriptors, narrowband and 40/80 MHz channel setup, 40-in-80 TX, EFUSE/RFE handling, DACK/IQK,
   RTL8822E TXGAPK/thermal tracking, coex maintenance, and clean shutdown.
+- Done: Jaguar2 RTL8812BU/RTL8822BU cold-start firmware, MAC/USB, EFUSE/RFE,
+  BB/RF tables, IQK/DIG, RX, and TX paths.
+- Done: Jaguar1/2/3 explicit sounding, beamforming report detection, CSI tone
+  masks, and NBI notch controls on native and WebUSB.
 - Done: devourer-compatible runtime switches for skipping TX power, forcing or
   disabling IQK/TXGAPK, selecting the RTL8814 firmware path/chunk size, and
   testing the legacy RTL8814 TX descriptor shape.

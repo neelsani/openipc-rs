@@ -77,10 +77,21 @@ the same OSD profile can be reused with any receiver profile.
 
 Settings includes named receiver profiles. A profile snapshots the primary and
 diversity adapters, radio, Link ID, keys, routes, telemetry policy, audio, VPN,
-and decoder choices; GUI appearance stays global. Use **Save current** after
-changing a profile. **Run preflight** checks the selected adapters, keys, radio
-values, routes, decoder state, VPN, and adaptive-link configuration before RX
-starts. Receiver profiles do not select or overwrite OSD profiles.
+decoder choices, and a reference to a reusable OSD profile; GUI appearance
+stays global. Use **Save current** after changing a profile. **Run preflight**
+checks the selected adapters, keys, radio values, routes, decoder state, VPN,
+and adaptive-link configuration before RX starts.
+
+**Settings → Preset packs** installs and exports versioned community JSON packs.
+Packs can contain OSD, theme, route, telemetry, and performance components, but
+their schema cannot represent keys, USB identities, radio configuration, local
+paths, or concrete UDP destinations. Installation shows a component preview;
+versions are pinned and never update a receiver profile automatically. Packs
+can be opened from a local file or HTTPS URL, and static registry indexes can be
+browsed directly. GitHub blob links are accepted and checksum-pinned registry
+entries are verified before preview. See the
+[preset documentation](https://openipc-rs.neels.dev/docs/presets) and bundled
+schema under `apps/nebulus/presets`.
 
 **Scan channels** opens an idle-only survey. The Rust driver initializes the
 adapter once, retunes it across the selected channels, and reports traffic,

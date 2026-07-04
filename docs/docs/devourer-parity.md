@@ -16,7 +16,14 @@ OpenIPC/devourer f542b06 Add RTL8812EU / RTL8822EU (rtl8822e) support (#124)
 OpenIPC/devourer 55f0649 Split Jaguar1 + compile-time per-chip selection (#125)
 OpenIPC/devourer 94d2fa9 Fix rtl8822c 2.4 GHz RX deafness (#138)
 OpenIPC/devourer e926b47 Jaguar1 TX-power parity (#139)
-OpenIPC/devourer 7cd094a Current audited master
+OpenIPC/devourer de4e8b4 Jaguar2 RTL8822BU/RTL8812BU userspace driver (#157)
+OpenIPC/devourer ce6dabe Concurrent TX+RX on one adapter (#158)
+OpenIPC/devourer 92f7802 RX CSI masking / NBI notch controls (#159)
+OpenIPC/devourer 19460a6 Jaguar3 promiscuous RX and 8822E TXAGC fix (#160)
+OpenIPC/devourer 1ac94c2 Three-generation beamforming self-sounding (#161)
+OpenIPC/devourer 5db0015 RTL8822E narrowband MAC/BB fixes (#162)
+OpenIPC/devourer 9f887f8 Jaguar3 40/80 MHz and 40-in-80 (#166)
+OpenIPC/devourer bad37a8 Current audited master
 ```
 
 ## Audit Plan
@@ -29,11 +36,11 @@ chip family:
 | -------------------- | --------------------------------------------------------------------------------- | -------------------------------------------------------- | ---------------------------------------------- |
 | USB discovery        | VID/PID table, interface claim, endpoint selection, endpoint override             | `openipc-rtl88xx::SUPPORTED_DEVICES`, `RealtekDevice`    | wrong adapter, wrong bulk OUT endpoint, no TX  |
 | Control transfer ABI | Realtek vendor request, register width, endian order                              | `async_driver.rs`, `device.rs`                           | reads look plausible but write wrong registers |
-| Firmware load        | power-on state, chunking, reserved-page/DDMA flow, firmware-ready polls           | `async_firmware*.rs`, `async_jaguar3.rs`                 | warm-start works, cold-plug fails              |
+| Firmware load        | power-on state, chunking, reserved-page/DDMA flow, firmware-ready polls           | `async_firmware*.rs`, `async_jaguar2.rs`, `async_jaguar3.rs` | warm-start works, cold-plug fails           |
 | MAC setup            | queue/FIFO, DMA, RX engine, WMAC options                                          | `async_mac.rs`, `async_jaguar3.rs`                       | no bulk-IN frames or FIFO stalls               |
 | EFUSE/RFE            | logical-map decoding, RFE pinmux/table choices, TX power data                     | `async_efuse.rs`, `async_tables.rs`, `async_tx_power.rs` | works on one dongle revision, fails on another |
 | PHY/RF tables        | table data, conditional opcodes, pseudo-delay entries, write order                | `rtl_data.rs`, `data/*`, table loaders                   | no RX sensitivity, wrong band, unstable TX     |
-| Channel/BW           | RF18 band bits, SCO, DFIR, 5/10 MHz reclock, 40/80 fallback behavior              | `async_radio.rs`, `async_jaguar3.rs`                     | tuned to the wrong channel or sample rate      |
+| Channel/BW           | RF18 band bits, SCO, DFIR, 5/10 MHz reclock, 40/80 primary index and DATA_SC      | `async_radio.rs`, `async_jaguar2.rs`, `async_jaguar3.rs` | tuned to the wrong channel or sample rate      |
 | RX descriptors       | field offsets, packet/C2H split, drvinfo/shift offset, 8-byte aggregate alignment | `openipc-core::realtek`                                  | corrupted 802.11 frames or missed C2H reports  |
 | TX descriptors       | radiotap RATE/MCS/VHT parsing, 5 GHz CCK clamp, descriptor checksum               | `openipc-rtl88xx::tx`                                    | bulk OUT succeeds but nothing goes on-air      |
 | Runtime polling      | coex keepalive, thermal power tracking, PHYDM/watchdog hooks                      | app-owned RX loop plus explicit driver APIs              | sustained TX degrades or stops                 |
@@ -43,7 +50,7 @@ chip family:
 
 ```mermaid
 flowchart TD
-    A["devourer WiFiDriver"] --> B["RtlJaguarDevice / RtlJaguar3Device"]
+    A["devourer WiFiDriver"] --> B["RtlJaguarDevice / RtlJaguar2Device / RtlJaguar3Device"]
     B --> C["RtlUsbAdapter libusb control/bulk"]
     B --> D["HAL firmware, MAC, RF, IQK, coex"]
     B --> E["FrameParser RX/TX descriptors"]
@@ -67,6 +74,28 @@ boundaries are:
 
 ## Executed Checks
 
+### Jaguar2 RTL8812BU / RTL8822BU
+
+The Jaguar2 path is separate from both the older 8812A HAL and Jaguar3. The
+Rust driver now mirrors the new devourer implementation:
+
+- authoritative `SYS_CFG2` IDs `0x0a` and cold transient `0x50`, plus
+  `0bda:b812`, `0bda:b82c`, and `2357:012d` discovery IDs,
+- one-path/two-path selection from `SYS_CFG1` bit 27,
+- 161,240-byte firmware, reserved-page packet-offset handling, IDDMA transfer,
+  checksum/ready polling, and failure cleanup,
+- HalMAC queue, protocol, EDCA, WMAC, USB aggregation, H2C, and BB/RF enable
+  sequences,
+- generated MAC/PHY/AGC/radio/TX-limit data imported reproducibly from the
+  reference checkout and checked into the Rust crate,
+- 20/40/80 MHz RF/RFE channel setup, post-IQK TRX reassertion, LCK, full
+  software IQK, RFE mux, coex grant, DIG, and calibrated TX power,
+- common 24-byte HalMAC RX descriptors and 48-byte TX descriptors, with the
+  RTL8822B-specific checksum over the first 32 bytes only.
+
+The importer is intentionally a development tool. Building and publishing the
+crate does not require a devourer checkout.
+
 ### Jaguar3 RTL8812CU/EU and RTL8822CU/EU
 
 The current Rust driver includes the new devourer Jaguar3 work:
@@ -82,10 +111,13 @@ The current Rust driver includes the new devourer Jaguar3 work:
 - Firmware, MAC, USB, BB/AGC/RF, RFK, DACK, IQK, beamforming setup, monitor RX
   filters, TX path enable, WiFi-only coex setup, H2C keepalives, and thermal
   power/LCK tracking.
-- 5 MHz and 10 MHz narrowband retiming on top of 20 MHz channel tuning.
-- 40/80 MHz requests degrade to the 20 MHz path for Jaguar3, matching
-  devourer's current behavior rather than pretending those modes are fully
-  ported.
+- 5 MHz and 10 MHz narrowband retiming, including RTL8822E MAC clock, CFR,
+  shaping, IGI, and DACK reset steps.
+- Native 40 MHz and 80 MHz RF/BB/MAC setup, primary-subchannel programming,
+  and 40 MHz frame placement in the lower half of an 80 MHz configured channel.
+- Promiscuous RCR AAP and the RTL8822E combined TX/RX protection that leaves
+  path-B's OFDM TXAGC reference at the table value while retaining the rest of
+  the per-rate power programming.
 - TX power override writes the same flat TXAGC reference class used by
   devourer for monitor inject/adaptive-link experiments.
 - Clean shutdown now mirrors devourer `Stop()`: halt TRX through `CR`, close
@@ -147,6 +179,31 @@ Devourer's timed `DEVOURER_RX_PATHS=mask:mask@milliseconds` mode is a
 measurement harness, not hidden HAL state: Rust apps can schedule the explicit
 mask setter on their existing worker or browser timer.
 
+### Shared RX/TX Research Controls
+
+The newer generation-neutral additions are public Rust APIs rather than being
+limited to demo environment variables:
+
+- `arm_beamforming_sounder_async` configures the shared MAC sounding engine and
+  Jaguar3's additional RF/BB mode table.
+- `arm_beamformee_async` configures an unassociated SU or MU responder for a
+  beamformer MAC. `parse_beamforming_report` recognizes returned HT/VHT action
+  frames and exposes their MIMO-control summary.
+- `RealtekTxOptions::beamforming_ndpa` sets the per-generation NDPA, NAV,
+  fallback, sequence, and broadcast fields before descriptor checksum.
+- `apply_csi_mask_async` and `apply_nbi_notch_async` select the correct Jaguar1,
+  Jaguar2, or Jaguar3 register recipe. The center-frequency and tone
+  enumeration helpers are testable without USB hardware.
+- Native `DEVOURER_RX_CSI_MASK` and `DEVOURER_RX_NBI` remain accepted through
+  `MonitorOptions::from_env`; browser apps use the same controls through typed
+  WebUSB methods.
+
+The Rust driver does not need a `StartRxLoop` method because initialization and
+bulk endpoint ownership are already separate. Apps keep an `nusb`/WebUSB
+bulk-IN queue posted and may send on the same claimed device concurrently. A
+failed native bulk-OUT transfer is retried after clearing the endpoint halt,
+including the cancelled completion used by `nusb` for a timeout.
+
 ## Why App-Owned Polling
 
 Devourer is a native process and can create background threads around libusb.
@@ -188,7 +245,11 @@ drift early:
 - recovery-classifier tests for transient stalls/timeouts versus fatal USB
   errors,
 - generated-table sanity tests for known lengths and boundary values, plus an
-  audit-time full-array/hash comparison of every RTL8822E firmware/table value,
+  audit-time full-array/hash comparison of RTL8822B and RTL8822E
+  firmware/table values,
+- pure tone-mask vectors copied from devourer's headless test, Jaguar3
+  primary/central-channel plans, 40-in-80 DATA_SC, NDPA fields, Jaguar2's
+  first-32-byte checksum, and beamforming report detection,
 - protocol tests for WFB session/decrypt/FEC behavior,
 - optional PixelPilot/zfex reference tests for FEC parity when the fixture path
   is available,
@@ -206,8 +267,8 @@ The implementation is standalone and does not link devourer. The current audit
 also fixed Jaguar3 shutdown, EU AFE reset ordering, shared-PID chip dispatch,
 and Jaguar3's full 7-bit TXAGC range. The remaining boundary is hardware proof:
 
-- cold-plug RTL8812AU, RTL8821AU, RTL8814AU, RTL8812CU/EU, and RTL8822CU/EU
-  runs,
+- cold-plug RTL8812AU, RTL8821AU, RTL8814AU, RTL8812BU/CU/EU, and
+  RTL8822BU/CU/EU runs,
 - register traces for init, channel switch, and shutdown,
 - sustained WebUSB receive,
 - sustained native/WebUSB adaptive TX,

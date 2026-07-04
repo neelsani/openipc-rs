@@ -5,6 +5,7 @@ const sidebars: SidebarsConfig = {
     "intro",
     "getting-started",
     "nebulus",
+    "presets",
     "architecture",
     {
       type: "category",

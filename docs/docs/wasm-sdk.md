@@ -219,6 +219,28 @@ console.log(jaguar3Report.thermalA, jaguar3Report.compensationA);
 `supportedUsbFilters()` still returns a JSON string because the immediate
 consumer is `navigator.usb.requestDevice({ filters })`.
 
+Wide-channel TX and the newer driver research controls are also available from
+the WebUSB object:
+
+```ts
+// Preserve Jaguar3's configured RF width when building the TX descriptor.
+await radio.sendPacketForRadio(radiotapFrame, 149, 80, false);
+
+// Receive-side suppression for a dirty upper slice or one narrow interferer.
+await radio.applyCsiMask(149, 80, 0, 5795, 5815, 7);
+await radio.applyNbiNotch(149, 80, 0, 5805);
+
+// Explicit sounding. Empty ownMac selects the deterministic Jaguar2/3
+// beamformee address used by the reference implementation.
+const sounderMac = new Uint8Array([0x02, 0, 0, 0, 0, 1]);
+await radio.armBeamformingSounder(sounderMac);
+await secondRadio.armBeamformee(sounderMac, new Uint8Array(), false);
+```
+
+`applyCsiMask` and `applyNbiNotch` configure the receive path only. They do not
+make a standards-level punctured VHT transmission. Sounding methods configure
+the hardware responder/engine; the app still supplies the NDPA frame.
+
 ## WebCodecs Rendering
 
 ```ts
@@ -335,4 +357,4 @@ is due. Call it from the receive loop after updating counters.
 - WebUSB support.
 - WebCodecs support for playback.
 - A browser and operating system that allow access to the USB adapter.
-- A supported RTL8812/RTL8814/RTL8821-class adapter.
+- A supported RTL8812/RTL8814/RTL8821/RTL8822B/RTL8822C/RTL8822E-class adapter.

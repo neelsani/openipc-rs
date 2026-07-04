@@ -33,6 +33,10 @@ const IQK_BB_BACKUP: [u16; 21] = [
 const IQK_RF_BACKUP: [u16; 3] = [0x19, 0x9e, 0x00];
 
 impl RealtekDevice {
+    pub(crate) async fn dack_soft_reset_8822e_async(&self) -> Result<(), DriverError> {
+        Jaguar3EuCal::new(self).dack_soft_reset().await
+    }
+
     pub(crate) async fn dac_calibrate_8822e_async(&self) -> Result<(), DriverError> {
         Jaguar3EuCal::new(self).dac_calibrate().await
     }

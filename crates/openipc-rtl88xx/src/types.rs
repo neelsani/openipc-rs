@@ -1,5 +1,7 @@
 use std::fmt;
 
+use crate::tone_mask::CsiMaskSpec;
+
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
 use nusb::MaybeFuture;
 
@@ -66,6 +68,24 @@ pub const SUPPORTED_DEVICES: &[SupportedDevice] = &[
         "ZyXEL NWD6605 / RTL8812AU",
     ),
     SupportedDevice::new(0x0bda, 0x8813, ChipFamily::Rtl8814, "RTL8814AU"),
+    SupportedDevice::new(
+        0x0bda,
+        0xb812,
+        ChipFamily::Rtl8822b,
+        "RTL8812BU / RTL8822BU WiFi-only",
+    ),
+    SupportedDevice::new(
+        0x0bda,
+        0xb82c,
+        ChipFamily::Rtl8822b,
+        "RTL8822BU multi-function",
+    ),
+    SupportedDevice::new(
+        0x2357,
+        0x012d,
+        ChipFamily::Rtl8822b,
+        "TP-Link Archer T3U / RTL8822BU",
+    ),
     SupportedDevice::new(0x0bda, 0x0820, ChipFamily::Rtl8821, "RTL8821AU"),
     SupportedDevice::new(0x0bda, 0x0821, ChipFamily::Rtl8821, "RTL8821AU"),
     SupportedDevice::new(0x0bda, 0x0823, ChipFamily::Rtl8821, "RTL8821AU"),
@@ -162,6 +182,8 @@ pub enum ChipFamily {
     Rtl8814,
     /// RTL8821AU class.
     Rtl8821,
+    /// RTL8812BU / RTL8822BU Jaguar2 class.
+    Rtl8822b,
     /// RTL8812CU / RTL8822CU Jaguar3 class.
     Rtl8822c,
     /// RTL8812EU / RTL8822EU Jaguar3 class.
@@ -175,14 +197,31 @@ impl ChipFamily {
             Self::Rtl8812 => "RTL8812/RTL8811",
             Self::Rtl8814 => "RTL8814",
             Self::Rtl8821 => "RTL8821",
+            Self::Rtl8822b => "RTL8812BU/RTL8822BU",
             Self::Rtl8822c => "RTL8812CU/RTL8822CU",
             Self::Rtl8822e => "RTL8812EU/RTL8822EU",
         }
     }
 
+    /// Return true for the original Jaguar1 8812/8814/8821 generation.
+    pub const fn is_jaguar1(self) -> bool {
+        matches!(self, Self::Rtl8812 | Self::Rtl8814 | Self::Rtl8821)
+    }
+
     /// Return true for Jaguar3 devices with the shared 8822C/8822E descriptor layout.
     pub const fn is_jaguar3(self) -> bool {
         matches!(self, Self::Rtl8822c | Self::Rtl8822e)
+    }
+
+    /// Return true for the RTL8822B Jaguar2 generation.
+    pub const fn is_jaguar2(self) -> bool {
+        matches!(self, Self::Rtl8822b)
+    }
+
+    /// Return true for chips using a 48-byte checksummed HalMAC TX descriptor
+    /// and 24-byte RX descriptor.
+    pub const fn uses_halmac_descriptor(self) -> bool {
+        matches!(self, Self::Rtl8822b | Self::Rtl8822c | Self::Rtl8822e)
     }
 }
 
@@ -220,12 +259,16 @@ impl ChipInfo {
         // SYS_CFG2 is authoritative for Jaguar3. RTL8812EU can use the same
         // USB PID as RTL8812AU, so PID-only dispatch silently selects the wrong
         // firmware, PHY tables, and RX descriptor layout.
-        let family = if sys_cfg2_chip_id == 0x17 {
+        let family = if matches!(sys_cfg2_chip_id, 0x0a | 0x50) {
+            ChipFamily::Rtl8822b
+        } else if sys_cfg2_chip_id == 0x17 {
             ChipFamily::Rtl8822e
         } else if sys_cfg2_chip_id == 0x13 {
             ChipFamily::Rtl8822c
         } else if product_id == 0x8813 {
             ChipFamily::Rtl8814
+        } else if is_rtl8822b_pid(vendor_id, product_id) {
+            ChipFamily::Rtl8822b
         } else if is_rtl8822e_pid(vendor_id, product_id) {
             ChipFamily::Rtl8822e
         } else if is_rtl8822c_pid(vendor_id, product_id) {
@@ -238,6 +281,13 @@ impl ChipInfo {
         let rf_type = match family {
             ChipFamily::Rtl8814 => RfType::FourTFourR,
             ChipFamily::Rtl8821 => RfType::OneTOneR,
+            ChipFamily::Rtl8822b => {
+                if sys_cfg & RF_TYPE_ID != 0 {
+                    RfType::TwoTTwoR
+                } else {
+                    RfType::OneTOneR
+                }
+            }
             ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => RfType::TwoTTwoR,
             ChipFamily::Rtl8812 => {
                 if sys_cfg & RF_TYPE_ID != 0 {
@@ -250,7 +300,10 @@ impl ChipInfo {
         let raw_cut = ((sys_cfg & CHIP_VER_RTL_MASK) >> CHIP_VER_RTL_SHIFT) as u8;
         let cut_version = if matches!(
             family,
-            ChipFamily::Rtl8814 | ChipFamily::Rtl8822c | ChipFamily::Rtl8822e
+            ChipFamily::Rtl8814
+                | ChipFamily::Rtl8822b
+                | ChipFamily::Rtl8822c
+                | ChipFamily::Rtl8822e
         ) {
             raw_cut
         } else {
@@ -414,6 +467,12 @@ pub struct MonitorOptions {
     ///
     /// Bits 0/4 select CCK/OFDM path A, 1/5 path B, 2/6 path C, and 3/7 path D.
     pub rx_path_mask: Option<u8>,
+    /// Override the EFUSE-selected RFE front-end type.
+    pub rfe_type_override: Option<u8>,
+    /// Optional RX CSI frequency mask applied after channel setup.
+    pub csi_mask: Option<CsiMaskSpec>,
+    /// Optional RX narrow-band notch frequency in kHz.
+    pub nbi_frequency_khz: Option<u32>,
 }
 
 impl Default for MonitorOptions {
@@ -427,6 +486,9 @@ impl Default for MonitorOptions {
             firmware_8814_mode: Firmware8814Mode::Kernel,
             firmware_8814_chunk: None,
             rx_path_mask: None,
+            rfe_type_override: None,
+            csi_mask: None,
+            nbi_frequency_khz: None,
         }
     }
 }
@@ -453,6 +515,12 @@ impl MonitorOptions {
                 firmware_8814_chunk: read_env_usize("DEVOURER_8814_FWDL_CHUNK")
                     .filter(|chunk| (64..=4096).contains(chunk)),
                 rx_path_mask: read_env_u8("DEVOURER_RX_PATHS"),
+                rfe_type_override: read_env_u8("DEVOURER_RFE"),
+                csi_mask: std::env::var("DEVOURER_RX_CSI_MASK")
+                    .ok()
+                    .and_then(|value| CsiMaskSpec::parse_mhz(&value)),
+                nbi_frequency_khz: read_env_u32("DEVOURER_RX_NBI")
+                    .and_then(|frequency| frequency.checked_mul(1000)),
                 ..Self::default()
             }
         }
@@ -479,6 +547,7 @@ impl MonitorOptions {
             ChipFamily::Rtl8812 => true,
             ChipFamily::Rtl8814 => self.force_iqk,
             ChipFamily::Rtl8821 => false,
+            ChipFamily::Rtl8822b => true,
             ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => true,
         }
     }
@@ -534,6 +603,8 @@ pub enum DriverError {
     UnsupportedIqkPath(ChipFamily),
     /// RX-chain masking is only supported by the Jaguar1 register layout.
     UnsupportedRxPathMask(ChipFamily),
+    /// Requested beamforming feedback mode is unsupported on this generation.
+    UnsupportedBeamformingMode(ChipFamily),
     /// TX power override was outside the Realtek TXAGC range.
     InvalidTxPower(u8),
     /// Realtek RX aggregate parse error.
@@ -578,6 +649,13 @@ impl fmt::Display for DriverError {
             Self::UnsupportedRxPathMask(chip) => {
                 write!(f, "{} does not use the Jaguar1 RX-path mask", chip.name())
             }
+            Self::UnsupportedBeamformingMode(chip) => {
+                write!(
+                    f,
+                    "{} does not support the requested beamforming mode",
+                    chip.name()
+                )
+            }
             Self::InvalidTxPower(power) => {
                 write!(
                     f,
@@ -612,6 +690,13 @@ fn read_env_u16(name: &str) -> Option<u16> {
         .ok()
         .and_then(|value| parse_env_integer(&value))
         .and_then(|value| u16::try_from(value).ok())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_env_u32(name: &str) -> Option<u32> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| parse_env_integer(&value))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -795,6 +880,13 @@ pub(crate) fn is_rtl8822c_pid(vid: u16, pid: u16) -> bool {
     matches!(
         ((vid as u32) << 16) | pid as u32,
         0x0BDAC812 | 0x0BDAC82C | 0x0BDAC82E
+    )
+}
+
+pub(crate) fn is_rtl8822b_pid(vid: u16, pid: u16) -> bool {
+    matches!(
+        ((vid as u32) << 16) | pid as u32,
+        0x0BDAB812 | 0x0BDAB82C | 0x2357012D
     )
 }
 

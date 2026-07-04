@@ -2,7 +2,7 @@
 use crate::tx::{build_usb_tx_frame, RealtekTxDescriptor, RealtekTxOptions};
 use nusb::descriptors::TransferType;
 #[cfg(not(target_arch = "wasm32"))]
-use nusb::transfer::{Buffer, TransferError};
+use nusb::transfer::Buffer;
 use nusb::transfer::{Bulk, In, Out};
 #[cfg(not(target_arch = "wasm32"))]
 use nusb::MaybeFuture;
@@ -48,7 +48,7 @@ pub struct RealtekDevice {
     pub bulk_out_ep: u8,
     pub(crate) bulk_out_ep_count: usize,
     pub(crate) detected_family: OnceLock<ChipFamily>,
-    pub(crate) jaguar3_efuse: OnceLock<[u8; 512]>,
+    pub(crate) efuse_logical_map: OnceLock<[u8; 512]>,
     pub(crate) efuse_info: OnceLock<EfuseInfo>,
     pub(crate) h2c_box: AtomicU8,
 }
@@ -234,7 +234,7 @@ impl RealtekDevice {
             bulk_out_ep,
             bulk_out_ep_count,
             detected_family: OnceLock::new(),
-            jaguar3_efuse: OnceLock::new(),
+            efuse_logical_map: OnceLock::new(),
             efuse_info: OnceLock::new(),
             h2c_box: AtomicU8::new(0),
         })
@@ -326,11 +326,31 @@ impl RealtekDevice {
         radiotap_packet: &[u8],
         current_channel: u8,
     ) -> Result<usize, DriverError> {
+        self.send_packet_for_radio(
+            radiotap_packet,
+            crate::types::RadioConfig {
+                channel: current_channel,
+                ..crate::types::RadioConfig::default()
+            },
+        )
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Build and send a packet using the adapter's full RF channel configuration.
+    ///
+    /// Passing the configured width is required for Jaguar3 40-in-80 subchannel
+    /// placement; [`Self::send_packet`] remains the 20 MHz compatibility API.
+    pub fn send_packet_for_radio(
+        &self,
+        radiotap_packet: &[u8],
+        radio: crate::types::RadioConfig,
+    ) -> Result<usize, DriverError> {
         let chip = self.probe_chip()?;
         let usb_frame = build_usb_tx_frame(
             radiotap_packet,
             RealtekTxOptions {
-                current_channel,
+                current_channel: radio.channel,
+                configured_channel_width: radio.channel_width,
                 descriptor: RealtekTxDescriptor::for_chip_family(chip.family),
                 legacy_8812_descriptor: std::env::var_os("DEVOURER_TX_LEGACY_8812_DESC").is_some(),
                 ..RealtekTxOptions::default()
@@ -480,13 +500,16 @@ impl RealtekDevice {
         usb_frame: &[u8],
     ) -> Result<usize, DriverError> {
         for attempt in 0..BULK_RETRY_ATTEMPTS {
-            let completion = ep.transfer_blocking(Buffer::from(usb_frame), USB_TIMEOUT);
+            let completion = ep.transfer_blocking(Buffer::from(usb_frame), tx_timeout());
             match completion.status {
                 Ok(()) => return Ok(completion.actual_len),
                 Err(err) if should_retry_transfer_error(err, attempt, BULK_RETRY_ATTEMPTS) => {
-                    if err == TransferError::Stall {
-                        let _ = ep.clear_halt().wait();
-                    }
+                    // A timed-out blocking nusb transfer is surfaced as
+                    // Cancelled. Devourer marks every non-OK async completion
+                    // as potentially wedged and re-clears the endpoint before
+                    // the next frame, so do the same for both transient and
+                    // explicit stall completions here.
+                    let _ = ep.clear_halt().wait();
                     std::thread::sleep(std::time::Duration::from_millis(
                         retry_delay_ms(attempt) as u64
                     ));
@@ -514,6 +537,7 @@ impl RealtekDevice {
             .copied()
             .or_else(|| supported_family_hint(self.vendor_id, self.product_id))
         {
+            Some(ChipFamily::Rtl8822b) => RxDescriptorKind::Jaguar2,
             Some(family) if family.is_jaguar3() => RxDescriptorKind::Jaguar3,
             _ => RxDescriptorKind::Jaguar1,
         }
@@ -598,6 +622,18 @@ impl RealtekDevice {
     pub fn write_u32(&self, register: u16, value: u32) -> Result<(), DriverError> {
         self.write_register(register, &value.to_le_bytes())
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn tx_timeout() -> std::time::Duration {
+    static TIMEOUT: OnceLock<std::time::Duration> = OnceLock::new();
+    *TIMEOUT.get_or_init(|| {
+        std::env::var("DEVOURER_TX_TIMEOUT_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(std::time::Duration::from_millis)
+            .unwrap_or(USB_TIMEOUT)
+    })
 }
 
 #[cfg(not(target_arch = "wasm32"))]

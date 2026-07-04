@@ -16,6 +16,7 @@ impl RealtekDevice {
             ChipFamily::Rtl8812 => rtl_data::RTL8812_MAC_REG,
             ChipFamily::Rtl8814 => rtl_data::RTL8814_MAC_REG,
             ChipFamily::Rtl8821 => rtl_data::RTL8821_MAC_REG,
+            ChipFamily::Rtl8822b => rtl_data::RTL8822B_MAC_REG,
             ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
                 return Err(DriverError::UnsupportedFirmwarePath(chip.family));
             }
@@ -35,6 +36,7 @@ impl RealtekDevice {
             ChipFamily::Rtl8812 => (rtl_data::RTL8812_PHY_REG, rtl_data::RTL8812_AGC_TAB),
             ChipFamily::Rtl8814 => (rtl_data::RTL8814_PHY_REG, rtl_data::RTL8814_AGC_TAB),
             ChipFamily::Rtl8821 => (rtl_data::RTL8821_PHY_REG, rtl_data::RTL8821_AGC_TAB),
+            ChipFamily::Rtl8822b => (rtl_data::RTL8822B_PHY_REG, rtl_data::RTL8822B_AGC_TAB),
             ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
                 return Err(DriverError::UnsupportedFirmwarePath(chip.family));
             }
@@ -125,6 +127,25 @@ impl RealtekDevice {
                     .await?;
                 }
             }
+            ChipFamily::Rtl8822b => {
+                for (path, table) in [
+                    (RfPath::A, rtl_data::RTL8822B_RADIO_A),
+                    (RfPath::B, rtl_data::RTL8822B_RADIO_B),
+                ] {
+                    if path.index() >= chip.total_rf_paths() {
+                        continue;
+                    }
+                    load_phy_table_async(
+                        table,
+                        phy_context(chip, efuse),
+                        |addr, value| async move {
+                            self.set_rf_reg_async(chip, path, addr as u16, B_LSSI_WRITE_DATA, value)
+                                .await
+                        },
+                    )
+                    .await?;
+                }
+            }
             ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
                 return Err(DriverError::UnsupportedFirmwarePath(chip.family));
             }
@@ -170,7 +191,11 @@ impl RealtekDevice {
         .await
     }
 
-    async fn config_bb_phy_async(&self, addr: u32, value: u32) -> Result<(), DriverError> {
+    pub(crate) async fn config_bb_phy_async(
+        &self,
+        addr: u32,
+        value: u32,
+    ) -> Result<(), DriverError> {
         match addr {
             0xfe => sleep_ms(50).await,
             0xfd => sleep_ms(5).await,

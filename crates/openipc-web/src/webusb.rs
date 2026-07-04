@@ -5,10 +5,11 @@ use openipc_rtl88xx::is_supported_id;
 use openipc_rtl88xx::SUPPORTED_DEVICES;
 #[cfg(target_arch = "wasm32")]
 use openipc_rtl88xx::{
-    BbDbgportRead, ChannelWidth, DriverOptions, FalseAlarmCounters, Firmware8814Mode, InitReport,
-    InitStatus, IqkReport, Jaguar3PowerTrackingReport, Jaguar3PowerTrackingState, MonitorOptions,
-    PhydmDigState, PhydmWatchdogReport, PowerTrackingReport, PowerTrackingState, RadioConfig,
-    RealtekDevice, RealtekTxDescriptor, RealtekTxOptions, ThermalBucket, ThermalStatus,
+    BbDbgportRead, BeamformingFeedback, ChannelWidth, CsiMaskSpec, DriverOptions,
+    FalseAlarmCounters, Firmware8814Mode, InitReport, InitStatus, IqkReport,
+    Jaguar3PowerTrackingReport, Jaguar3PowerTrackingState, MonitorOptions, PhydmDigState,
+    PhydmWatchdogReport, PowerTrackingReport, PowerTrackingState, RadioConfig, RealtekDevice,
+    RealtekTxDescriptor, RealtekTxOptions, ThermalBucket, ThermalStatus,
 };
 use wasm_bindgen::prelude::*;
 
@@ -550,6 +551,7 @@ impl WebUsbRealtekDevice {
     pub fn rx_descriptor_kind(&self) -> String {
         match self.driver.rx_descriptor_kind() {
             openipc_core::realtek::RxDescriptorKind::Jaguar3 => "jaguar3",
+            openipc_core::realtek::RxDescriptorKind::Jaguar2 => "jaguar2",
             openipc_core::realtek::RxDescriptorKind::Jaguar1 => "jaguar1",
         }
         .to_owned()
@@ -654,6 +656,7 @@ impl WebUsbRealtekDevice {
             firmware_8814_mode: mode,
             firmware_8814_chunk: optional_usize(firmware_8814_chunk, "firmware8814Chunk")?,
             rx_path_mask: None,
+            ..MonitorOptions::default()
         };
         let report = self
             .driver
@@ -750,6 +753,138 @@ impl WebUsbRealtekDevice {
                     ..RealtekTxOptions::default()
                 },
             )
+            .await
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = sendPacketForRadio)]
+    /// Send a packet with the full RF width needed for 40-in-80 placement.
+    pub async fn send_packet_for_radio(
+        &self,
+        radiotap_packet: &[u8],
+        current_channel: u8,
+        channel_width_mhz: u16,
+        legacy_8812_descriptor: bool,
+    ) -> Result<usize, JsValue> {
+        let chip = self.driver.probe_chip_async().await.map_err(driver_error)?;
+        self.driver
+            .send_packet_async(
+                radiotap_packet,
+                RealtekTxOptions {
+                    current_channel,
+                    configured_channel_width: parse_channel_width(channel_width_mhz)?,
+                    descriptor: RealtekTxDescriptor::for_chip_family(chip.family),
+                    legacy_8812_descriptor,
+                    ..RealtekTxOptions::default()
+                },
+            )
+            .await
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = armBeamformingSounder)]
+    /// Arm the hardware sounding engine; `ownMac` is empty or exactly six bytes.
+    pub async fn arm_beamforming_sounder(&self, own_mac: &[u8]) -> Result<(), JsValue> {
+        self.driver
+            .arm_beamforming_sounder_async(optional_mac(own_mac, "ownMac")?)
+            .await
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = armBeamformee)]
+    /// Arm an unassociated SU/MU beamformee responder.
+    pub async fn arm_beamformee(
+        &self,
+        beamformer_mac: &[u8],
+        own_mac: &[u8],
+        mu_feedback: bool,
+    ) -> Result<(), JsValue> {
+        self.driver
+            .arm_beamformee_async(
+                required_mac(beamformer_mac, "beamformerMac")?,
+                optional_mac(own_mac, "ownMac")?,
+                if mu_feedback {
+                    BeamformingFeedback::Mu
+                } else {
+                    BeamformingFeedback::Su
+                },
+            )
+            .await
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = applyCsiMask)]
+    /// Apply an RX CSI mask over an inclusive MHz range.
+    pub async fn apply_csi_mask(
+        &self,
+        channel: u8,
+        channel_width_mhz: u16,
+        channel_offset: u8,
+        low_mhz: u32,
+        high_mhz: u32,
+        weight: u8,
+    ) -> Result<usize, JsValue> {
+        let spec = CsiMaskSpec::new(
+            low_mhz
+                .checked_mul(1000)
+                .ok_or_else(|| JsValue::from_str("lowMhz is too large"))?,
+            high_mhz
+                .checked_mul(1000)
+                .ok_or_else(|| JsValue::from_str("highMhz is too large"))?,
+            weight,
+        )
+        .ok_or_else(|| JsValue::from_str("invalid CSI mask range or weight"))?;
+        self.driver
+            .apply_csi_mask_async(
+                RadioConfig {
+                    channel,
+                    channel_offset,
+                    channel_width: parse_channel_width(channel_width_mhz)?,
+                },
+                spec,
+            )
+            .await
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = clearCsiMask)]
+    /// Clear and disable the RX CSI mask.
+    pub async fn clear_csi_mask(&self) -> Result<(), JsValue> {
+        self.driver
+            .clear_csi_mask_async()
+            .await
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = applyNbiNotch)]
+    /// Enable one NBI notch at an absolute frequency in MHz.
+    pub async fn apply_nbi_notch(
+        &self,
+        channel: u8,
+        channel_width_mhz: u16,
+        channel_offset: u8,
+        frequency_mhz: u32,
+    ) -> Result<bool, JsValue> {
+        self.driver
+            .apply_nbi_notch_async(
+                RadioConfig {
+                    channel,
+                    channel_offset,
+                    channel_width: parse_channel_width(channel_width_mhz)?,
+                },
+                frequency_mhz
+                    .checked_mul(1000)
+                    .ok_or_else(|| JsValue::from_str("frequencyMhz is too large"))?,
+            )
+            .await
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = disableNbiNotch)]
+    /// Disable the generation-specific NBI filter.
+    pub async fn disable_nbi_notch(&self) -> Result<(), JsValue> {
+        self.driver
+            .disable_nbi_notch_async()
             .await
             .map_err(driver_error)
     }
@@ -1025,6 +1160,22 @@ fn parse_channel_width(width_mhz: u16) -> Result<ChannelWidth, JsValue> {
         _ => Err(JsValue::from_str(
             "unsupported channel width; expected 5, 10, 20, 40, or 80 MHz",
         )),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn required_mac(value: &[u8], name: &str) -> Result<[u8; 6], JsValue> {
+    value
+        .try_into()
+        .map_err(|_| JsValue::from_str(&format!("{name} must contain exactly 6 bytes")))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn optional_mac(value: &[u8], name: &str) -> Result<Option<[u8; 6]>, JsValue> {
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        required_mac(value, name).map(Some)
     }
 }
 

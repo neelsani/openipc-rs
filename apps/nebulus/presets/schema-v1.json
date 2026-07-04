@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/neelsani/openipc-rs/master/apps/nebulus/presets/schema-v1.json",
+  "title": "Nebulus preset pack",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "version", "name", "author", "license", "components"],
+  "properties": {
+    "$schema": { "type": "string", "maxLength": 256 },
+    "schemaVersion": { "const": 1 },
+    "id": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 96,
+      "pattern": "^[a-z0-9][a-z0-9._-]*\\.[a-z0-9._-]+$"
+    },
+    "version": { "type": "string", "maxLength": 32 },
+    "name": { "type": "string", "minLength": 1, "maxLength": 96 },
+    "author": { "type": "string", "minLength": 1, "maxLength": 96 },
+    "license": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "description": { "type": "string", "maxLength": 1024, "default": "" },
+    "minimumNebulusVersion": { "type": "string", "maxLength": 32 },
+    "components": { "$ref": "#/$defs/components" }
+  },
+  "$defs": {
+    "components": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "osd": { "$ref": "#/$defs/osd" },
+        "theme": { "enum": ["latte", "frappe", "macchiato", "mocha"] },
+        "routes": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/route" }
+        },
+        "telemetry": { "$ref": "#/$defs/telemetry" },
+        "performance": { "$ref": "#/$defs/performance" }
+      }
+    },
+    "osd": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 96 },
+        "hud": { "$ref": "#/$defs/hud" }
+      }
+    },
+    "hud": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 24,
+          "items": { "$ref": "#/$defs/hudItem" }
+        },
+        "scalePercent": { "type": "integer", "minimum": 70, "maximum": 160 },
+        "backgroundOpacity": { "type": "integer", "minimum": 0, "maximum": 255 }
+      }
+    },
+    "hudItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "metric": {
+          "enum": [
+            "resolution",
+            "frame-rate",
+            "bitrate",
+            "latency",
+            "signal",
+            "packet-loss",
+            "link-score",
+            "link-health",
+            "armed",
+            "flight-mode",
+            "battery-voltage",
+            "battery-current",
+            "battery-remaining",
+            "gps-status",
+            "altitude",
+            "ground-speed",
+            "vertical-speed",
+            "heading",
+            "home-distance",
+            "throttle",
+            "attitude",
+            "status-text",
+            "coordinates",
+            "rc-link-quality"
+          ]
+        },
+        "visible": { "type": "boolean" },
+        "x": { "type": "number", "minimum": 0.03, "maximum": 0.97 },
+        "y": { "type": "number", "minimum": 0.03, "maximum": 0.97 },
+        "showIcon": { "type": "boolean" },
+        "showLabel": { "type": "boolean" },
+        "showValue": { "type": "boolean" },
+        "showGraph": { "type": "boolean" },
+        "showSignalBars": { "type": "boolean" },
+        "showBackground": { "type": "boolean" },
+        "colorize": { "type": "boolean" },
+        "hideWhenUnavailable": { "type": "boolean" },
+        "scalePercent": { "type": "integer", "minimum": 60, "maximum": 200 },
+        "backgroundOpacityPercent": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "graphSeconds": { "type": "integer", "minimum": 5, "maximum": 60 },
+        "graphWidth": { "type": "integer", "minimum": 80, "maximum": 260 },
+        "graphHeight": { "type": "integer", "minimum": 32, "maximum": 120 },
+        "graphFill": { "type": "boolean" }
+      }
+    },
+    "route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "radioPort", "action"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "enabled": { "type": "boolean", "default": true },
+        "radioPort": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "action": { "enum": ["inspect", "log", "udp", "audio", "telemetry"] },
+        "telemetryProtocol": { "enum": ["auto", "mavlink", "msp", "crsf"] },
+        "payloadType": { "type": "integer", "minimum": 0, "maximum": 127 },
+        "sampleRate": { "type": "integer", "minimum": 8000, "maximum": 192000 },
+        "channels": { "type": "integer", "minimum": 1, "maximum": 8 }
+      }
+    },
+    "telemetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "staleTimeoutMs",
+        "mavlinkSigning",
+        "mavlinkSystemId",
+        "mavlinkComponentId",
+        "mspVersion",
+        "mspDirection",
+        "crsfAddress"
+      ],
+      "properties": {
+        "staleTimeoutMs": { "type": "integer", "minimum": 500, "maximum": 30000 },
+        "mavlinkSigning": { "enum": ["disabled", "verify-signed", "require-signed"] },
+        "mavlinkSystemId": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "mavlinkComponentId": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "mspVersion": { "enum": ["any", "v1", "v2"] },
+        "mspDirection": { "enum": ["any", "from-flight-controller", "to-flight-controller"] },
+        "crsfAddress": { "type": "integer", "minimum": 0, "maximum": 256 }
+      }
+    },
+    "performance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["codecPreference", "rtpReorder"],
+      "properties": {
+        "codecPreference": { "enum": ["auto", "h264", "h265"] },
+        "rtpReorder": { "type": "boolean" }
+      }
+    }
+  }
+}

@@ -483,6 +483,7 @@ impl RecvConfig {
             last_counters: counters,
             tx_options: RealtekTxOptions {
                 current_channel: self.radio.channel,
+                configured_channel_width: self.radio.channel_width,
                 descriptor: openipc_rtl88xx::RealtekTxDescriptor::for_chip_family(chip_family),
                 legacy_8812_descriptor: self.tx_legacy_8812_descriptor,
                 ..RealtekTxOptions::default()
@@ -667,6 +668,7 @@ struct ProcessRxOptions {
 
 fn rx_descriptor_kind(chip_family: ChipFamily) -> RxDescriptorKind {
     match chip_family {
+        ChipFamily::Rtl8822b => RxDescriptorKind::Jaguar2,
         ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => RxDescriptorKind::Jaguar3,
         ChipFamily::Rtl8812 | ChipFamily::Rtl8814 | ChipFamily::Rtl8821 => {
             RxDescriptorKind::Jaguar1

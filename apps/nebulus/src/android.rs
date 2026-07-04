@@ -21,6 +21,15 @@ use crate::runtime::UsbDeviceInfo;
 static ANDROID_APP: OnceLock<Mutex<Option<AndroidApp>>> = OnceLock::new();
 static KEY_FILE_RESULT: OnceLock<Mutex<Option<Result<SelectedKeyFile, String>>>> = OnceLock::new();
 static KEY_FILE_CONTEXT: OnceLock<Mutex<Option<eframe::egui::Context>>> = OnceLock::new();
+static PRESET_FILE_RESULT: OnceLock<Mutex<Option<Result<SelectedPresetFile, String>>>> =
+    OnceLock::new();
+static PRESET_FILE_CONTEXT: OnceLock<Mutex<Option<eframe::egui::Context>>> = OnceLock::new();
+static REMOTE_PRESET_RESULT: OnceLock<
+    Mutex<Option<Result<crate::remote_presets::RemoteDownload, String>>>,
+> = OnceLock::new();
+static REMOTE_PRESET_CONTEXT: OnceLock<Mutex<Option<eframe::egui::Context>>> = OnceLock::new();
+static REMOTE_PRESET_REQUEST: OnceLock<Mutex<Option<crate::remote_presets::RemoteRequest>>> =
+    OnceLock::new();
 #[derive(Default)]
 struct VpnRequestState {
     waiting: bool,
@@ -32,6 +41,11 @@ static VPN_RESULT: OnceLock<VpnResult> = OnceLock::new();
 const USB_PERMISSION_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) struct SelectedKeyFile {
+    pub(crate) name: String,
+    pub(crate) bytes: Vec<u8>,
+}
+
+pub(crate) struct SelectedPresetFile {
     pub(crate) name: String,
     pub(crate) bytes: Vec<u8>,
 }
@@ -227,7 +241,80 @@ pub(crate) fn open_key_file(context: eframe::egui::Context) -> Result<(), String
     .map_err(|error: jni::errors::Error| format!("Android key picker failed: {error}"))
 }
 
+pub(crate) fn open_preset_file(context: eframe::egui::Context) -> Result<(), String> {
+    *PRESET_FILE_CONTEXT
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("Android preset picker context mutex poisoned") = Some(context);
+    let app = app()?;
+    let vm = java_vm(&app)?;
+    vm.attach_current_thread(|env| {
+        let raw_activity = app.activity_as_ptr() as jni::sys::jobject;
+        // SAFETY: android-activity owns this global activity reference for the
+        // lifetime of the cloned AndroidApp handle.
+        let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&raw_activity)? };
+        env.call_method(&activity, jni_str!("openPresetFile"), jni_sig!("()V"), &[])?;
+        Ok(())
+    })
+    .map_err(|error: jni::errors::Error| format!("Android preset picker failed: {error}"))
+}
+
+pub(crate) fn download_remote_preset(
+    request: crate::remote_presets::RemoteRequest,
+    context: eframe::egui::Context,
+) -> Result<(), String> {
+    let url = request.url.clone();
+    *REMOTE_PRESET_CONTEXT
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("Android remote preset context mutex poisoned") = Some(context);
+    *REMOTE_PRESET_REQUEST
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("Android remote preset request mutex poisoned") = Some(request);
+    let result = (|| {
+        let app = app()?;
+        let vm = java_vm(&app)?;
+        vm.attach_current_thread(|env| {
+            let raw_activity = app.activity_as_ptr() as jni::sys::jobject;
+            // SAFETY: android-activity owns this global activity reference for
+            // the lifetime of the cloned AndroidApp handle.
+            let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&raw_activity)? };
+            let url = env.new_string(url)?;
+            env.call_method(
+                &activity,
+                jni_str!("downloadPresetUrl"),
+                jni_sig!("(Ljava/lang/String;)V"),
+                &[JValue::Object(url.as_ref())],
+            )?;
+            Ok(())
+        })
+        .map_err(|error: jni::errors::Error| {
+            format!("Android preset download failed to start: {error}")
+        })
+    })();
+    if result.is_err() {
+        if let Ok(mut request) = REMOTE_PRESET_REQUEST
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+        {
+            request.take();
+        }
+        if let Ok(mut context) = REMOTE_PRESET_CONTEXT
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+        {
+            context.take();
+        }
+    }
+    result
+}
+
 pub(crate) fn save_file(name: &str, bytes: &[u8]) -> Result<(), String> {
+    save_document(name, "application/zip", bytes)
+}
+
+pub(crate) fn save_document(name: &str, mime_type: &str, bytes: &[u8]) -> Result<(), String> {
     let app = app()?;
     let vm = java_vm(&app)?;
     vm.attach_current_thread(|env| {
@@ -235,13 +322,15 @@ pub(crate) fn save_file(name: &str, bytes: &[u8]) -> Result<(), String> {
         // SAFETY: android-activity owns this activity global reference.
         let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&raw_activity)? };
         let name = env.new_string(name)?;
+        let mime_type = env.new_string(mime_type)?;
         let bytes = env.byte_array_from_slice(bytes)?;
         env.call_method(
             &activity,
-            jni_str!("saveSupportBundle"),
-            jni_sig!("(Ljava/lang/String;[B)V"),
+            jni_str!("saveDocument"),
+            jni_sig!("(Ljava/lang/String;Ljava/lang/String;[B)V"),
             &[
                 JValue::Object(name.as_ref()),
+                JValue::Object(mime_type.as_ref()),
                 JValue::Object(bytes.as_ref()),
             ],
         )?;
@@ -260,6 +349,23 @@ pub(crate) fn recordings_directory() -> Result<std::path::PathBuf, String> {
 
 pub(crate) fn take_key_file_result() -> Option<Result<SelectedKeyFile, String>> {
     KEY_FILE_RESULT
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()?
+        .take()
+}
+
+pub(crate) fn take_preset_file_result() -> Option<Result<SelectedPresetFile, String>> {
+    PRESET_FILE_RESULT
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()?
+        .take()
+}
+
+pub(crate) fn take_remote_preset_result(
+) -> Option<Result<crate::remote_presets::RemoteDownload, String>> {
+    REMOTE_PRESET_RESULT
         .get_or_init(|| Mutex::new(None))
         .lock()
         .ok()?
@@ -343,6 +449,46 @@ fn finish_key_file(result: Result<SelectedKeyFile, String>) {
     }
 }
 
+fn finish_preset_file(result: Result<SelectedPresetFile, String>) {
+    if let Ok(mut pending) = PRESET_FILE_RESULT.get_or_init(|| Mutex::new(None)).lock() {
+        *pending = Some(result);
+    }
+    if let Some(context) = PRESET_FILE_CONTEXT
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|mut context| context.take())
+    {
+        context.request_repaint();
+    }
+}
+
+fn finish_remote_preset(result: Result<(String, Vec<u8>), String>) {
+    let request = REMOTE_PRESET_REQUEST
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|mut request| request.take());
+    let result = match (request, result) {
+        (Some(request), Ok((final_url, bytes))) => {
+            crate::remote_presets::RemoteDownload::from_parts(request, final_url, bytes)
+        }
+        (Some(_), Err(error)) => Err(error),
+        (None, _) => Err("Android returned an unexpected preset download".to_owned()),
+    };
+    if let Ok(mut pending) = REMOTE_PRESET_RESULT.get_or_init(|| Mutex::new(None)).lock() {
+        *pending = Some(result);
+    }
+    if let Some(context) = REMOTE_PRESET_CONTEXT
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|mut context| context.take())
+    {
+        context.request_repaint();
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_neels_openipc_nebulus_NebulusActivity_nativeKeySelected<'local>(
     mut unowned_env: EnvUnowned<'local>,
@@ -370,6 +516,76 @@ pub extern "system" fn Java_dev_neels_openipc_nebulus_NebulusActivity_nativeKeyE
     unowned_env
         .with_env(|env| -> jni::errors::Result<()> {
             finish_key_file(Err(message.try_to_string(env)?));
+            Ok(())
+        })
+        .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_neels_openipc_nebulus_NebulusActivity_nativePresetSelected<
+    'local,
+>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    name: JString<'local>,
+    bytes: JByteArray<'local>,
+) {
+    unowned_env
+        .with_env(|env| -> jni::errors::Result<()> {
+            finish_preset_file(Ok(SelectedPresetFile {
+                name: name.try_to_string(env)?,
+                bytes: env.convert_byte_array(&bytes)?,
+            }));
+            Ok(())
+        })
+        .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_neels_openipc_nebulus_NebulusActivity_nativePresetError<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    message: JString<'local>,
+) {
+    unowned_env
+        .with_env(|env| -> jni::errors::Result<()> {
+            finish_preset_file(Err(message.try_to_string(env)?));
+            Ok(())
+        })
+        .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_neels_openipc_nebulus_NebulusActivity_nativeRemotePresetDownloaded<
+    'local,
+>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    final_url: JString<'local>,
+    bytes: JByteArray<'local>,
+) {
+    unowned_env
+        .with_env(|env| -> jni::errors::Result<()> {
+            finish_remote_preset(Ok((
+                final_url.try_to_string(env)?,
+                env.convert_byte_array(&bytes)?,
+            )));
+            Ok(())
+        })
+        .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_neels_openipc_nebulus_NebulusActivity_nativeRemotePresetError<
+    'local,
+>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    message: JString<'local>,
+) {
+    unowned_env
+        .with_env(|env| -> jni::errors::Result<()> {
+            finish_remote_preset(Err(message.try_to_string(env)?));
             Ok(())
         })
         .resolve::<jni::errors::ThrowRuntimeExAndDefault>()

@@ -21,6 +21,7 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
             for (column, theme) in columns.iter_mut().zip(themes.iter().copied()) {
                 if theme_button(column, theme, app.settings.gui_theme).clicked() {
                     app.settings.gui_theme = theme;
+                    app.settings.gui_theme_preset_source = None;
                     super::theme::apply(column.ctx(), theme);
                 }
             }
@@ -79,6 +80,7 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
     ui.add_space(14.0);
     if ui.button("Reset GUI settings").clicked() {
         app.settings.gui_theme = GuiTheme::Macchiato;
+        app.settings.gui_theme_preset_source = None;
         app.settings.interface_scale_percent = 100;
         app.settings.show_osd = true;
         app.settings.show_sidebar = true;

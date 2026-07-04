@@ -91,7 +91,7 @@ impl RealtekDevice {
             bulk_out_ep,
             bulk_out_ep_count,
             detected_family: OnceLock::new(),
-            jaguar3_efuse: OnceLock::new(),
+            efuse_logical_map: OnceLock::new(),
             efuse_info: OnceLock::new(),
             h2c_box: AtomicU8::new(0),
         })
@@ -133,19 +133,32 @@ impl RealtekDevice {
         );
         let chip = self.probe_chip_async().await?;
         log::debug!(target: "openipc_rtl88xx::init", "probed Realtek adapter: {chip:?}");
+        if chip.family.is_jaguar2() {
+            let report = self
+                .initialize_monitor_jaguar2_async(chip, radio, options)
+                .await?;
+            self.apply_interference_mitigation_async(chip, radio, options)
+                .await?;
+            return Ok(report);
+        }
         let mut firmware_downloaded = false;
         let mut status = InitStatus::Initialized;
         let early_efuse_info = match chip.family {
             ChipFamily::Rtl8812 | ChipFamily::Rtl8821 => {
                 Some(self.read_efuse_info_async(chip).await?)
             }
-            ChipFamily::Rtl8814 | ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => None,
+            ChipFamily::Rtl8814
+            | ChipFamily::Rtl8822b
+            | ChipFamily::Rtl8822c
+            | ChipFamily::Rtl8822e => None,
         };
 
         let fw_state = self.read_u32_async(REG_MCUFWDL).await.unwrap_or(0);
         let fw_already_running = match chip.family {
             ChipFamily::Rtl8814 => (fw_state & 0xff) == 0x78 || (fw_state & BIT15) != 0,
-            ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => (fw_state & 0xffff) == 0xc078,
+            ChipFamily::Rtl8822b | ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
+                (fw_state & 0xffff) == 0xc078
+            }
             _ => (fw_state & WINTINI_RDY) != 0,
         };
         log::debug!(
@@ -154,9 +167,12 @@ impl RealtekDevice {
         );
 
         if chip.family.is_jaguar3() {
-            return self
+            let report = self
                 .initialize_monitor_jaguar3_async(chip, radio, options, fw_already_running)
-                .await;
+                .await?;
+            self.apply_interference_mitigation_async(chip, radio, options)
+                .await?;
+            return Ok(report);
         }
 
         if fw_already_running {
@@ -185,6 +201,7 @@ impl RealtekDevice {
                 ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
                     unreachable!("Jaguar3 is handled before generic init")
                 }
+                ChipFamily::Rtl8822b => unreachable!("Jaguar2 is handled before generic init"),
             }
         }
 
@@ -227,6 +244,8 @@ impl RealtekDevice {
             self.set_rx_path_mask_for_chip_async(chip, mask).await?;
         }
         self.set_monitor_mode_async(options.accept_bad_fcs).await?;
+        self.apply_interference_mitigation_async(chip, radio, options)
+            .await?;
 
         let report = InitReport {
             chip,
@@ -262,7 +281,24 @@ impl RealtekDevice {
         let chip = self.probe_chip_async().await?;
         if chip.family.is_jaguar3() {
             return self
-                .set_channel_bwmode_8822c_async(chip, radio.channel, radio.channel_width)
+                .set_channel_bwmode_8822c_async(
+                    chip,
+                    radio.channel,
+                    radio.channel_offset,
+                    radio.channel_width,
+                )
+                .await;
+        }
+        if chip.family.is_jaguar2() {
+            let efuse = if let Some(efuse) = self.efuse_info.get().copied() {
+                efuse
+            } else {
+                let efuse = self.read_efuse_info_async(chip).await?;
+                let _ = self.efuse_info.set(efuse);
+                efuse
+            };
+            return self
+                .set_channel_bw_8822b_async(chip, radio, efuse.rfe_type)
                 .await;
         }
         let efuse = if let Some(efuse) = self.efuse_info.get().copied() {
@@ -290,7 +326,7 @@ impl RealtekDevice {
         chip: ChipInfo,
         mask: u8,
     ) -> Result<(), DriverError> {
-        if chip.family.is_jaguar3() {
+        if chip.family.uses_halmac_descriptor() {
             return Err(DriverError::UnsupportedRxPathMask(chip.family));
         }
         self.write_u8_async(0x0808, mask).await
@@ -301,6 +337,7 @@ impl RealtekDevice {
         chip: ChipInfo,
     ) -> Result<(), DriverError> {
         match chip.family {
+            ChipFamily::Rtl8822b => self.shutdown_monitor_jaguar2_async().await,
             ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
                 self.shutdown_monitor_jaguar3_async().await
             }
@@ -329,9 +366,10 @@ impl RealtekDevice {
                     return Ok(completion.buffer[..completion.actual_len].to_vec());
                 }
                 Err(err) if should_retry_transfer_error(err, attempt, BULK_RETRY_ATTEMPTS) => {
-                    if err == TransferError::Stall {
-                        let _ = endpoint.clear_halt().await;
-                    }
+                    // Devourer treats any failed TX completion as a possibly
+                    // wedged endpoint. WebUSB has no separate timeout knob,
+                    // but it can recover the endpoint before retrying.
+                    let _ = endpoint.clear_halt().await;
                     crate::time::sleep_ms(retry_delay_ms(attempt)).await;
                 }
                 Err(err) => return Err(transfer_error("bulk IN transfer failed", err)),
@@ -510,9 +548,7 @@ impl RealtekDevice {
                 Err(err)
                     if should_retry_transfer_error(err, attempt, FIRMWARE_BULK_RETRY_ATTEMPTS) =>
                 {
-                    if err == TransferError::Stall {
-                        let _ = endpoint.clear_halt().await;
-                    }
+                    let _ = endpoint.clear_halt().await;
                     crate::time::sleep_ms(retry_delay_ms(attempt)).await;
                 }
                 Err(err) => return Err(transfer_error("raw bulk OUT transfer failed", err)),
@@ -533,16 +569,15 @@ impl RealtekDevice {
             .wait()
             .map_err(|err| DriverError::Nusb(format!("clear halt on bulk OUT failed: {err}")))?;
         for attempt in 0..BULK_RETRY_ATTEMPTS {
-            let completion = endpoint.transfer_blocking(Buffer::from(transfer), USB_TIMEOUT);
+            let completion =
+                endpoint.transfer_blocking(Buffer::from(transfer), crate::device::tx_timeout());
             match completion.status {
                 Ok(()) => {
                     log::trace!(target: "openipc_rtl88xx::usb", "bulk OUT complete endpoint=0x{:02x} bytes={}", self.bulk_out_ep, completion.actual_len);
                     return Ok(completion.actual_len);
                 }
                 Err(err) if should_retry_transfer_error(err, attempt, BULK_RETRY_ATTEMPTS) => {
-                    if err == TransferError::Stall {
-                        let _ = endpoint.clear_halt().wait();
-                    }
+                    let _ = endpoint.clear_halt().wait();
                     crate::time::sleep_ms(retry_delay_ms(attempt)).await;
                 }
                 Err(err) => return Err(transfer_error("bulk OUT transfer failed", err)),
@@ -571,9 +606,7 @@ impl RealtekDevice {
                 Err(err)
                     if should_retry_transfer_error(err, attempt, FIRMWARE_BULK_RETRY_ATTEMPTS) =>
                 {
-                    if err == TransferError::Stall {
-                        let _ = endpoint.clear_halt().wait();
-                    }
+                    let _ = endpoint.clear_halt().wait();
                     crate::time::sleep_ms(retry_delay_ms(attempt)).await;
                 }
                 Err(err) => return Err(transfer_error("raw bulk OUT transfer failed", err)),

@@ -1,0 +1,47 @@
+{
+  "$schema": "https://raw.githubusercontent.com/neelsani/openipc-rs/master/apps/nebulus/presets/schema-v1.json",
+  "schemaVersion": 1,
+  "id": "openipc.standard-fpv",
+  "version": "1.0.0",
+  "name": "OpenIPC standard FPV",
+  "author": "openipc-rs",
+  "license": "MIT",
+  "description": "Standard OpenIPC telemetry and mixed Opus audio routes with the default flight OSD.",
+  "minimumNebulusVersion": "0.1.29",
+  "components": {
+    "osd": {
+      "name": "OpenIPC flight OSD"
+    },
+    "routes": [
+      {
+        "name": "Telemetry",
+        "enabled": true,
+        "radioPort": 1,
+        "action": "telemetry",
+        "telemetryProtocol": "auto"
+      },
+      {
+        "name": "Mixed RTP audio",
+        "enabled": true,
+        "radioPort": 0,
+        "action": "audio",
+        "payloadType": 111,
+        "sampleRate": 48000,
+        "channels": 1
+      }
+    ],
+    "telemetry": {
+      "staleTimeoutMs": 3000,
+      "mavlinkSigning": "disabled",
+      "mavlinkSystemId": 0,
+      "mavlinkComponentId": 0,
+      "mspVersion": "any",
+      "mspDirection": "any",
+      "crsfAddress": 256
+    },
+    "performance": {
+      "codecPreference": "auto",
+      "rtpReorder": false
+    }
+  }
+}

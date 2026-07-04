@@ -12,6 +12,8 @@ mod async_firmware;
 mod async_firmware_8814;
 mod async_iqk;
 mod async_iqk_8812;
+mod async_jaguar2;
+mod async_jaguar2_iqk;
 mod async_jaguar3;
 mod async_jaguar3_8822e;
 mod async_jaguar3_iqk;
@@ -21,6 +23,7 @@ mod async_power_tracking;
 mod async_radio;
 mod async_tables;
 mod async_tx_power;
+mod beamforming;
 mod device;
 mod firmware;
 mod phy;
@@ -28,6 +31,7 @@ mod power;
 mod regs;
 mod rtl_data;
 mod time;
+mod tone_mask;
 mod tx;
 mod tx_power_defaults;
 mod types;
@@ -39,7 +43,9 @@ pub use async_iqk::IqkReport;
 pub use async_jaguar3_iqk::{Jaguar3PowerTrackingReport, Jaguar3PowerTrackingState};
 pub use async_phydm::{FalseAlarmCounters, PhydmDigState, PhydmWatchdogReport};
 pub use async_power_tracking::{PowerTrackingReport, PowerTrackingState};
+pub use beamforming::{parse_beamforming_report, BeamformingFeedback, BeamformingReport};
 pub use device::RealtekDevice;
+pub use tone_mask::{center_frequency_mhz, enumerate_mask_tones, CsiMaskSpec};
 pub use tx::{
     build_usb_tx_frame, RealtekTxDescriptor, RealtekTxError, RealtekTxOptions, TX_DESC_SIZE,
     TX_DESC_SIZE_8822C,
@@ -87,6 +93,25 @@ mod tests {
     }
 
     #[test]
+    fn detects_jaguar2_pids_and_authoritative_chip_ids() {
+        for (vendor_id, product_id) in [(0x0bda, 0xb812), (0x0bda, 0xb82c), (0x2357, 0x012d)] {
+            assert!(types::is_rtl8822b_pid(vendor_id, product_id));
+            assert_eq!(
+                supported_family_hint(vendor_id, product_id),
+                Some(ChipFamily::Rtl8822b)
+            );
+        }
+
+        for chip_id in [0x0a, 0x50] {
+            let chip = ChipInfo::from_probe(0x0bda, 0x8812, 1 << 27, chip_id);
+            assert_eq!(chip.family, ChipFamily::Rtl8822b);
+            assert_eq!(chip.rf_type, RfType::TwoTTwoR);
+        }
+        let one_path = ChipInfo::from_probe(0x0bda, 0xb812, 0, 0x0a);
+        assert_eq!(one_path.rf_type, RfType::OneTOneR);
+    }
+
+    #[test]
     fn detects_rtl8822e_pids_and_shared_pid_chip_id() {
         for product_id in [0x881c, 0xa81a, 0xe822, 0xa82a] {
             assert!(types::is_rtl8822e_pid(0x0bda, product_id));
@@ -111,5 +136,17 @@ mod tests {
             ChipInfo::from_probe(0x0bda, 0xc812, 0, 0x17).family,
             ChipFamily::Rtl8822e
         );
+    }
+
+    #[test]
+    fn generated_rtl8822b_reference_payload_has_vendor_shapes() {
+        assert_eq!(rtl_data::RTL8822B_FW_NIC.len(), 161_240);
+        assert!(rtl_data::RTL8822B_MAC_REG.len().is_multiple_of(2));
+        assert!(rtl_data::RTL8822B_PHY_REG.len().is_multiple_of(2));
+        assert!(rtl_data::RTL8822B_AGC_TAB.len().is_multiple_of(2));
+        assert!(rtl_data::RTL8822B_RADIO_A.len().is_multiple_of(2));
+        assert!(rtl_data::RTL8822B_RADIO_B.len().is_multiple_of(2));
+        assert!(!rtl_data::RTL8822B_TX_POWER_LIMITS_WW.is_empty());
+        assert!(!rtl_data::RTL8822B_TX_POWER_LIMITS_TYPE3_WW.is_empty());
     }
 }

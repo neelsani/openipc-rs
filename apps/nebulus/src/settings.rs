@@ -1,7 +1,11 @@
 use openipc_core::{channel::DEFAULT_LINK_ID, ChannelId, RadioPort};
 use serde::{Deserialize, Serialize};
 
-use crate::telemetry::{TelemetryProtocol, TelemetrySettings};
+use crate::{
+    presets::{PresetPack, PresetSource, MAX_INSTALLED_PRESETS},
+    remote_presets::DEFAULT_REGISTRY_URL,
+    telemetry::{TelemetryProtocol, TelemetrySettings},
+};
 
 pub(crate) const DEFAULT_KEY_BYTES: &[u8; 64] = &[
     0xbb, 0xb7, 0xed, 0x6e, 0x83, 0xa4, 0x6a, 0x8a, 0x9b, 0x8a, 0x12, 0xa0, 0xf9, 0x8e, 0xce, 0x2b,
@@ -465,6 +469,7 @@ pub(crate) struct OsdProfile {
     pub(crate) id: u64,
     pub(crate) name: String,
     pub(crate) hud: HudSettings,
+    pub(crate) source: Option<PresetSource>,
 }
 
 impl OsdProfile {
@@ -473,6 +478,7 @@ impl OsdProfile {
             id,
             name,
             hud: hud.clone(),
+            source: None,
         }
     }
 }
@@ -483,6 +489,7 @@ impl Default for OsdProfile {
             id: 1,
             name: "Default OSD".to_owned(),
             hud: HudSettings::default(),
+            source: None,
         }
     }
 }
@@ -547,6 +554,10 @@ pub(crate) struct ReceiverProfile {
     pub(crate) transfer_size: usize,
     pub(crate) vpn_enabled: bool,
     pub(crate) key_bytes: Vec<u8>,
+    pub(crate) osd_profile_id: Option<u64>,
+    pub(crate) route_preset_source: Option<PresetSource>,
+    pub(crate) telemetry_preset_source: Option<PresetSource>,
+    pub(crate) performance_preset_source: Option<PresetSource>,
 }
 
 impl ReceiverProfile {
@@ -574,6 +585,10 @@ impl ReceiverProfile {
             transfer_size: settings.transfer_size,
             vpn_enabled: settings.vpn_enabled,
             key_bytes: settings.key_bytes.clone(),
+            osd_profile_id: settings.active_osd_profile_id,
+            route_preset_source: settings.route_preset_source.clone(),
+            telemetry_preset_source: settings.telemetry_preset_source.clone(),
+            performance_preset_source: settings.performance_preset_source.clone(),
         }
     }
 
@@ -600,7 +615,13 @@ impl ReceiverProfile {
         settings.transfer_size = self.transfer_size;
         settings.vpn_enabled = self.vpn_enabled;
         settings.key_bytes.clone_from(&self.key_bytes);
+        settings.route_preset_source = self.route_preset_source.clone();
+        settings.telemetry_preset_source = self.telemetry_preset_source.clone();
+        settings.performance_preset_source = self.performance_preset_source.clone();
         settings.active_profile_id = Some(self.id);
+        if let Some(id) = self.osd_profile_id {
+            settings.apply_osd_profile(id);
+        }
     }
 }
 
@@ -629,6 +650,10 @@ impl Default for ReceiverProfile {
             transfer_size: openipc_core::realtek::DEFAULT_RX_TRANSFER_SIZE,
             vpn_enabled: false,
             key_bytes: DEFAULT_KEY_BYTES.to_vec(),
+            osd_profile_id: Some(1),
+            route_preset_source: None,
+            telemetry_preset_source: None,
+            performance_preset_source: None,
         }
     }
 }
@@ -715,6 +740,7 @@ pub(crate) struct Settings {
     pub(crate) show_osd: bool,
     pub(crate) show_sidebar: bool,
     pub(crate) gui_theme: GuiTheme,
+    pub(crate) gui_theme_preset_source: Option<PresetSource>,
     pub(crate) interface_scale_percent: u16,
     pub(crate) audio_volume: u8,
     /// Native recording folder. Empty selects the platform default.
@@ -735,6 +761,12 @@ pub(crate) struct Settings {
     pub(crate) osd_profiles: Vec<OsdProfile>,
     #[serde(default)]
     pub(crate) active_osd_profile_id: Option<u64>,
+    #[serde(default)]
+    pub(crate) installed_presets: Vec<PresetPack>,
+    pub(crate) preset_source_url: String,
+    pub(crate) route_preset_source: Option<PresetSource>,
+    pub(crate) telemetry_preset_source: Option<PresetSource>,
+    pub(crate) performance_preset_source: Option<PresetSource>,
 }
 
 impl Settings {
@@ -758,6 +790,29 @@ impl Settings {
             .max()
             .unwrap_or(0)
             .saturating_add(1)
+    }
+
+    pub(crate) fn install_preset(&mut self, pack: PresetPack) -> Result<(), String> {
+        if let Some(existing) = self
+            .installed_presets
+            .iter()
+            .find(|existing| existing.id == pack.id && existing.version == pack.version)
+        {
+            if existing == &pack {
+                return Ok(());
+            }
+            return Err(format!(
+                "preset {} {} is already installed with different contents",
+                pack.id, pack.version
+            ));
+        }
+        if self.installed_presets.len() >= MAX_INSTALLED_PRESETS {
+            return Err(format!(
+                "at most {MAX_INSTALLED_PRESETS} preset versions can be installed"
+            ));
+        }
+        self.installed_presets.push(pack);
+        Ok(())
     }
 
     /// Writes the live OSD editor state back to the selected named layout.
@@ -825,9 +880,32 @@ impl Settings {
         self.sync_active_osd_profile();
         self.telemetry.normalize();
         normalize_payload_routes(&mut self.payload_routes);
+        let mut installed = Vec::with_capacity(self.installed_presets.len());
+        for mut pack in std::mem::take(&mut self.installed_presets) {
+            let duplicate = installed.iter().any(|existing: &PresetPack| {
+                existing.id == pack.id && existing.version == pack.version
+            });
+            if !duplicate && pack.normalize_and_validate().is_ok() {
+                installed.push(pack);
+            }
+            if installed.len() == MAX_INSTALLED_PRESETS {
+                break;
+            }
+        }
+        self.installed_presets = installed;
+        if self.preset_source_url.chars().count() > 2_048 {
+            self.preset_source_url = self.preset_source_url.chars().take(2_048).collect();
+        }
+        let fallback_osd = self.active_osd_profile_id;
         for profile in &mut self.profiles {
             profile.telemetry.normalize();
             normalize_payload_routes(&mut profile.payload_routes);
+            if profile
+                .osd_profile_id
+                .is_none_or(|id| !self.osd_profiles.iter().any(|osd| osd.id == id))
+            {
+                profile.osd_profile_id = fallback_osd;
+            }
         }
         if let Some(primary) = self.device_id.as_ref() {
             self.diversity_device_ids.retain(|id| id != primary);
@@ -872,6 +950,7 @@ impl Default for Settings {
             show_osd: true,
             show_sidebar: true,
             gui_theme: GuiTheme::Macchiato,
+            gui_theme_preset_source: None,
             interface_scale_percent: 100,
             audio_volume: 80,
             recording_directory: String::new(),
@@ -887,6 +966,11 @@ impl Default for Settings {
             hud: HudSettings::default(),
             osd_profiles: vec![OsdProfile::default()],
             active_osd_profile_id: Some(1),
+            installed_presets: Vec::new(),
+            preset_source_url: DEFAULT_REGISTRY_URL.to_owned(),
+            route_preset_source: None,
+            telemetry_preset_source: None,
+            performance_preset_source: None,
         }
     }
 }
@@ -999,6 +1083,10 @@ mod tests {
         assert_eq!(settings.osd_profiles.len(), 1);
         assert_eq!(settings.active_osd_profile_id, Some(1));
         assert_eq!(settings.osd_profiles[0].hud, settings.hud);
+        assert_eq!(
+            settings.preset_source_url,
+            crate::remote_presets::DEFAULT_REGISTRY_URL
+        );
     }
 
     #[test]
@@ -1054,6 +1142,21 @@ mod tests {
         assert!(settings.apply_osd_profile(2));
         assert_eq!(settings.hud.scale_percent, 145);
         assert_eq!(settings.hud.background_opacity, 80);
+    }
+
+    #[test]
+    fn receiver_profile_restores_its_referenced_osd() {
+        let mut settings = Settings::default();
+        settings
+            .osd_profiles
+            .push(OsdProfile::capture(2, "Race OSD".to_owned(), &settings.hud));
+        assert!(settings.apply_osd_profile(2));
+        let profile = ReceiverProfile::capture(9, "Race quad".to_owned(), &settings);
+        assert_eq!(profile.osd_profile_id, Some(2));
+
+        assert!(settings.apply_osd_profile(1));
+        profile.apply(&mut settings);
+        assert_eq!(settings.active_osd_profile_id, Some(2));
     }
 
     #[test]

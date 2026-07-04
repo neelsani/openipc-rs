@@ -1753,6 +1753,7 @@ mod worker {
             last_fec: fec,
             tx_options: RealtekTxOptions {
                 current_channel: request.channel,
+                configured_channel_width: channel_width(request.channel_width_mhz)?,
                 descriptor: RealtekTxDescriptor::for_chip_family(chip),
                 ..RealtekTxOptions::default()
             },

@@ -17,6 +17,9 @@
     <usb-device vendor-id="0409" product-id="0408" />
     <usb-device vendor-id="0586" product-id="3426" />
     <usb-device vendor-id="0BDA" product-id="8813" />
+    <usb-device vendor-id="0BDA" product-id="B812" />
+    <usb-device vendor-id="0BDA" product-id="B82C" />
+    <usb-device vendor-id="2357" product-id="012D" />
     <usb-device vendor-id="0BDA" product-id="0820" />
     <usb-device vendor-id="0BDA" product-id="0821" />
     <usb-device vendor-id="0BDA" product-id="0823" />

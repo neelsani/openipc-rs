@@ -1,0 +1,19 @@
+{
+  "$schema": "https://raw.githubusercontent.com/neelsani/openipc-rs/master/apps/nebulus/presets/registry-schema-v1.json",
+  "schemaVersion": 1,
+  "name": "openipc-rs presets",
+  "description": "Maintained preset packs for Nebulus and OpenIPC FPV receivers.",
+  "homepage": "https://github.com/neelsani/openipc-rs/tree/master/apps/nebulus/presets",
+  "presets": [
+    {
+      "id": "openipc.standard-fpv",
+      "version": "1.0.0",
+      "name": "OpenIPC standard FPV",
+      "author": "openipc-rs",
+      "license": "MIT",
+      "description": "Standard OpenIPC telemetry and mixed Opus audio routes with the default flight OSD.",
+      "downloadUrl": "openipc-standard.nebulus-preset.json",
+      "sha256": "f6e08f01b1b573e335c5c46b3d182770becc627444a1b9a8c199a49636a37993"
+    }
+  ]
+}

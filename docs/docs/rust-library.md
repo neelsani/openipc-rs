@@ -540,6 +540,7 @@ fn open_specific_adapter() -> Result<(), Box<dyn std::error::Error>> {
             skip_txgapk: false,
             firmware_8814_mode: Firmware8814Mode::Kernel,
             firmware_8814_chunk: None,
+            ..MonitorOptions::default()
         },
     )?;
 
@@ -573,6 +574,57 @@ bulk-IN capture, then feed their parsed valid frames through one
 Diagnostics such as thermal status, false-alarm counters, PHYDM watchdog ticks,
 IQK, and power tracking are explicit APIs. The driver does not spawn its own
 polling threads; schedule those reads from your app loop when you need them.
+
+## Use Wide TX And RX Controls
+
+Pass the complete `RadioConfig` when transmitting on a wide Jaguar3 channel.
+This lets a 40 MHz radiotap frame receive the required subchannel code when the
+adapter itself is tuned to 80 MHz:
+
+```rust
+use openipc_rtl88xx::{ChannelWidth, RadioConfig, RealtekDevice};
+
+fn send_wide(
+    device: &RealtekDevice,
+    radiotap_frame: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    device.send_packet_for_radio(
+        radiotap_frame,
+        RadioConfig {
+            channel: 149,
+            channel_offset: 0,
+            channel_width: ChannelWidth::Mhz80,
+        },
+    )?;
+    Ok(())
+}
+```
+
+The driver also exposes receive-side interference controls and explicit
+beamforming sounding. These configure hardware only; the app remains
+responsible for scheduling and for constructing NDPA frames:
+
+```rust
+use openipc_rtl88xx::{
+    BeamformingFeedback, CsiMaskSpec, RadioConfig, RealtekDevice,
+};
+
+async fn configure_radio_experiments(
+    device: &RealtekDevice,
+    radio: RadioConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mask = CsiMaskSpec::new(5_230_000, 5_250_000, 7).unwrap();
+    device.apply_csi_mask_async(radio, mask).await?;
+    device
+        .arm_beamformee_async(
+            [0x02, 0, 0, 0, 0, 1],
+            None,
+            BeamformingFeedback::Su,
+        )
+        .await?;
+    Ok(())
+}
+```
 
 ## Build Adaptive-Link Feedback
 

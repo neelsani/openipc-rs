@@ -156,8 +156,13 @@ impl RealtekDevice {
         self.monitor_rx_cfg_8822c_async(options.accept_bad_fcs)
             .await?;
         self.enable_tx_path_8822c_async().await?;
-        self.set_channel_bwmode_8822c_async(chip, radio.channel, radio.channel_width)
-            .await?;
+        self.set_channel_bwmode_8822c_async(
+            chip,
+            radio.channel,
+            radio.channel_offset,
+            radio.channel_width,
+        )
+        .await?;
         if options.should_run_iqk(chip.family) {
             match chip.family {
                 ChipFamily::Rtl8822e => {
@@ -779,18 +784,49 @@ impl RealtekDevice {
         &self,
         chip: ChipInfo,
         channel: u8,
+        channel_offset: u8,
         width: ChannelWidth,
     ) -> Result<(), DriverError> {
+        let plan = jaguar3_channel_plan(channel, channel_offset, width);
+        let central = plan.central_channel;
+        let primary = plan.primary_index;
+
         self.set_bb_reg_async(0x0810, 0x3ff0, 0x19b).await?;
-        self.set_bb_reg_async(0x09b0, 0xffc0, 0x0).await?;
+        self.set_bb_reg_async(0x09b0, 0x00c0, 0x0).await?;
         self.set_bb_reg_async(0x09b4, 0x0000_0700, 0x7).await?;
         self.set_bb_reg_async(0x09b4, 0x0070_0000, 0x6).await?;
-        self.set_bb_reg_async(0x09b0, 0xf, 0x0).await?;
-        self.set_bb_reg_async(0x0cbc, BIT21, 0x0).await?;
-        self.set_bb_reg_async(0x1abc, BIT30, 0x0).await?;
-        self.set_bb_reg_async(0x1ae8, BIT31, 0x1).await?;
-        self.set_bb_reg_async(0x1aec, 0xf, 0x6).await?;
-        self.set_bb_reg_async(0x088c, 0xf000, 0x1).await?;
+        if plan.is_80mhz {
+            self.set_bb_reg_async(0x09b0, 0x000f, 0x0a).await?;
+            self.set_bb_reg_async(0x09b0, 0xff00, u32::from(primary | (primary << 4)))
+                .await?;
+            self.set_bb_reg_async(0x0cbc, BIT21, 1).await?;
+            self.set_bb_reg_async(0x088c, 0xf000, 6).await?;
+            self.set_bb_reg_async(0x0810, 0x000f, 7).await?;
+            self.set_bb_reg_async(0x0810, 0x000f_0000, 7).await?;
+            self.set_bb_reg_async(0x088c, 0x0003_0000, 3).await?;
+            self.set_bb_reg_async(0x1944, 0x0300, 3).await?;
+            self.set_bb_reg_async(0x4044, 0x0300, 3).await?;
+            self.set_bb_reg_async(0x1abc, BIT30, 0).await?;
+        } else if plan.is_40mhz {
+            self.set_bb_reg_async(0x1a00, BIT4, u32::from(primary == 1))
+                .await?;
+            self.set_bb_reg_async(0x09b0, 0x000f, 0x05).await?;
+            self.set_bb_reg_async(0x09b0, 0xff00, u32::from(primary | (primary << 4)))
+                .await?;
+            self.set_bb_reg_async(0x0cbc, BIT21, 1).await?;
+            self.set_bb_reg_async(0x1abc, BIT30, 1).await?;
+            self.set_bb_reg_async(0x1ae8, BIT31, 0).await?;
+            self.set_bb_reg_async(0x1aec, 0x000f, 8).await?;
+            self.set_bb_reg_async(0x088c, 0xf000, 1).await?;
+        } else {
+            self.set_bb_reg_async(0x09b0, 0xff00, 0).await?;
+            self.set_bb_reg_async(0x09b0, 0x000f, 0).await?;
+            self.set_bb_reg_async(0x0cbc, BIT21, 0).await?;
+            self.set_bb_reg_async(0x1abc, BIT30, 0).await?;
+            self.set_bb_reg_async(0x1ae8, BIT31, 1).await?;
+            self.set_bb_reg_async(0x1aec, 0x000f, 6).await?;
+            self.set_bb_reg_async(0x088c, 0xf000, 1).await?;
+        }
 
         let is_8822c = chip.family == ChipFamily::Rtl8822c;
         let previous_rf18 = if is_8822c {
@@ -798,23 +834,30 @@ impl RealtekDevice {
         } else {
             0
         };
-        let rf18 = jaguar3_rf18(previous_rf18, channel, is_8822c);
+        let rf18 = jaguar3_rf18(previous_rf18, central, is_8822c, width);
 
         if is_8822c {
             // Vendor phydm_rstb_3wire_8822c bracket. The final anapar writes
             // push the RF shadow registers into the analog front-end; omitting
             // them leaves RTL8822C deaf on 2.4 GHz.
             self.set_bb_reg_async(0x1c90, BIT8, 0).await?;
+            let rxbb = if plan.is_80mhz {
+                0x08
+            } else if plan.is_40mhz {
+                0x10
+            } else {
+                0x18
+            };
             for base in [0x3c00, 0x4c00] {
                 self.set_bb_reg_async(base + (0xee << 2), 0x4, 1).await?;
                 self.set_bb_reg_async(base + (0x33 << 2), 0x1f, 0x12)
                     .await?;
-                self.write_rf_direct_8822c_async(base, 0x3f, 0x18).await?;
+                self.write_rf_direct_8822c_async(base, 0x3f, rxbb).await?;
                 self.set_bb_reg_async(base + (0xee << 2), 0x4, 0).await?;
             }
             self.write_rf_direct_8822c_async(0x3c00, 0x18, rf18).await?;
             self.write_rf_direct_8822c_async(0x4c00, 0x18, rf18).await?;
-            self.set_bb_reg_async(0x3f7c, BIT18, if channel <= 14 { 1 } else { 0 })
+            self.set_bb_reg_async(0x3f7c, BIT18, if central <= 14 { 1 } else { 0 })
                 .await?;
             self.set_bb_reg_async(0x1c90, BIT8, 1).await?;
             self.set_bb_reg_async(0x1830, BIT29, 1).await?;
@@ -822,13 +865,29 @@ impl RealtekDevice {
         } else {
             self.write_rf_direct_8822c_async(0x3c00, 0x18, rf18).await?;
             self.write_rf_direct_8822c_async(0x4c00, 0x18, rf18).await?;
-            self.write_rf_direct_8822c_async(0x3c00, 0x3f, 0x18).await?;
-            self.write_rf_direct_8822c_async(0x4c00, 0x3f, 0x18).await?;
-            self.set_bb_reg_async(0x3f7c, BIT18, if channel <= 14 { 1 } else { 0 })
+            if plan.is_40mhz || plan.is_80mhz {
+                let rf1a_bandwidth = if plan.is_80mhz {
+                    BIT13 | BIT10
+                } else {
+                    BIT12 | BIT11
+                };
+                for base in [0x3c00, 0x4c00] {
+                    let mut rf1a = self.read_u32_async(base + (0x1a << 2)).await? & 0x000f_ffff;
+                    rf1a = (rf1a & !0x7c00) | rf1a_bandwidth;
+                    if plan.is_40mhz {
+                        rf1a = (rf1a | BIT0) & !BIT16;
+                    }
+                    self.write_rf_direct_8822c_async(base, 0x1a, rf1a).await?;
+                }
+            } else {
+                self.write_rf_direct_8822c_async(0x3c00, 0x3f, 0x18).await?;
+                self.write_rf_direct_8822c_async(0x4c00, 0x3f, 0x18).await?;
+            }
+            self.set_bb_reg_async(0x3f7c, BIT18, if central <= 14 { 1 } else { 0 })
                 .await?;
         }
 
-        if let Some((cck_table, ofdm_table)) = jaguar3_agc_tables(channel, width, is_8822c) {
+        if let Some((cck_table, ofdm_table)) = jaguar3_agc_tables(central, width, is_8822c) {
             if let Some(table) = cck_table {
                 self.set_bb_reg_async(0x18ac, 0xf000, table).await?;
                 self.set_bb_reg_async(0x41ac, 0xf000, table).await?;
@@ -838,7 +897,7 @@ impl RealtekDevice {
             self.set_bb_reg_async(0x0828, 0xf8, 0x0d).await?;
         }
 
-        if channel <= 14 {
+        if central <= 14 {
             if is_8822c {
                 self.set_bb_reg_async(0x1a9c, BIT20, 1).await?;
                 self.set_bb_reg_async(0x1a14, 0x300, 0).await?;
@@ -861,43 +920,118 @@ impl RealtekDevice {
             self.set_bb_reg_async(0x1c80, 0x3f00_0000, 0x22).await?;
         }
 
-        self.set_bb_reg_async(0x0c30, 0xfff, sco_value_8822c(channel))
+        self.set_bb_reg_async(0x0c30, 0xfff, sco_value_8822c(central))
             .await?;
-        if channel <= 14 {
-            self.set_bb_reg_async(0x0808, 0x0070_0000, if channel == 11 { 0x3 } else { 0x1 })
+        if central <= 14 {
+            self.set_bb_reg_async(0x0808, 0x0070_0000, if central == 11 { 0x3 } else { 0x1 })
                 .await?;
-            self.set_bb_reg_async(0x0808, 0x70, if channel == 13 { 0x3 } else { 0x1 })
+            self.set_bb_reg_async(0x0808, 0x70, if central == 13 { 0x3 } else { 0x1 })
                 .await?;
         } else {
             self.set_bb_reg_async(0x0808, 0x0070_0000, 0x1).await?;
             self.set_bb_reg_async(0x0808, 0x70, 0x3).await?;
         }
+        self.set_mac_bw_txsc_jaguar3_async(width, primary).await?;
         self.bb_reset_8822c_async().await?;
+        if chip.family == ChipFamily::Rtl8822e && (plan.is_40mhz || plan.is_80mhz) {
+            self.dack_soft_reset_8822e_async().await?;
+        }
         if matches!(width, ChannelWidth::Mhz5 | ChannelWidth::Mhz10) {
-            self.set_bandwidth_dividers_8822c_async(width).await?;
+            self.set_bandwidth_dividers_8822c_async(chip, width, central)
+                .await?;
         }
         Ok(())
     }
 
-    async fn set_bandwidth_dividers_8822c_async(
+    async fn set_mac_bw_txsc_jaguar3_async(
         &self,
         width: ChannelWidth,
+        primary: u8,
+    ) -> Result<(), DriverError> {
+        let mut protocol = self.read_u32_async(0x0668).await? & !(BIT7 | BIT8);
+        protocol |= match width {
+            ChannelWidth::Mhz40 => BIT7,
+            ChannelWidth::Mhz80 => BIT8,
+            _ => 0,
+        };
+        self.write_u32_async(0x0668, protocol).await?;
+        let data_sc = if matches!(width, ChannelWidth::Mhz40 | ChannelWidth::Mhz80) {
+            let txsc40 = if matches!(primary, 1 | 3) { 9 } else { 10 };
+            (primary & 0x0f) | (txsc40 << 4)
+        } else {
+            0
+        };
+        self.write_u8_async(0x0483, data_sc).await
+    }
+
+    async fn set_bandwidth_dividers_8822c_async(
+        &self,
+        chip: ChipInfo,
+        width: ChannelWidth,
+        channel: u8,
     ) -> Result<(), DriverError> {
         let (small_bw, dac, adc, dfir) = match width {
             ChannelWidth::Mhz10 => (0x2, 0x6, 0x5, 0x2ab),
             ChannelWidth::Mhz5 => (0x1, 0x4, 0x4, 0x2ab),
             _ => (0x0, 0x7, 0x6, 0x19b),
         };
+        let is_8822e = chip.family == ChipFamily::Rtl8822e;
         self.set_bb_reg_async(0x0810, 0x3ff0, dfir).await?;
-        self.set_bb_reg_async(0x09b0, 0xc0, small_bw).await?;
+        self.set_bb_reg_async(0x09b0, if is_8822e { 0xffc0 } else { 0x00c0 }, small_bw)
+            .await?;
         self.set_bb_reg_async(0x09b4, 0x0000_0700, dac).await?;
         self.set_bb_reg_async(0x09b4, 0x0070_0000, adc).await?;
-        self.bb_reset_8822c_async().await
+        if is_8822e {
+            let (clock_select, microsecond_clock) = match width {
+                ChannelWidth::Mhz5 => (3, 20),
+                ChannelWidth::Mhz10 => (2, 20),
+                _ => (0, 80),
+            };
+            let afe = self.read_u32_async(0x0024).await?;
+            self.write_u32_async(0x0024, (afe & !(BIT20 | BIT21)) | (clock_select << 20))
+                .await?;
+            self.write_u8_async(0x055c, microsecond_clock).await?;
+            self.write_u8_async(0x0638, microsecond_clock).await?;
+
+            if matches!(width, ChannelWidth::Mhz5 | ChannelWidth::Mhz10) {
+                self.set_bb_reg_async(0x0a74, BIT31, 0).await?;
+                self.set_bb_reg_async(0x0a74, 0x03ff, 0x15).await?;
+                self.set_bb_reg_async(0x0a74, 0x000f_fc00, 0x13).await?;
+                self.set_bb_reg_async(0x0808, 0x0070, 1).await?;
+                self.set_bb_reg_async(0x080c, 0x000f, 5).await?;
+                self.set_bb_reg_async(0x081c, 0x00ff, 0).await?;
+                self.set_bb_reg_async(0x081c, 0x0f00_0000, 0).await?;
+                self.set_bb_reg_async(0x08a0, 0xf000_0000, 0).await?;
+            } else {
+                self.set_bb_reg_async(0x0a74, BIT31, 1).await?;
+                self.set_bb_reg_async(0x0808, 0x0070, 3).await?;
+                let values = if channel <= 14 {
+                    (0x15, 0x13, 0x05, 0xff, 0x00, 0x0b)
+                } else {
+                    (0x3f, 0x3f, 0x08, 0x55, 0x07, 0x00)
+                };
+                self.set_bb_reg_async(0x0a74, 0x03ff, values.0).await?;
+                self.set_bb_reg_async(0x0a74, 0x000f_fc00, values.1).await?;
+                self.set_bb_reg_async(0x080c, 0x000f, values.2).await?;
+                self.set_bb_reg_async(0x081c, 0x00ff, values.3).await?;
+                self.set_bb_reg_async(0x081c, 0x0f00_0000, values.4).await?;
+                self.set_bb_reg_async(0x08a0, 0xf000_0000, values.5).await?;
+            }
+        }
+        self.bb_reset_8822c_async().await?;
+        if is_8822e {
+            let igi = self.read_u32_async(0x1d70).await?;
+            self.write_u32_async(0x1d70, igi.wrapping_sub(0x202))
+                .await?;
+            self.write_u32_async(0x1d70, igi).await?;
+            self.dack_soft_reset_8822e_async().await?;
+        }
+        Ok(())
     }
 
     async fn monitor_rx_cfg_8822c_async(&self, accept_bad_fcs: bool) -> Result<(), DriverError> {
         self.write_u16_async(REG_CR, 0x06ff).await?;
-        let mut rcr = 0xf410_400e | BIT28;
+        let mut rcr = 0xf410_400f | BIT28;
         if !accept_bad_fcs {
             rcr &= !(RCR_ACRC32 | RCR_AICV);
         }
@@ -1046,10 +1180,16 @@ impl RealtekDevice {
         channel: u8,
     ) -> Result<(), DriverError> {
         if chip.family == ChipFamily::Rtl8822c {
-            return self.set_tx_power_ref_jaguar3_async(0x28, 0x28, true).await;
+            return self
+                .set_tx_power_ref_jaguar3_async(0x28, 0x28, true, false)
+                .await;
         }
         let (base_a, base_b) = self.tx_power_refs_8822e(channel);
-        self.apply_power_by_rate_8822e_async(channel, base_a, base_b)
+        // On 8822E, touching path-B's OFDM reference while RX is enabled
+        // desensitizes the receiver. Keep the table-programmed value for this
+        // one field during combined TX/RX bring-up; explicit TX overrides still
+        // program both RF paths.
+        self.apply_power_by_rate_8822e_async(channel, base_a, base_b, true)
             .await
     }
 
@@ -1058,7 +1198,7 @@ impl RealtekDevice {
         if channel <= 14 {
             return (FALLBACK, FALLBACK);
         }
-        let Some(map) = self.jaguar3_efuse.get() else {
+        let Some(map) = self.efuse_logical_map.get() else {
             return (FALLBACK, FALLBACK);
         };
         let group = channel_group_5g_8822e(channel);
@@ -1071,6 +1211,7 @@ impl RealtekDevice {
         ref_a: u8,
         ref_b: u8,
         zero_diffs: bool,
+        skip_path_b_ofdm_ref: bool,
     ) -> Result<(), DriverError> {
         for (register, mask, value) in [
             (0x18e8, 0x0001_fc00, ref_a),
@@ -1078,6 +1219,9 @@ impl RealtekDevice {
             (0x18a0, 0x007f_0000, ref_a),
             (0x41a0, 0x007f_0000, ref_b),
         ] {
+            if skip_path_b_ofdm_ref && register == 0x41e8 {
+                continue;
+            }
             self.set_bb_reg_async(0x1c90, BIT15, 0).await?;
             self.set_bb_reg_async(register, mask, u32::from(value.min(0x7f)))
                 .await?;
@@ -1096,8 +1240,9 @@ impl RealtekDevice {
         channel: u8,
         ref_a: u8,
         ref_b: u8,
+        skip_path_b_ofdm_ref: bool,
     ) -> Result<(), DriverError> {
-        self.set_tx_power_ref_jaguar3_async(ref_a, ref_b, false)
+        self.set_tx_power_ref_jaguar3_async(ref_a, ref_b, false, skip_path_b_ofdm_ref)
             .await?;
         let band = u32::from(channel > 14);
         let anchor = rtl_data::RTL8822E_PHY_REG_PG
@@ -1769,6 +1914,40 @@ fn mask_shift(mask: u32) -> u32 {
     mask.trailing_zeros()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Jaguar3ChannelPlan {
+    central_channel: u8,
+    primary_index: u8,
+    is_40mhz: bool,
+    is_80mhz: bool,
+}
+
+fn jaguar3_channel_plan(
+    primary_channel: u8,
+    channel_offset: u8,
+    width: ChannelWidth,
+) -> Jaguar3ChannelPlan {
+    let is_40mhz = width == ChannelWidth::Mhz40;
+    let is_80mhz = width == ChannelWidth::Mhz80;
+    let (central_channel, primary_index) = if is_40mhz {
+        if channel_offset == 2 {
+            (primary_channel.saturating_sub(2), 1)
+        } else {
+            (primary_channel.saturating_add(2), 2)
+        }
+    } else if is_80mhz {
+        (primary_channel.saturating_add(6), 4)
+    } else {
+        (primary_channel, 0)
+    };
+    Jaguar3ChannelPlan {
+        central_channel,
+        primary_index,
+        is_40mhz,
+        is_80mhz,
+    }
+}
+
 fn sco_value_8822c(channel: u8) -> u32 {
     match channel {
         36..=51 => 0x494,
@@ -1783,11 +1962,16 @@ fn sco_value_8822c(channel: u8) -> u32 {
     }
 }
 
-fn jaguar3_rf18(previous: u32, channel: u8, is_8822c: bool) -> u32 {
+fn jaguar3_rf18(previous: u32, channel: u8, is_8822c: bool, width: ChannelWidth) -> u32 {
+    let bandwidth = match width {
+        ChannelWidth::Mhz80 => BIT12,
+        ChannelWidth::Mhz40 => BIT13,
+        ChannelWidth::Mhz5 | ChannelWidth::Mhz10 | ChannelWidth::Mhz20 => BIT13 | BIT12,
+    };
     let mut value = if is_8822c {
-        (previous & 0x000f_ffff & !0x0007_03ff) | BIT13 | BIT12
+        (previous & 0x000f_ffff & !0x0007_33ff) | bandwidth
     } else {
-        0x3000
+        bandwidth
     };
     value |= u32::from(channel);
     if channel > 14 {
@@ -1946,16 +2130,70 @@ mod tests {
 
     #[test]
     fn rtl8822c_rf18_preserves_vendor_bits_and_selects_band() {
-        assert_eq!(jaguar3_rf18(0x13124, 6, true), 0x3006);
-        assert_eq!(jaguar3_rf18(0x13124, 36, true), 0x13124);
-        assert_eq!(jaguar3_rf18(0x13124, 100, true), 0x33164);
-        assert_eq!(jaguar3_rf18(0x13124, 149, true), 0x53195);
+        assert_eq!(jaguar3_rf18(0x13124, 6, true, ChannelWidth::Mhz20), 0x3006);
+        assert_eq!(
+            jaguar3_rf18(0x13124, 36, true, ChannelWidth::Mhz20),
+            0x13124
+        );
+        assert_eq!(
+            jaguar3_rf18(0x13124, 100, true, ChannelWidth::Mhz20),
+            0x33164
+        );
+        assert_eq!(
+            jaguar3_rf18(0x13124, 149, true, ChannelWidth::Mhz20),
+            0x53195
+        );
+        assert_eq!(
+            jaguar3_rf18(0x13124, 38, true, ChannelWidth::Mhz40),
+            0x12126
+        );
+        assert_eq!(
+            jaguar3_rf18(0x13124, 155, true, ChannelWidth::Mhz80),
+            0x5119b
+        );
     }
 
     #[test]
     fn rtl8822e_keeps_plain_rf18_path() {
-        assert_eq!(jaguar3_rf18(0x0a_5c00, 6, false), 0x3006);
-        assert_eq!(jaguar3_rf18(0x0a_5c00, 36, false), 0x13124);
+        assert_eq!(
+            jaguar3_rf18(0x0a_5c00, 6, false, ChannelWidth::Mhz20),
+            0x3006
+        );
+        assert_eq!(
+            jaguar3_rf18(0x0a_5c00, 36, false, ChannelWidth::Mhz20),
+            0x13124
+        );
+    }
+
+    #[test]
+    fn jaguar3_channel_plan_matches_vendor_primary_channel_convention() {
+        assert_eq!(
+            jaguar3_channel_plan(36, 1, ChannelWidth::Mhz40),
+            Jaguar3ChannelPlan {
+                central_channel: 38,
+                primary_index: 2,
+                is_40mhz: true,
+                is_80mhz: false,
+            }
+        );
+        assert_eq!(
+            jaguar3_channel_plan(40, 2, ChannelWidth::Mhz40),
+            Jaguar3ChannelPlan {
+                central_channel: 38,
+                primary_index: 1,
+                is_40mhz: true,
+                is_80mhz: false,
+            }
+        );
+        assert_eq!(
+            jaguar3_channel_plan(149, 0, ChannelWidth::Mhz80),
+            Jaguar3ChannelPlan {
+                central_channel: 155,
+                primary_index: 4,
+                is_40mhz: false,
+                is_80mhz: true,
+            }
+        );
     }
 
     #[test]

@@ -716,7 +716,7 @@ impl RealtekDevice {
         path: RfPath,
         register: u16,
     ) -> Result<u32, DriverError> {
-        if chip.family == ChipFamily::Rtl8814 {
+        if matches!(chip.family, ChipFamily::Rtl8814 | ChipFamily::Rtl8822b) {
             let base = match path {
                 RfPath::A => 0x2800,
                 RfPath::B => 0x2c00,

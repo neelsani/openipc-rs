@@ -14,8 +14,8 @@ radio setup, RX parsing, TX descriptors, and TX power.
 
 The source of truth is `SUPPORTED_DEVICES` in the driver crate. The current
 table includes the Realtek reference IDs, common RTL8812AU OEM IDs used by
-PixelPilot, the RTL8821AU vendor IDs mirrored from devourer, and Jaguar3
-RTL8812CU/EU and RTL8822CU/EU IDs from devourer:
+PixelPilot, the RTL8821AU vendor IDs mirrored from devourer, Jaguar2
+RTL8812BU/RTL8822BU, and Jaguar3 RTL8812CU/EU and RTL8822CU/EU:
 
 | VID:PID     | Family Hint | Label                               |
 | ----------- | ----------- | ----------------------------------- |
@@ -35,6 +35,9 @@ RTL8812CU/EU and RTL8822CU/EU IDs from devourer:
 | `0409:0408` | RTL8812     | NEC AtermWL900U / RTL8812AU         |
 | `0586:3426` | RTL8812     | ZyXEL NWD6605 / RTL8812AU           |
 | `0bda:8813` | RTL8814     | RTL8814AU                           |
+| `0bda:b812` | RTL8822B    | RTL8812BU / RTL8822BU WiFi-only     |
+| `0bda:b82c` | RTL8822B    | RTL8822BU multi-function            |
+| `2357:012d` | RTL8822B    | TP-Link Archer T3U                  |
 | `0bda:0820` | RTL8821     | RTL8821AU                           |
 | `0bda:0821` | RTL8821     | RTL8821AU                           |
 | `0bda:0823` | RTL8821     | RTL8821AU                           |
@@ -66,8 +69,9 @@ RTL8812CU/EU and RTL8822CU/EU IDs from devourer:
 | `0bda:e822` | RTL8822E    | RTL8822EU                           |
 | `0bda:a82a` | RTL8822E    | RTL8822EU                           |
 
-The chip probe still reads `SYS_CFG2` after opening the device. Chip IDs `0x13`
-and `0x17` select RTL8822C and RTL8822E respectively. That register is
+The chip probe still reads `SYS_CFG2` after opening the device. Chip ID `0x0a`
+selects RTL8822B (`0x50` is accepted during its cold transient); `0x13` and
+`0x17` select RTL8822C and RTL8822E. That register is
 authoritative because RTL8812EU can enumerate with the same `0bda:8812`,
 `0bda:881a`, or `0bda:881b` IDs used by Jaguar1 adapters; the table is only the
 first discovery filter.
@@ -88,10 +92,14 @@ Platform-specific filters are derived from this table:
 - descriptor-driven endpoint discovery,
 - vendor-control register reads and writes through request `0x05`,
 - firmware download for supported Jaguar-family chips,
+- Jaguar2 RTL8812BU/RTL8822BU HalMAC bring-up: firmware reserved-page/DDMA,
+  MAC/USB queues, EFUSE/RFE, conditional BB/AGC/RF tables, LCK, software IQK,
+  DIG, regulatory TX power, and the 8822B-specific TX checksum,
 - Jaguar3 RTL8812CU/EU and RTL8822CU/EU firmware download, MAC/USB setup,
   RFE-aware BB/AGC/RF tables, 24-byte RX descriptor parsing, 48-byte checksummed
-  TX descriptors, 5/10 MHz narrowband setup, WiFi-only coex/H2C keepalives, and
-  clean monitor shutdown,
+  TX descriptors, 5/10 MHz narrowband setup, native 40/80 MHz RF/MAC setup,
+  40-in-80 descriptor placement, WiFi-only coex/H2C keepalives, and clean
+  monitor shutdown,
 - RTL8822E software-power-cut/burst EFUSE reads, PA-bias trim, DACK, IQK,
   TXGAPK, DPK bypass, RFE 21-24 antenna control, RFE pinmux, channel-specific TX
   shaping, per-path TXAGC, and thermal tracking,
@@ -101,9 +109,12 @@ Platform-specific filters are derived from this table:
 - RFE-aware MAC/BB/RF table loading, including conditional RF table opcodes,
 - monitor filters,
 - channel, channel-width, band-switch, RFE pinmux, and BB-swing setup for
-  RTL8812/RTL8821/RTL8814 plus Jaguar3 5/10/20 MHz tuning,
+  RTL8812/RTL8821/RTL8814 plus Jaguar3 5/10/20/40/80 MHz tuning,
 - the RTL8822C 3-wire/RXBB/AGC/CCK-RXIQ channel sequence required for working
   2.4 GHz receive,
+- Jaguar1/2/3 explicit-sounding controls for SU/MU beamformees and sounders,
+  NDPA descriptor flags, and compressed beamforming report summaries,
+- Jaguar1/2/3 receive CSI tone masks and NBI notch filters,
 - RX bulk reads, including multi-transfer in-flight reads mirroring newer
   devourer's always-posted bulk-IN model,
 - C2H packet surfacing, RTL8814 TX-status parsing, and optional corrupted-FCS
@@ -135,7 +146,8 @@ flowchart TD
     H --> I["RFE-aware PHY/RF tables"]
     I --> J["MAC finalization and monitor filters"]
     J --> K["band, channel, width, RFE pinmux"]
-    K --> L["monitor receive loop"]
+    K --> L["optional CSI mask / NBI notch"]
+    L --> M["app-owned monitor receive loop"]
 ```
 
 Cold start is the hard part. A warm adapter that already has firmware running
@@ -187,8 +199,8 @@ Native and browser code use the same two option structs:
 - `DriverOptions`: USB reset behavior, VID/PID targeting, and bulk-OUT endpoint
   override.
 - `MonitorOptions`: bad-FCS retention, TX-power programming skip, IQK/TXGAPK
-  policy, RTL8814 firmware download mode/chunk size, and an optional Jaguar1
-  RX-chain mask.
+  policy, RTL8814 firmware download mode/chunk size, optional Jaguar1 RX-chain
+  mask, RFE override, CSI mask, and NBI frequency.
 
 Native builds additionally read devourer-compatible environment variables:
 
@@ -205,11 +217,55 @@ Native builds additionally read devourer-compatible environment variables:
 | `DEVOURER_8814_FWDL=kernel\|rtw88` | Select the RTL8814 firmware path.                      |
 | `DEVOURER_8814_FWDL_CHUNK=<n>`     | Override RTL8814 kernel-path chunk size.               |
 | `DEVOURER_RX_PATHS=<mask>`         | Select Jaguar1 RX chains after channel setup and IQK.  |
+| `DEVOURER_RFE=<n>`                 | Override the EFUSE-selected RFE front-end type.        |
+| `DEVOURER_RX_CSI_MASK=<range>[/w]` | Mask an inclusive MHz range; Jaguar3 weight is `0..7`. |
+| `DEVOURER_RX_NBI=<mhz>`            | Place one receive-side NBI notch.                      |
+| `DEVOURER_TX_TIMEOUT_MS=<n>`       | Set native bulk-OUT timeout before recovery.           |
 | `DEVOURER_TX_LEGACY_8812_DESC`     | Use the older 8812 TX descriptor shape on RTL8814.     |
 
 The browser API exposes the same choices with
 `WebUsbRealtekDevice.fromWebUsbDeviceWithOptions`,
-`initializeMonitorAdvancedWithTxgapk`, and `sendPacketWithOptions`.
+`initializeMonitorAdvancedWithTxgapk`, `sendPacketForRadio`,
+`armBeamformingSounder`, `armBeamformee`, `applyCsiMask`, and
+`applyNbiNotch`.
+
+## Sounding And Interference Controls
+
+The beamforming API configures hardware but does not manufacture the NDPA
+management frame. Build that frame in the app, arm the sounder, and set
+`beamforming_ndpa` on its TX options:
+
+```rust
+use openipc_rtl88xx::{BeamformingFeedback, RealtekDevice};
+
+async fn configure_sounding(device: &RealtekDevice) -> Result<(), Box<dyn std::error::Error>> {
+    let sounder = [0x02, 0, 0, 0, 0, 1];
+    device.arm_beamforming_sounder_async(Some(sounder)).await?;
+
+    // On the beamformee adapter:
+    device
+        .arm_beamformee_async(sounder, None, BeamformingFeedback::Su)
+        .await?;
+    Ok(())
+}
+```
+
+CSI masking and NBI are receive-only. Frequencies are absolute; the driver
+maps them to 312.5 kHz tone indices for the active RF channel:
+
+```rust
+use openipc_rtl88xx::{CsiMaskSpec, RadioConfig, RealtekDevice};
+
+async fn mask_dirty_slice(
+    device: &RealtekDevice,
+    radio: RadioConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mask = CsiMaskSpec::new(5_230_000, 5_250_000, 7).unwrap();
+    let masked = device.apply_csi_mask_async(radio, mask).await?;
+    println!("masked {masked} receive tones");
+    Ok(())
+}
+```
 
 ## Diagnostics Strategy
 
@@ -252,14 +308,23 @@ Current status:
 - RTL8812 thermal power tracking, RTL8812 IQK, RTL8814 IQK, and the PHYDM
   false-alarm/DIG watchdog have Rust implementations. They are exposed natively
   and through WASM, but still need register-trace comparison on real adapters.
+- RTL8812BU/RTL8822BU Jaguar2 support is audited through devourer `bad37a8`.
+  The checked-in 161,240-byte firmware and MAC/PHY/AGC/RF/TX-limit tables
+  reproduce byte-for-byte from the importer, and the firmware, IQK, RX, and TX
+  state machines are present. Live cold-plug/on-air validation is still
+  required.
 - RTL8812CU/EU and RTL8822CU/EU Jaguar3 support is audited through devourer
-  `7cd094a`. The RTL8822E firmware and all seven generated table arrays are
+  `bad37a8`. The RTL8822E firmware and generated table arrays are
   byte-for-byte equal to the reference commit. Chip-ID dispatch, V1 EFUSE,
   PA-bias, RFE defaults/pinmux, DACK, IQK, TXGAPK, DPK bypass, per-rate TXAGC,
   thermal tracking, descriptors, coex/H2C, and shutdown are implemented. This
   is still not a substitute for hardware proof: each adapter should only be
   called on-air validated after cold-plug traces and sustained TX/RX runs match
   devourer on that hardware.
+- The July 2026 driver additions are represented: 40/80 MHz Jaguar3 tuning,
+  40-in-80 TX placement, 8822E path-B TXAGC protection for concurrent RX/TX,
+  promiscuous RCR AAP, Jaguar1's in-flight RX queue model, explicit sounding,
+  beamforming-report detection, and CSI/NBI receive masking.
 - Newer devourer runtime TX-mode behavior is mirrored: radiotap RATE/MCS/VHT
   wins, a programmatic default can fill rate-less packets, 5 GHz CCK TX is
   clamped to OFDM, and the newer 8812/8821/8814 descriptor differences are

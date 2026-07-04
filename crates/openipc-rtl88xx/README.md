@@ -19,10 +19,14 @@ lists.
 - Interface claim/reset handling.
 - Realtek vendor request `0x05` register reads and writes.
 - Firmware download and MAC/BB/RF setup for supported rtl88xx families.
+- Jaguar2 `rtl8822b` support from devourer: RTL8812BU/RTL8822BU detection,
+  HalMAC firmware download, MAC/USB setup, EFUSE/RFE handling, BB/AGC/RF
+  tables, LCK/IQK/DIG, 24-byte RX descriptors, and 48-byte TX descriptors with
+  the chip-specific 32-byte checksum span.
 - Jaguar3 `rtl8822c` and `rtl8822e` support from devourer: RTL8812CU/EU and
   RTL8822CU/EU chip-ID dispatch, firmware/table loading, 24-byte RX and
-  checksummed 48-byte TX descriptors, 5/10 MHz widths, WiFi-only coex
-  keepalive, and clean shutdown hooks.
+  checksummed 48-byte TX descriptors, 5/10/20/40/80 MHz widths, 40-in-80 TX
+  placement, WiFi-only coex keepalive, and clean shutdown hooks.
 - RTL8822E V1 EFUSE access, RFE 21-24 setup, PA-bias trim, DACK, IQK, TXGAPK,
   DPK bypass, per-path/per-channel 7-bit TXAGC, and thermal compensation.
 - EFUSE logical-map parsing for MAC address, RFE type, amplifier flags, TX BB
@@ -36,6 +40,10 @@ lists.
 - RX bulk transfer reads, including multi-transfer in-flight reads.
 - TX bulk writes, runtime TX-mode/radiotap parsing, descriptors, and TX power
   overrides for adaptive-link feedback frames.
+- Explicit Jaguar1/2/3 SU/MU beamformee and sounding-engine controls, NDPA TX
+  descriptor support, and compressed beamforming report detection.
+- RX CSI tone masks and NBI notch filters across Jaguar1/2/3, with pure
+  center-frequency and subcarrier-index helpers.
 - EFUSE-backed per-rate TXAGC programming, including the devourer 8812A
   by-rate and regulatory limit tables, corrected 5 GHz groups, and vendor PG
   defaults for blank or partially programmed Jaguar1 EFUSE maps.
@@ -169,6 +177,10 @@ DEVOURER_SKIP_TXGAPK              skip RTL8822E TX gain calibration
 DEVOURER_8814_FWDL=kernel|rtw88   select RTL8814 firmware download path
 DEVOURER_8814_FWDL_CHUNK=<n>      override RTL8814 kernel-path chunk size
 DEVOURER_RX_PATHS=<mask>          select Jaguar1 RX chains, for example 0x11 or 0xff
+DEVOURER_RFE=<n>                  override the EFUSE-selected RFE type
+DEVOURER_RX_CSI_MASK=<range>[/w]  mask an MHz range, for example 5230-5250/7
+DEVOURER_RX_NBI=<mhz>             place one RX narrow-band interference notch
+DEVOURER_TX_TIMEOUT_MS=<n>        set the native bulk-OUT timeout
 DEVOURER_TX_LEGACY_8812_DESC      use the older 8812 descriptor shape on RTL8814 TX
 ```
 
@@ -180,8 +192,8 @@ directly. Browser applications go through `openipc-web`, where JavaScript first
 gets a user-approved `UsbDevice` and Rust/WASM uses the WebUSB-capable `nusb`
 backend.
 
-Jaguar3 note: the Rust driver tracks devourer's RTL8812CU/EU and RTL8822CU/EU
-cold-start paths. RTL8822E support includes the chip-specific firmware and
+Jaguar2/3 note: the Rust driver tracks devourer's RTL8812BU/CU/EU and
+RTL8822BU/CU/EU cold-start paths. RTL8822E support includes the chip-specific firmware and
 tables, V1 EFUSE reader, PA bias, DACK/IQK/TXGAPK, RFE and channel finalization,
 per-path TXAGC, and thermal tracking. The Rust port still needs cold-plug
 register traces and sustained on-air testing before a particular adapter can be
@@ -239,8 +251,9 @@ using devourer, aviateur, and openipc-zig as references. The cold-start path now
 includes EFUSE-backed RFE selection and devourer-style band switching for
 RTL8812/RTL8821/RTL8814, plus the newer devourer TX power, PHYDM, power
 tracking, IQK, C2H, TX-status, RTL8814 firmware controls, and the complete
-`rtl8822e` Jaguar3 path through devourer `7cd094a`. The driver also includes
-the later RTL8822C 2.4 GHz channel fix and Jaguar1 TX-power parity changes.
-Hardware bring-up still
+`rtl8822e` Jaguar3 path through devourer `bad37a8`. This audit also includes
+RTL8822B Jaguar2, Jaguar3 40/80 MHz and 40-in-80, RX CSI/NBI masking,
+beamforming self-sounding, concurrent TX/RX behavior, and Jaguar1's unified
+in-flight USB RX queue. Hardware bring-up still
 needs live adapter testing and register-trace comparison per chip family before
 the support matrix should be treated as final.

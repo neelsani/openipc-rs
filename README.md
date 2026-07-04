@@ -12,6 +12,10 @@ recording path used by USB reception.
 
 Nebulus supports packet-level receive diversity: several USB radios can feed
 one low-latency WFB/FEC/RTP pipeline while the first valid packet copy wins.
+It also supports portable, data-only preset packs for sharing OSD layouts,
+themes, route templates, telemetry policy, and latency preferences without
+sharing receiver keys or machine-specific configuration. Packs can be installed
+from files, HTTPS URLs, or static GitHub-hosted registries.
 
 ## Repository
 
@@ -140,9 +144,10 @@ The Rust protocol pipeline, Realtek driver path, WebUSB/WASM bindings, Nebulus
 platform decoding and UI, adaptive-link feedback, native VPN tunnel bridging,
 and CI/release automation are implemented. The driver tracks newer devourer
 behavior for TX modes, multi-transfer RX, RTL8814 firmware bring-up,
-RTL8812CU/EU and RTL8822CU/EU Jaguar3 descriptors, firmware, tables, EFUSE,
-RFE, calibration, per-rate TX power, PHYDM, power tracking, IQK, C2H/TX-status
-packets, and clean shutdown. Driver diagnostics are explicit APIs that apps
+RTL8812BU/RTL8822BU Jaguar2, RTL8812CU/EU and RTL8822CU/EU Jaguar3 descriptors,
+firmware, tables, EFUSE, RFE, calibration, 40/80 MHz and 40-in-80 operation,
+beamforming sounding, CSI/NBI receive masking, per-rate TX power, PHYDM, power
+tracking, IQK, C2H/TX-status packets, and clean shutdown. Driver diagnostics are explicit APIs that apps
 schedule themselves; the library does not create hidden polling threads.
 
 More live adapter testing is still needed: cold-plug runs, register-trace

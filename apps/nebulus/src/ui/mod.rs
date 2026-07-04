@@ -3,6 +3,7 @@ mod gui;
 mod logs;
 mod metrics;
 mod osd;
+mod presets;
 mod routes;
 mod scanner;
 mod settings;
@@ -69,6 +70,7 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
     gui::osd_editor(app, ui.ctx());
     preflight_dialog(app, ui.ctx());
     scanner::dialog(app, ui.ctx());
+    presets::dialog(app, ui.ctx());
 }
 
 fn preflight_dialog(app: &mut NebulusApp, context: &egui::Context) {

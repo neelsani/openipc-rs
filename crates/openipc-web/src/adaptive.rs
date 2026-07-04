@@ -203,13 +203,28 @@ impl OpenIpcAdaptiveLink {
         now_ms: f64,
         current_channel: u8,
     ) -> Result<usize, JsValue> {
+        self.tick_and_send_for_radio(device, now_ms, current_channel, 20)
+            .await
+    }
+
+    #[wasm_bindgen(js_name = tickAndSendForRadio)]
+    /// Produce due feedback frames with the adapter's configured RF width.
+    pub async fn tick_and_send_for_radio(
+        &mut self,
+        device: &WebUsbRealtekDevice,
+        now_ms: f64,
+        current_channel: u8,
+        channel_width_mhz: u16,
+    ) -> Result<usize, JsValue> {
         let frames = self
             .sender
             .tick(ms_from_js(now_ms))
             .map_err(|err| JsValue::from_str(&format!("adaptive-link tick failed: {err}")))?;
         let count = frames.len();
         for frame in frames {
-            device.send_packet(&frame, current_channel).await?;
+            device
+                .send_packet_for_radio(&frame, current_channel, channel_width_mhz, false)
+                .await?;
         }
         Ok(count)
     }

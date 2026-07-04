@@ -5,5 +5,6 @@
 
 include!("data/rtl_reference_data.rs");
 include!("data/rtl8812_tx_power_tables.rs");
+include!("data/rtl8822b_reference_data.rs");
 include!("data/rtl8822c_reference_data.rs");
 include!("data/rtl8822e_reference_data.rs");

@@ -18,7 +18,10 @@ JavaScript:
   `mavlinkPayloads`
 - Adaptive-link feedback helpers
 - WebUSB Realtek device access
-- Jaguar3 RTL8812CU/EU and RTL8822CU/EU chip detection and shared Rust HAL
+- Jaguar2 RTL8812BU/RTL8822BU and Jaguar3 RTL8812CU/EU/RTL8822CU/EU detection
+  and shared Rust HAL
+- 5/10/20/40/80 MHz Jaguar3 setup and 40-in-80 TX placement
+- SU/MU sounding controls plus RX CSI masks and NBI notches
 - Realtek diagnostics and calibration hooks: false-alarm counters, PHYDM DIG
   watchdog ticks, RTL8812 power tracking, Jaguar3 thermal tracking,
   RTL8812/RTL8814/Jaguar3 IQK, C2H packets, RTL8814 TX-status reports, and
@@ -115,6 +118,22 @@ try {
     await radio.shutdownMonitor().catch(() => undefined);
   }
 }
+```
+
+For a 40 MHz frame sent while Jaguar3 is configured for 80 MHz, call
+`sendPacketForRadio(packet, channel, 80, legacyDescriptor)` instead of the
+20 MHz compatibility `sendPacket` method. Hardware research controls are also
+available directly from JavaScript:
+
+```ts
+await radio.applyCsiMask(149, 80, 0, 5795, 5815, 7);
+await radio.applyNbiNotch(149, 80, 0, 5805);
+
+const ownMac = new Uint8Array([0x02, 0, 0, 0, 0, 1]);
+await radio.armBeamformingSounder(ownMac);
+// On a second adapter, pass the sounder's MAC and an empty own-MAC array to
+// use the deterministic Jaguar2/3 beamformee address.
+await secondRadio.armBeamformee(ownMac, new Uint8Array(), false);
 ```
 
 `withKeypair(...)` is still available as a compatibility shortcut. It creates

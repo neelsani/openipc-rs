@@ -6,15 +6,9 @@ use crate::{
 };
 
 pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
-    ui.heading("Interface");
-    ui.label(
-        egui::RichText::new("Appearance settings apply immediately and persist across launches.")
-            .small()
-            .color(ui.visuals().weak_text_color()),
-    );
-    ui.add_space(12.0);
-
-    ui.strong("Theme");
+    ui.strong("Appearance");
+    ui.add_space(8.0);
+    ui.label("Theme");
     ui.add_space(4.0);
     for themes in GuiTheme::ALL.chunks_exact(2) {
         ui.columns(2, |columns| {
@@ -29,8 +23,8 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
         ui.add_space(4.0);
     }
 
-    ui.add_space(14.0);
-    ui.strong("Scale");
+    ui.add_space(10.0);
+    ui.label("Scale");
     ui.horizontal(|ui| {
         let changed = ui
             .add(
@@ -49,8 +43,11 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
         }
     });
 
-    ui.add_space(14.0);
-    ui.strong("Display");
+    ui.add_space(12.0);
+    ui.separator();
+    ui.add_space(8.0);
+    ui.strong("Video OSD");
+    ui.add_space(6.0);
     ui.label("OSD profile");
     osd_profile_controls(app, ui, "gui");
     ui.add_space(6.0);
@@ -64,6 +61,12 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
             app.settings.sync_active_osd_profile();
         }
     });
+
+    ui.add_space(12.0);
+    ui.separator();
+    ui.add_space(8.0);
+    ui.strong("Controls panel");
+    ui.add_space(4.0);
     if ui
         .checkbox(&mut app.settings.show_sidebar, "Controls panel visible")
         .changed()
@@ -77,7 +80,7 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
             .color(ui.visuals().weak_text_color()),
     );
 
-    ui.add_space(14.0);
+    ui.add_space(12.0);
     if ui.button("Reset GUI settings").clicked() {
         app.settings.gui_theme = GuiTheme::Macchiato;
         app.settings.gui_theme_preset_source = None;
@@ -503,7 +506,8 @@ fn draw_editor_preview(
         egui::StrokeKind::Inside,
     );
 
-    let scale = f32::from(hud.scale_percent) / 100.0;
+    let preview_scale = editor_preview_scale(preview.size());
+    let scale = f32::from(hud.scale_percent) / 100.0 * preview_scale;
     for item in &mut hud.items {
         if !item.visible {
             continue;
@@ -514,9 +518,10 @@ fn draw_editor_preview(
         );
         let item_size = super::osd::preview_item_size(ui.painter(), item, scale);
         let item_rect = super::osd::positioned_rect(preview, center, item_size);
+        let hit_padding = (5.0 * preview_scale).clamp(3.0, 6.0);
         let response = ui
             .interact(
-                item_rect,
+                item_rect.expand(hit_padding),
                 egui::Id::new(("osd-editor-item", item.metric.label())),
                 egui::Sense::click_and_drag(),
             )
@@ -542,14 +547,24 @@ fn draw_editor_preview(
             highlighted,
         );
         if item.metric == *selected {
+            let selection_padding = (3.0 * preview_scale).clamp(2.0, 4.0);
+            let selection_width = (1.5 * preview_scale).clamp(1.0, 1.75);
             ui.painter().rect_stroke(
-                item_rect.expand(3.0),
+                item_rect.expand(selection_padding),
                 3.0,
-                egui::Stroke::new(1.5, egui::Color32::from_rgb(64, 218, 157)),
+                egui::Stroke::new(selection_width, egui::Color32::from_rgb(64, 218, 157)),
                 egui::StrokeKind::Outside,
             );
         }
     }
+}
+
+fn editor_preview_scale(size: egui::Vec2) -> f32 {
+    // The preview is a scale model of the video surface, so its indicators
+    // must contract with it while remaining large enough to select and drag.
+    let width_scale = size.x / 560.0;
+    let height_scale = size.y / 315.0;
+    width_scale.min(height_scale).clamp(0.55, 1.25)
 }
 
 fn selected_item_inspector(ui: &mut egui::Ui, hud: &mut HudSettings, selected: &mut HudMetric) {
@@ -825,4 +840,23 @@ fn palette(theme: GuiTheme) -> [egui::Color32; 4] {
         let [red, green, blue, alpha] = color.to_array();
         egui::Color32::from_rgba_unmultiplied(red, green, blue, alpha)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use eframe::egui;
+
+    use super::editor_preview_scale;
+
+    #[test]
+    fn preview_indicator_scale_tracks_editor_preview_size() {
+        assert!((editor_preview_scale(egui::vec2(560.0, 315.0)) - 1.0).abs() < f32::EPSILON);
+        assert!((editor_preview_scale(egui::vec2(336.0, 189.0)) - 0.6).abs() < 0.001);
+        assert!((editor_preview_scale(egui::vec2(672.0, 378.0)) - 1.2).abs() < 0.001);
+    }
+
+    #[test]
+    fn preview_indicator_scale_keeps_small_items_editable() {
+        assert!((editor_preview_scale(egui::vec2(240.0, 135.0)) - 0.55).abs() < f32::EPSILON);
+    }
 }

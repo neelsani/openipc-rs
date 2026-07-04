@@ -43,7 +43,8 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
                 });
         }
         if ui.button("Edit routes").clicked() {
-            app.active_tab = super::PanelTab::Routes;
+            app.active_tab = super::PanelTab::Data;
+            app.data_page = super::DataPage::Routes;
         }
     });
 

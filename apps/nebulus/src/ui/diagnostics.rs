@@ -2,52 +2,7 @@ use eframe::egui;
 
 use crate::{app::NebulusApp, model::ReceiverState};
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-enum View {
-    #[default]
-    Health,
-    Rtp,
-    Latency,
-    Environment,
-}
-
-pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        if ui.button("Export support bundle").clicked() {
-            app.export_support_bundle();
-        }
-        ui.label(
-            egui::RichText::new("Includes diagnostics and logs; excludes the WFB key")
-                .small()
-                .color(ui.visuals().weak_text_color()),
-        );
-    });
-    ui.add_space(5.0);
-    let id = ui.make_persistent_id("diagnostics-view");
-    let mut view = ui.data(|data| data.get_temp::<View>(id).unwrap_or_default());
-    ui.horizontal_wrapped(|ui| {
-        for (candidate, label) in [
-            (View::Health, "Pipeline health"),
-            (View::Rtp, "RTP"),
-            (View::Latency, "Stage latency"),
-            (View::Environment, "Environment"),
-        ] {
-            if ui.selectable_label(view == candidate, label).clicked() {
-                view = candidate;
-            }
-        }
-    });
-    ui.data_mut(|data| data.insert_temp(id, view));
-    ui.separator();
-    match view {
-        View::Health => health(app, ui),
-        View::Rtp => rtp(app, ui),
-        View::Latency => latency(app, ui),
-        View::Environment => environment(app, ui),
-    }
-}
-
-fn health(app: &NebulusApp, ui: &mut egui::Ui) {
+pub(crate) fn health(app: &NebulusApp, ui: &mut egui::Ui) {
     let counters = app.diagnostics.counters;
     match app
         .receiver_info
@@ -161,7 +116,7 @@ fn health(app: &NebulusApp, ui: &mut egui::Ui) {
     }
 }
 
-fn rtp(app: &NebulusApp, ui: &mut egui::Ui) {
+pub(crate) fn rtp(app: &NebulusApp, ui: &mut egui::Ui) {
     let status = app.diagnostics.rtp;
     let reorder = app.diagnostics.reorder;
     value_grid(ui, "rtp-diagnostics", |ui| {
@@ -213,7 +168,14 @@ fn rtp(app: &NebulusApp, ui: &mut egui::Ui) {
     });
 }
 
-fn latency(app: &NebulusApp, ui: &mut egui::Ui) {
+pub(crate) fn latency(app: &NebulusApp, ui: &mut egui::Ui) {
+    if app.diagnostics.stages.is_empty() {
+        ui.label(
+            egui::RichText::new("No latency samples yet").color(ui.visuals().weak_text_color()),
+        );
+        return;
+    }
+
     if ui.available_width() < 700.0 {
         latency_cards(app, ui);
         return;
@@ -278,7 +240,19 @@ fn latency_stat(ui: &mut egui::Ui, label: &str, value_ms: f64) {
     ui.monospace(format!("{value_ms:.2} ms"));
 }
 
-fn environment(app: &NebulusApp, ui: &mut egui::Ui) {
+pub(crate) fn system(app: &mut NebulusApp, ui: &mut egui::Ui) {
+    ui.horizontal_wrapped(|ui| {
+        if ui.button("Export support bundle").clicked() {
+            app.export_support_bundle();
+        }
+        ui.label(
+            egui::RichText::new("Includes diagnostics and logs; excludes the WFB key")
+                .small()
+                .color(ui.visuals().weak_text_color()),
+        );
+    });
+    ui.add_space(10.0);
+
     let environment = &app.environment;
     let maximum_fps = if environment.maximum_observed_fps > 0.0 {
         format!("{:.1} FPS observed", environment.maximum_observed_fps)

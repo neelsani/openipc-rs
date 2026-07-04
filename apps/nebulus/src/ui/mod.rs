@@ -18,13 +18,37 @@ use crate::{app::NebulusApp, model::ReceiverState};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub(crate) enum PanelTab {
     #[default]
-    Settings,
-    Metrics,
+    Setup,
+    Data,
+    Display,
+    Monitor,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum DataPage {
+    #[default]
     Routes,
     Telemetry,
-    Gui,
-    Diagnostics,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum MonitorPage {
+    #[default]
+    Metrics,
+    Health,
+    Rtp,
+    Latency,
+    System,
     Logs,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum SettingsPage {
+    #[default]
+    Receiver,
+    Media,
+    Profiles,
+    Network,
 }
 
 pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
@@ -487,41 +511,114 @@ fn action_button(ui: &mut egui::Ui, label: &str, tone: ActionTone) -> egui::Resp
 }
 
 fn side_panel(app: &mut NebulusApp, ui: &mut egui::Ui) {
-    ui.horizontal_wrapped(|ui| {
-        for (tab, label) in [
-            (PanelTab::Settings, "Settings"),
-            (PanelTab::Metrics, "Metrics"),
-            (PanelTab::Routes, "Routes"),
-            (PanelTab::Telemetry, "Telemetry"),
-            (PanelTab::Gui, "GUI"),
-            (PanelTab::Diagnostics, "Diagnostics"),
-            (PanelTab::Logs, "Logs"),
-        ] {
-            if ui.selectable_label(app.active_tab == tab, label).clicked() {
-                app.active_tab = tab;
-            }
-        }
-    });
+    if std::mem::take(&mut app.focus_vpn_settings) {
+        app.active_tab = PanelTab::Setup;
+        app.settings_page = SettingsPage::Network;
+    }
+
+    primary_navigation(app, ui);
+    secondary_navigation(app, ui);
     ui.separator();
     let viewport_height = ui.available_height().max(0.0);
+    let page_key = active_page_key(app);
     egui::ScrollArea::vertical()
-        .id_salt(("nebulus-control-scroll", app.active_tab))
+        .id_salt(("nebulus-control-scroll-v2", app.active_tab, page_key))
         .max_height(viewport_height)
         .min_scrolled_height(viewport_height)
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             match app.active_tab {
-                PanelTab::Settings => settings::show(app, ui),
-                PanelTab::Metrics => metrics::show(app, ui),
-                PanelTab::Routes => routes::show(app, ui),
-                PanelTab::Telemetry => telemetry::show(app, ui),
-                PanelTab::Gui => gui::show(app, ui),
-                PanelTab::Diagnostics => diagnostics::show(app, ui),
-                PanelTab::Logs => logs::show(app, ui),
+                PanelTab::Setup => settings::show(app, ui),
+                PanelTab::Data => match app.data_page {
+                    DataPage::Routes => routes::show(app, ui),
+                    DataPage::Telemetry => telemetry::show(app, ui),
+                },
+                PanelTab::Display => gui::show(app, ui),
+                PanelTab::Monitor => match app.monitor_page {
+                    MonitorPage::Metrics => metrics::show(app, ui),
+                    MonitorPage::Health => diagnostics::health(app, ui),
+                    MonitorPage::Rtp => diagnostics::rtp(app, ui),
+                    MonitorPage::Latency => diagnostics::latency(app, ui),
+                    MonitorPage::System => diagnostics::system(app, ui),
+                    MonitorPage::Logs => logs::show(app, ui),
+                },
             }
             ui.add_space(12.0);
         });
+}
+
+fn primary_navigation(app: &mut NebulusApp, ui: &mut egui::Ui) {
+    let spacing = 5.0;
+    let button_width = ((ui.available_width() - spacing * 3.0) / 4.0).max(64.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = spacing;
+        for (tab, label) in [
+            (PanelTab::Setup, "Setup"),
+            (PanelTab::Data, "Data"),
+            (PanelTab::Display, "Display"),
+            (PanelTab::Monitor, "Monitor"),
+        ] {
+            if ui
+                .add_sized(
+                    [button_width, 27.0],
+                    egui::Button::new(label).selected(app.active_tab == tab),
+                )
+                .clicked()
+            {
+                app.active_tab = tab;
+            }
+        }
+    });
+}
+
+fn secondary_navigation(app: &mut NebulusApp, ui: &mut egui::Ui) {
+    match app.active_tab {
+        PanelTab::Setup => {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 5.0;
+                for (page, label) in [
+                    (SettingsPage::Receiver, "Receiver"),
+                    (SettingsPage::Media, "Media"),
+                    (SettingsPage::Profiles, "Profiles"),
+                    (SettingsPage::Network, "Network"),
+                ] {
+                    ui.selectable_value(&mut app.settings_page, page, label);
+                }
+            });
+        }
+        PanelTab::Data => {
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut app.data_page, DataPage::Routes, "Routes");
+                ui.selectable_value(&mut app.data_page, DataPage::Telemetry, "Telemetry");
+            });
+        }
+        PanelTab::Display => {}
+        PanelTab::Monitor => {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 5.0;
+                for (page, label) in [
+                    (MonitorPage::Metrics, "Metrics"),
+                    (MonitorPage::Health, "Health"),
+                    (MonitorPage::Rtp, "RTP"),
+                    (MonitorPage::Latency, "Latency"),
+                    (MonitorPage::System, "System"),
+                    (MonitorPage::Logs, "Logs"),
+                ] {
+                    ui.selectable_value(&mut app.monitor_page, page, label);
+                }
+            });
+        }
+    }
+}
+
+fn active_page_key(app: &NebulusApp) -> u8 {
+    match app.active_tab {
+        PanelTab::Setup => app.settings_page as u8,
+        PanelTab::Data => app.data_page as u8,
+        PanelTab::Display => 0,
+        PanelTab::Monitor => app.monitor_page as u8,
+    }
 }
 
 fn vpn(app: &mut NebulusApp, ui: &mut egui::Ui) {

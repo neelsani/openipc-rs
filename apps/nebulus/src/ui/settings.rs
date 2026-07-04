@@ -7,15 +7,23 @@ use crate::{
     settings::{ReceiverSource, DEFAULT_CHANNEL, DEFAULT_CHANNEL_OFFSET, MAX_LINK_ID},
 };
 
+use super::SettingsPage;
+
 pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
+    match app.settings_page {
+        SettingsPage::Receiver => receiver_page(app, ui),
+        SettingsPage::Media => media_page(app, ui),
+        SettingsPage::Profiles => profiles_page(app, ui),
+        SettingsPage::Network => network_page(app, ui),
+    }
+}
+
+fn receiver_page(app: &mut NebulusApp, ui: &mut egui::Ui) {
     if app.receiver_info.is_some() {
         connected_receiver(app, ui);
     }
     let editable = matches!(app.state, ReceiverState::Idle | ReceiverState::Failed);
     ui.add_enabled_ui(editable, |ui| {
-        section(ui, "Profiles", |ui| profile_editor(app, ui));
-        section(ui, "Preset packs", |ui| super::presets::section(app, ui));
-
         section(ui, "Receiver", |ui| {
             receiver_source_selector(app, ui);
             match app.settings.receiver_source {
@@ -36,61 +44,11 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
 
         if app.settings.receiver_source == ReceiverSource::Usb {
             section(ui, "Radio", |ui| {
-            egui::Grid::new("radio-settings")
-                .num_columns(3)
-                .spacing([18.0, 8.0])
-                .show(ui, |ui| {
-                    ui.label("Channel");
-                    ui.add(
-                        egui::Slider::new(&mut app.settings.channel, 1..=177)
-                            .show_value(true)
-                            .text(""),
-                    );
-                    if ui.small_button("Default").clicked() {
-                        app.settings.channel = DEFAULT_CHANNEL;
-                    }
-                    ui.end_row();
-                    ui.label("Width");
-                    egui::ComboBox::from_id_salt("channel-width")
-                        .selected_text(format!("{} MHz", app.settings.channel_width_mhz))
-                        .show_ui(ui, |ui| {
-                            for width in [5, 10, 20, 40, 80] {
-                                ui.selectable_value(
-                                    &mut app.settings.channel_width_mhz,
-                                    width,
-                                    format!("{width} MHz"),
-                                );
-                            }
-                        });
-                    ui.label("");
-                    ui.end_row();
-                    ui.label("Offset");
-                    ui.add(
-                        egui::Slider::new(&mut app.settings.channel_offset, 0..=4)
-                            .show_value(true)
-                            .text(""),
-                    );
-                    if ui.small_button("Default").clicked() {
-                        app.settings.channel_offset = DEFAULT_CHANNEL_OFFSET;
-                    }
-                    ui.end_row();
-                    ui.label("Link ID");
-                    ui.add(
-                        egui::Slider::new(&mut app.settings.link_id, 0..=MAX_LINK_ID)
-                            .show_value(true)
-                            .custom_formatter(|value, _| format!("0x{:06X}", value as u32))
-                            .custom_parser(parse_link_id),
-                    );
-                    if ui.small_button("Default").clicked() {
-                        app.settings.link_id = DEFAULT_LINK_ID;
-                    }
-                    ui.end_row();
-                });
+                radio_settings(app, ui);
             });
         }
 
         section(ui, "Link", |ui| {
-            ui.checkbox(&mut app.settings.rtp_reorder, "RTP reorder buffer");
             ui.checkbox(
                 &mut app.settings.auto_recover,
                 "Automatically recover a dropped receiver",
@@ -173,7 +131,12 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
             }
             });
         }
+    });
+}
 
+fn media_page(app: &mut NebulusApp, ui: &mut egui::Ui) {
+    let editable = matches!(app.state, ReceiverState::Idle | ReceiverState::Failed);
+    ui.add_enabled_ui(editable, |ui| {
         section(ui, "Video", |ui| {
             ui.horizontal(|ui| {
                 ui.label("Codec preference");
@@ -193,23 +156,55 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
                         }
                     });
             });
-            ui.horizontal(|ui| {
-                ui.label("Decoder queue");
-                ui.label("3 frames, latest-frame output");
-            });
+            ui.checkbox(&mut app.settings.rtp_reorder, "RTP reorder buffer");
+            egui::Grid::new("decoder-settings")
+                .num_columns(2)
+                .spacing([18.0, 7.0])
+                .show(ui, |ui| {
+                    ui.label("Decoder queue");
+                    ui.label("3 frames, latest-frame output");
+                    ui.end_row();
+                });
         });
-
         section(ui, "Recording", |ui| recording_settings(app, ui));
+    });
+}
 
+fn profiles_page(app: &mut NebulusApp, ui: &mut egui::Ui) {
+    let editable = matches!(app.state, ReceiverState::Idle | ReceiverState::Failed);
+    ui.add_enabled_ui(editable, |ui| {
+        section(ui, "Receiver profiles", |ui| profile_editor(app, ui));
+        section(ui, "Preset packs", |ui| super::presets::section(app, ui));
+    });
+}
+
+fn network_page(app: &mut NebulusApp, ui: &mut egui::Ui) {
+    section(ui, "VPN / tunnel", |ui| {
         if app.settings.receiver_source == ReceiverSource::Usb {
-            section(ui, "Advanced", |ui| {
+            super::vpn(app, ui);
+        } else {
+            ui.label(
+                egui::RichText::new(
+                    "VPN/TUN requires the bidirectional WFB radio transport and is unavailable for direct UDP RTP input.",
+                )
+                .small()
+                .color(ui.visuals().weak_text_color()),
+            );
+        }
+    });
+
+    if app.settings.receiver_source == ReceiverSource::Usb {
+        let editable = matches!(app.state, ReceiverState::Idle | ReceiverState::Failed);
+        ui.add_enabled_ui(editable, |ui| {
+            section(ui, "USB transport", |ui| {
                 egui::Grid::new("advanced-settings")
                     .num_columns(2)
+                    .spacing([18.0, 7.0])
                     .show(ui, |ui| {
                         ui.label("Minimum epoch");
                         ui.add(egui::DragValue::new(&mut app.settings.minimum_epoch));
                         ui.end_row();
-                        ui.label("USB transfer size");
+                        ui.label("Transfer size");
                         ui.add(
                             egui::DragValue::new(&mut app.settings.transfer_size)
                                 .range(4_096..=1_048_576),
@@ -217,30 +212,61 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
                         ui.end_row();
                     });
             });
-        }
-    });
-    let vpn_section = egui::CollapsingHeader::new("VPN / tunnel")
-        .default_open(true)
-        .show(ui, |ui| {
-            ui.add_space(3.0);
-            if app.settings.receiver_source == ReceiverSource::Usb {
-                super::vpn(app, ui);
-            } else {
-                ui.label(
-                    egui::RichText::new(
-                        "VPN/TUN requires the bidirectional WFB radio transport and is unavailable for direct UDP RTP input.",
-                    )
-                    .small()
-                    .color(ui.visuals().weak_text_color()),
-                );
-            }
-            ui.add_space(6.0);
         });
-    if std::mem::take(&mut app.focus_vpn_settings) {
-        vpn_section
-            .header_response
-            .scroll_to_me(Some(egui::Align::TOP));
     }
+}
+
+fn radio_settings(app: &mut NebulusApp, ui: &mut egui::Ui) {
+    egui::Grid::new("radio-settings")
+        .num_columns(3)
+        .spacing([18.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Channel");
+            ui.add(
+                egui::Slider::new(&mut app.settings.channel, 1..=177)
+                    .show_value(true)
+                    .text(""),
+            );
+            if ui.small_button("Default").clicked() {
+                app.settings.channel = DEFAULT_CHANNEL;
+            }
+            ui.end_row();
+            ui.label("Width");
+            egui::ComboBox::from_id_salt("channel-width")
+                .selected_text(format!("{} MHz", app.settings.channel_width_mhz))
+                .show_ui(ui, |ui| {
+                    for width in [5, 10, 20, 40, 80] {
+                        ui.selectable_value(
+                            &mut app.settings.channel_width_mhz,
+                            width,
+                            format!("{width} MHz"),
+                        );
+                    }
+                });
+            ui.label("");
+            ui.end_row();
+            ui.label("Offset");
+            ui.add(
+                egui::Slider::new(&mut app.settings.channel_offset, 0..=4)
+                    .show_value(true)
+                    .text(""),
+            );
+            if ui.small_button("Default").clicked() {
+                app.settings.channel_offset = DEFAULT_CHANNEL_OFFSET;
+            }
+            ui.end_row();
+            ui.label("Link ID");
+            ui.add(
+                egui::Slider::new(&mut app.settings.link_id, 0..=MAX_LINK_ID)
+                    .show_value(true)
+                    .custom_formatter(|value, _| format!("0x{:06X}", value as u32))
+                    .custom_parser(parse_link_id),
+            );
+            if ui.small_button("Default").clicked() {
+                app.settings.link_id = DEFAULT_LINK_ID;
+            }
+            ui.end_row();
+        });
 }
 
 fn receiver_source_selector(app: &mut NebulusApp, ui: &mut egui::Ui) {

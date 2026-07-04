@@ -163,6 +163,9 @@ pub struct NebulusApp {
     #[cfg(target_os = "windows")]
     wintun_events: Option<std::sync::mpsc::Receiver<crate::wintun::InstallEvent>>,
     pub(crate) active_tab: crate::ui::PanelTab,
+    pub(crate) settings_page: crate::ui::SettingsPage,
+    pub(crate) data_page: crate::ui::DataPage,
+    pub(crate) monitor_page: crate::ui::MonitorPage,
     pub(crate) runtime: Runtime,
     pub(crate) texture: Option<egui::TextureHandle>,
     pub(crate) video_renderer: Option<crate::video::PlatformVideoRenderer>,
@@ -262,7 +265,10 @@ impl NebulusApp {
             wintun_state: crate::wintun::InstallState::detect(),
             #[cfg(target_os = "windows")]
             wintun_events: None,
-            active_tab: crate::ui::PanelTab::Settings,
+            active_tab: crate::ui::PanelTab::Setup,
+            settings_page: crate::ui::SettingsPage::Receiver,
+            data_page: crate::ui::DataPage::Routes,
+            monitor_page: crate::ui::MonitorPage::Metrics,
             runtime: Runtime::new(context.egui_ctx.clone()),
             texture: None,
             video_renderer,

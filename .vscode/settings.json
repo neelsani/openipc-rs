@@ -1,26 +1,6 @@
 {
-  "rust-analyzer.linkedProjects": ["Cargo.toml"],
-  "rust-analyzer.cargo.features": "all",
-  "rust-analyzer.cargo.allTargets": true,
-  "rust-analyzer.cargo.targetDir": "target/rust-analyzer",
-
-  // Keep WebUSB/WASM and Android-only modules visible for go-to-definition,
-  // hover types, and autocomplete while editing from a native desktop host.
-  "rust-analyzer.cargo.cfgs": [
-    "debug_assertions",
-    "target_arch=\"wasm32\"",
-    "target_family=\"wasm\"",
-    "target_os=\"android\"",
-    "target_family=\"unix\""
-  ],
-
-  // Run diagnostics for the non-native targets this repo cares about.
-  // Install missing targets with:
-  // rustup target add wasm32-unknown-unknown aarch64-linux-android
-  "rust-analyzer.check.allTargets": true,
-  "rust-analyzer.check.targets": [
-    "aarch64-apple-darwin",
-    "wasm32-unknown-unknown",
-    "aarch64-linux-android"
-  ]
+    "rust-analyzer.linkedProjects": ["Cargo.toml"],
+    "rust-analyzer.cargo.features": "all",
+    "rust-analyzer.cargo.allTargets": true,
+    "rust-analyzer.cargo.targetDir": "target/rust-analyzer"
 }

@@ -242,56 +242,61 @@ fn editor_toolbar(
 
 fn indicator_picker(ui: &mut egui::Ui, hud: &mut HudSettings, selected: &mut HudMetric) {
     let visible = hud.items.iter().filter(|item| item.visible).count();
-    ui.menu_button(
-        format!("Indicators  {visible}/{}", HudMetric::ALL.len()),
-        |ui| {
-            ui.set_min_width(270.0);
-            for (heading, telemetry) in [("Ground station", false), ("Flight telemetry", true)] {
-                ui.label(
-                    egui::RichText::new(heading)
-                        .small()
-                        .strong()
-                        .color(ui.visuals().weak_text_color()),
-                );
-                for item in hud
-                    .items
-                    .iter_mut()
-                    .filter(|item| item.metric.requires_telemetry() == telemetry)
-                {
-                    ui.horizontal(|ui| {
-                        if ui.checkbox(&mut item.visible, "").changed() {
-                            ui.ctx().request_repaint();
-                        }
-                        if ui
-                            .selectable_label(item.metric == *selected, item.metric.label())
-                            .clicked()
-                        {
-                            *selected = item.metric;
-                            ui.close();
-                        }
-                    });
-                }
-                if !telemetry {
-                    ui.separator();
-                }
+    egui::containers::menu::MenuButton::new(format!(
+        "Indicators  {visible}/{}",
+        HudMetric::ALL.len()
+    ))
+    .config(
+        egui::containers::menu::MenuConfig::new()
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
+    )
+    .ui(ui, |ui| {
+        ui.set_min_width(270.0);
+        for (heading, telemetry) in [("Ground station", false), ("Flight telemetry", true)] {
+            ui.label(
+                egui::RichText::new(heading)
+                    .small()
+                    .strong()
+                    .color(ui.visuals().weak_text_color()),
+            );
+            for item in hud
+                .items
+                .iter_mut()
+                .filter(|item| item.metric.requires_telemetry() == telemetry)
+            {
+                ui.horizontal(|ui| {
+                    if ui.checkbox(&mut item.visible, "").changed() {
+                        ui.ctx().request_repaint();
+                    }
+                    if ui
+                        .selectable_label(item.metric == *selected, item.metric.label())
+                        .clicked()
+                    {
+                        *selected = item.metric;
+                        ui.close();
+                    }
+                });
             }
-            ui.separator();
-            ui.horizontal(|ui| {
-                if ui.button("Show all").clicked() {
-                    for item in &mut hud.items {
-                        item.visible = true;
-                    }
-                    ui.ctx().request_repaint();
+            if !telemetry {
+                ui.separator();
+            }
+        }
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("Show all").clicked() {
+                for item in &mut hud.items {
+                    item.visible = true;
                 }
-                if ui.button("Hide all").clicked() {
-                    for item in &mut hud.items {
-                        item.visible = false;
-                    }
-                    ui.ctx().request_repaint();
+                ui.ctx().request_repaint();
+            }
+            if ui.button("Hide all").clicked() {
+                for item in &mut hud.items {
+                    item.visible = false;
                 }
-            });
-        },
-    );
+                ui.ctx().request_repaint();
+            }
+        });
+    });
 }
 
 fn wide_editor(

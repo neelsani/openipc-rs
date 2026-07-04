@@ -383,17 +383,26 @@ pub(super) fn configure_mock_receiver(
 ) -> ReceiverBatchOptions {
     let mut options = ReceiverBatchOptions::default();
     let channel_id = ChannelId::new(request.channel_id);
-    for route in request.payload_routes.iter().filter(|route| {
-        route.enabled
-            && route.action == RouteAction::Audio
-            && route.radio_port == RadioPort::Video.as_u8()
-    }) {
+    for route in request
+        .payload_routes
+        .iter()
+        .filter(|route| route.enabled && route.radio_port == RadioPort::Video.as_u8())
+    {
+        #[cfg(target_arch = "wasm32")]
+        if route.action == RouteAction::Udp {
+            continue;
+        }
+
         let route_id = PayloadRouteId::new(route.id);
         receiver.add_mock_route(route_id, channel_id, 0);
-        options.rtp_payload_taps.push(RtpPayloadTap {
-            route_id,
-            payload_type: route.payload_type.min(127),
-        });
+        if route.action == RouteAction::Audio {
+            options.rtp_payload_taps.push(RtpPayloadTap {
+                route_id,
+                payload_type: route.payload_type.min(127),
+            });
+        } else {
+            options.raw_payload_routes.push(route_id);
+        }
     }
     options
 }
@@ -422,12 +431,19 @@ fn hex_preview(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::time::Duration;
+
     use openipc_core::{
         ChannelId, FrameLayout, PayloadRouteId, RadioPort, ReceiverRuntime, RoutePayload,
         WfbKeypair,
     };
 
+    #[cfg(not(target_arch = "wasm32"))]
+    use super::configure_mock_receiver;
     use super::{configure_receiver, RouteProcessor};
+    #[cfg(not(target_arch = "wasm32"))]
+    use crate::settings::RouteAction;
     use crate::{runtime::StartRequest, settings::Settings, telemetry::crc8_dvb_s2};
 
     fn request_from_settings(settings: Settings) -> StartRequest {
@@ -474,6 +490,49 @@ mod tests {
         assert_eq!(options.raw_payload_routes, [PayloadRouteId::new(2)]);
         assert_eq!(options.rtp_payload_taps.len(), 1);
         assert_eq!(options.rtp_payload_taps[0].route_id, PayloadRouteId::new(3));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn mock_udp_route_forwards_the_raw_mixed_rtp_packet() {
+        let listener = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        listener
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+
+        let mut settings = Settings::default();
+        let route = settings
+            .payload_routes
+            .iter_mut()
+            .find(|route| route.id == 3)
+            .unwrap();
+        route.action = RouteAction::Udp;
+        route.udp_host = "127.0.0.1".to_owned();
+        route.udp_port = listener.local_addr().unwrap().port();
+
+        let request = request_from_settings(settings);
+        let mut processor = RouteProcessor::new(&request).unwrap();
+        let mut receiver = ReceiverRuntime::with_mock_video_route(
+            FrameLayout::WithFcs,
+            PayloadRouteId::new(1),
+            ChannelId::new(request.channel_id),
+            0,
+        );
+        let options = configure_mock_receiver(&mut receiver, &request);
+        assert_eq!(options.raw_payload_routes, [PayloadRouteId::new(3)]);
+        assert!(options.rtp_payload_taps.is_empty());
+
+        let packet = [0x80, 98, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0xf8, 0xff, 0xfe];
+        let batch = receiver
+            .push_mock_payload(receiver.video_runtime(), 1, &packet, &options)
+            .unwrap();
+        assert_eq!(batch.raw_payloads.len(), 1);
+
+        let (_, logs, _, _) = processor.process(&batch.raw_payloads, false);
+        assert!(logs.is_empty());
+        let mut received = [0_u8; 64];
+        let received_len = listener.recv(&mut received).unwrap();
+        assert_eq!(&received[..received_len], packet);
     }
 
     #[test]

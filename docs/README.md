@@ -33,8 +33,9 @@ are ready.
 
 ## Deploy
 
-GitHub Actions builds and deploys the docs to Cloudflare on normal pushes to
-`master` and on `v*` release tags. Local docs work only needs Docusaurus.
+GitHub Actions builds the docs once and deploys that artifact to Cloudflare on
+pushes to `master`, including cargo-release commits. Local docs work only needs
+Docusaurus.
 
 Repository secrets used by CI:
 

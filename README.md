@@ -173,9 +173,10 @@ cargo release patch --workspace
 cargo release patch --workspace --execute
 ```
 
-Local release commands only bump, commit, tag, and push. GitHub Actions
-publishes crates, the npm package, desktop bundles, and web/docs deploys.
-`git-cliff` updates [CHANGELOG.md](CHANGELOG.md) during release.
+Local release commands only bump, commit, create the annotated tag, and push
+both atomically. The `master` workflow detects that tag and, after validation
+and site deployment, publishes crates, the npm package, and Nebulus platform
+artifacts. `git-cliff` updates [CHANGELOG.md](CHANGELOG.md) during release.
 
 ## CI/CD
 
@@ -185,6 +186,10 @@ Useful repository secrets:
 - npm trusted publishing for `@openipc-rs/web`
 - `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` for Nebulus, legacy
   Station, and docs deploys
+
+Normal CI lives in `.github/workflows/ci.yml`; release publishing is isolated
+in the reusable `.github/workflows/release.yml`. A cargo release produces one
+GitHub Actions run rather than separate branch and tag runs.
 
 ## License
 

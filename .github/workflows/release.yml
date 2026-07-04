@@ -1,0 +1,515 @@
+name: Release
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Existing v-prefixed release tag.
+        required: true
+        type: string
+      commit:
+        description: Commit that the release tag must resolve to.
+        required: true
+        type: string
+    secrets:
+      CARGO_REGISTRY_TOKEN:
+        required: false
+      ANDROID_KEYSTORE_BASE64:
+        required: false
+      ANDROID_KEYSTORE_PASSWORD:
+        required: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ inputs.tag }}
+  RELEASE_COMMIT: ${{ inputs.commit }}
+  OPENIPC_BUILD_METADATA: "true"
+  OPENIPC_GIT_COMMIT: ${{ inputs.commit }}
+  OPENIPC_GIT_TAG: ${{ inputs.tag }}
+  VITE_OPENIPC_BUILD_METADATA: "true"
+  VITE_OPENIPC_GIT_COMMIT: ${{ inputs.commit }}
+  VITE_OPENIPC_GIT_TAG: ${{ inputs.tag }}
+
+jobs:
+  validate:
+    name: Validate Release Tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Validate release identity
+        run: |
+          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT" || {
+            echo "Tag $RELEASE_TAG does not resolve to $RELEASE_COMMIT." >&2
+            exit 1
+          }
+          test "$(git cat-file -t "$RELEASE_TAG")" = "tag" || {
+            echo "$RELEASE_TAG must be an annotated tag created by cargo-release." >&2
+            exit 1
+          }
+          python3 scripts/validate-versions.py --tag "$RELEASE_TAG"
+
+  publish-crates:
+    name: Publish Crates.io Packages
+    runs-on: ubuntu-latest
+    needs: validate
+    permissions:
+      contents: read
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Validate crates.io token
+        if: env.CARGO_REGISTRY_TOKEN == ''
+        run: |
+          echo "CARGO_REGISTRY_TOKEN is required to publish crates.io packages." >&2
+          exit 1
+
+      - name: Install native video build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            libasound2-dev \
+            libclang-dev \
+            libdrm-dev \
+            libgbm-dev \
+            libva-dev \
+            pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: publish-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            publish-cargo-${{ runner.os }}-
+
+      - name: Publish workspace crates
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+          CRATES=(
+            openipc-core
+            openipc-rtl88xx
+            openipc-video
+            openipc-web
+            wfb-rs
+            nebulus
+          )
+          declare -A MISSING=()
+          EXISTING=0
+
+          for CRATE in "${CRATES[@]}"; do
+            STATUS=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+              --retry 3 \
+              --user-agent 'openipc-rs-ci/1.0 (https://github.com/neelsani/openipc-rs)' \
+              "https://crates.io/api/v1/crates/$CRATE/$VERSION")
+            case "$STATUS" in
+              200)
+                echo "$CRATE@$VERSION is already published"
+                EXISTING=$((EXISTING + 1))
+                ;;
+              404)
+                MISSING["$CRATE"]=1
+                ;;
+              *)
+                echo "crates.io returned HTTP $STATUS for $CRATE@$VERSION" >&2
+                exit 1
+                ;;
+            esac
+          done
+
+          if [ "${#MISSING[@]}" -eq 0 ]; then
+            echo "All workspace crates are already published; skipping."
+          elif [ "$EXISTING" -eq 0 ]; then
+            cargo publish --workspace --locked
+          else
+            echo "Resuming a partial crates.io publish."
+            for CRATE in "${CRATES[@]}"; do
+              if [ -n "${MISSING[$CRATE]:-}" ]; then
+                cargo publish --package "$CRATE" --locked
+              fi
+            done
+          fi
+
+  publish-wasm-npm:
+    name: Publish WASM SDK To npm
+    runs-on: ubuntu-latest
+    needs: validate
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: publish-wasm-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            publish-wasm-cargo-${{ runner.os }}-
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Build WASM SDK package
+        run: bun run --cwd crates/openipc-web build
+
+      - name: Install npm for trusted publishing
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Publish npm package
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          PACKAGE_VERSION=$(node -e 'console.log(require("./crates/openipc-web/pkg/package.json").version)')
+          if [ "$PACKAGE_VERSION" != "$VERSION" ]; then
+            echo "Tag version $VERSION does not match @openipc-rs/web package version $PACKAGE_VERSION" >&2
+            exit 1
+          fi
+          if npm view "@openipc-rs/web@$VERSION" version >/dev/null 2>&1; then
+            echo "@openipc-rs/web@$VERSION is already on npm; skipping"
+            exit 0
+          fi
+          npm publish crates/openipc-web/pkg --access public
+
+  desktop-release:
+    name: Nebulus Desktop (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    needs: validate
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x64
+            os: ubuntu-24.04
+            rust_target: x86_64-unknown-linux-gnu
+          - label: linux-arm64
+            os: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-gnu
+          - label: macos-apple-silicon
+            os: macos-15
+            rust_target: aarch64-apple-darwin
+          - label: macos-intel
+            os: macos-15-intel
+            rust_target: x86_64-apple-darwin
+          - label: windows-x64
+            os: windows-2025
+            rust_target: x86_64-pc-windows-msvc
+          - label: windows-arm64
+            os: windows-11-arm
+            rust_target: aarch64-pc-windows-msvc
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            libasound2-dev \
+            libclang-dev \
+            libdrm-dev \
+            libgbm-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libva-dev \
+            libwebkit2gtk-4.1-dev \
+            patchelf \
+            pkg-config \
+            wget
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: release-desktop-cargo-${{ matrix.label }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            release-desktop-cargo-${{ matrix.label }}-
+
+      - name: Build Nebulus
+        run: cargo build --release -p nebulus --bin nebulus --target ${{ matrix.rust_target }} --locked
+
+      - name: Package Linux release
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          NAME="nebulus-${{ matrix.label }}-$VERSION"
+          mkdir -p release-assets
+          install -m 0755 "target/${{ matrix.rust_target }}/release/nebulus" "release-assets/$NAME"
+          (cd release-assets && sha256sum "$NAME" > "$NAME.sha256")
+
+      - name: Package macOS release
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          MARKETING_VERSION="${VERSION%%-*}"
+          NAME="nebulus-${{ matrix.label }}-$VERSION"
+          ROOT="release-assets/dmg-root"
+          APP="$ROOT/Nebulus.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp "target/${{ matrix.rust_target }}/release/nebulus" "$APP/Contents/MacOS/Nebulus"
+          cp LICENSE "$APP/Contents/Resources/LICENSE"
+          cat > "$APP/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleDisplayName</key><string>Nebulus</string>
+            <key>CFBundleExecutable</key><string>Nebulus</string>
+            <key>CFBundleIdentifier</key><string>dev.neels.openipc.nebulus</string>
+            <key>CFBundleName</key><string>Nebulus</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>$MARKETING_VERSION</string>
+            <key>CFBundleVersion</key><string>${{ github.run_number }}</string>
+            <key>LSMinimumSystemVersion</key><string>12.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          PLIST
+          codesign --force --deep --sign - "$APP"
+          ln -s /Applications "$ROOT/Applications"
+          hdiutil create -volname Nebulus -srcfolder "$ROOT" -ov -format UDZO "release-assets/$NAME.dmg"
+          (cd release-assets && shasum -a 256 "$NAME.dmg" > "$NAME.dmg.sha256")
+          rm -rf "$ROOT"
+
+      - name: Install Inno Setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco upgrade innosetup --version=6.7.1 --yes --no-progress
+
+      - name: Package Windows release
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $Version = $env:RELEASE_TAG.TrimStart('v')
+          $Name = "nebulus-${{ matrix.label }}-$Version"
+          $Architecture = if ('${{ matrix.rust_target }}' -eq 'aarch64-pc-windows-msvc') { 'arm64' } else { 'x64os' }
+          $RepoDir = (Get-Location).Path
+          $SourceDir = Join-Path $RepoDir "target/${{ matrix.rust_target }}/release"
+          $OutputDir = Join-Path $RepoDir 'release-assets'
+          $Compiler = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6/ISCC.exe'
+          New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+          if (!(Test-Path $Compiler)) {
+            throw "Inno Setup compiler not found at $Compiler"
+          }
+          & $Compiler /Qp "/DAppVersion=$Version" "/DSourceDir=$SourceDir" "/DRepoDir=$RepoDir" "/DArchitecture=$Architecture" "/DOutputDir=$OutputDir" "/DOutputName=$Name" "apps/nebulus/packaging/windows/Nebulus.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $Hash = (Get-FileHash "release-assets/$Name.exe" -Algorithm SHA256).Hash.ToLower()
+          "$Hash  $Name.exe" | Set-Content "release-assets/$Name.exe.sha256"
+
+      - name: Upload desktop release artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: nebulus-${{ matrix.label }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 7
+
+  android-release:
+    name: Nebulus Android
+    runs-on: ubuntu-latest
+    needs: validate
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Install Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;27.2.12479018"
+          yes | sdkmanager --licenses >/dev/null
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown,aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: release-android-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            release-android-cargo-${{ runner.os }}-
+
+      - name: Install cargo-apk2
+        run: |
+          case "$(cargo apk2 --version 2>/dev/null || true)" in
+            *" 1.3.11") ;;
+            *) cargo install cargo-apk2 --version 1.3.11 --locked --force ;;
+          esac
+          cargo apk2 --version
+
+      - name: Prepare Android release signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          KEYSTORE="$RUNNER_TEMP/nebulus-release.keystore"
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ] && [ -n "$ANDROID_KEYSTORE_PASSWORD" ]; then
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE"
+            PASSWORD="$ANDROID_KEYSTORE_PASSWORD"
+          else
+            PASSWORD="openipc-ci-release"
+            keytool -genkeypair -noprompt \
+              -keystore "$KEYSTORE" \
+              -storepass "$PASSWORD" \
+              -keypass "$PASSWORD" \
+              -alias nebulus \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Nebulus CI, OU=openipc-rs, O=neels.dev, C=US"
+            echo "ANDROID_KEYSTORE_BASE64/ANDROID_KEYSTORE_PASSWORD are unset; using an ephemeral CI signing key. This APK cannot upgrade a differently signed installation." >&2
+          fi
+          echo "CARGO_APK_RELEASE_KEYSTORE=$KEYSTORE" >> "$GITHUB_ENV"
+          echo "CARGO_APK_RELEASE_KEYSTORE_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
+
+      - name: Build Nebulus Android APK
+        run: cargo apk2 build --release -p nebulus --lib
+
+      - name: Stage Android release artifacts
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          OUT_DIR="release-assets/android"
+          mkdir -p "$OUT_DIR"
+          APK=$(find target/release/apk -maxdepth 1 -type f -name '*.apk' ! -name '*-unaligned.apk' -print -quit)
+          if [ -z "$APK" ]; then
+            echo "cargo-apk2 did not produce a release APK." >&2
+            find target -type f -name '*.apk' -print >&2 || true
+            exit 1
+          fi
+          for ABI in arm64-v8a armeabi-v7a x86_64 x86; do
+            unzip -Z1 "$APK" | grep -Eq "^lib/$ABI/.*\\.so$" || {
+              echo "Universal APK is missing native libraries for $ABI." >&2
+              exit 1
+            }
+          done
+          NAME="nebulus-android-universal-$VERSION.apk"
+          cp "$APK" "$OUT_DIR/$NAME"
+          (cd "$OUT_DIR" && sha256sum "$NAME" > "$NAME.sha256")
+
+      - name: Upload Android release artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: nebulus-android-universal
+          path: release-assets/android/*
+          if-no-files-found: error
+          retention-days: 7
+
+  github-release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs:
+      - publish-crates
+      - publish-wasm-npm
+      - desktop-release
+      - android-release
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: nebulus-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          name: Nebulus ${{ inputs.tag }}
+          generate_release_notes: true
+          prerelease: ${{ contains(inputs.tag, '-') }}
+          files: release-assets/*
+          fail_on_unmatched_files: true

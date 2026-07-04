@@ -4,144 +4,144 @@ sidebar_position: 12
 
 # CI/CD
 
-The main workflow is `.github/workflows/ci.yml`. It runs on pull requests,
-pushes to `master`, `v*` tags, and manual dispatch.
+The automation is split by responsibility:
 
-## What Runs
+- `.github/workflows/ci.yml` is the entry point for pull requests, `master`
+  pushes, and manual validation runs.
+- `.github/workflows/release.yml` is a reusable workflow called by `ci.yml`
+  only when the pushed `master` commit has an annotated `v*` tag.
+- `scripts/validate-versions.py` checks the lockstep Rust, npm, app, docs,
+  lockfile, and changelog versions in both paths.
 
-| Job                              | Purpose                                                                                                                                                                |
-| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Rust Workspace`                 | Installs Linux desktop dependencies, runs format/workspace clippy/tests/version checks, checks `openipc-web`, and clippies the `openipc-video` and Nebulus WASM paths. |
-| `WASM SDK Package`               | Builds Station and Nebulus for the browser, verifies Nebulus emitted a real WASM module, and dry-runs the generated `@openipc-rs/web` package.                         |
-| `Docs Site`                      | Builds the Docusaurus site.                                                                                                                                            |
-| `Desktop Check`                  | Tests the matching `openipc-video` backend and checks Nebulus for Linux x64/arm64, macOS Apple Silicon/Intel, and Windows x64/arm64.                                   |
-| `Android Check`                  | Clippies the MediaCodec and Nebulus paths for aarch64 Android and builds a Nebulus debug APK with `cargo-apk2`.                                                        |
-| `Deploy Legacy Station Site`     | Builds and deploys `apps/openipc-station/dist` to the existing `openipc-rs-station` Cloudflare Pages project.                                                          |
-| `Deploy Nebulus Web App`         | Builds and deploys `apps/nebulus/dist` to the separate `nebulus` Cloudflare Pages project.                                                                             |
-| `Deploy Docs Site`               | Deploys `docs/build` to Cloudflare Pages on pushes to `master`.                                                                                                        |
-| `Publish Crates.io Packages`     | Publishes the workspace crates on `v*` tags.                                                                                                                           |
-| `Publish WASM SDK To npm`        | Builds `@openipc-rs/web` with Bun and publishes it with npm trusted publishing on `v*` tags.                                                                           |
-| `Nebulus Desktop Release`        | Builds and packages Nebulus for all six desktop targets on `v*` tags.                                                                                                  |
-| `Nebulus Android Release`        | Builds one signed, multi-ABI Nebulus APK with `cargo-apk2` on `v*` tags.                                                                                                |
-| `Publish Nebulus GitHub Release` | Collects all platform artifacts and checksums into one GitHub Release.                                                                                                 |
+`cargo release` pushes its release commit and annotated tag atomically. The
+`master` workflow fetches tags, finds the tag pointing at `github.sha`, and
+runs validation, deployment, and publishing in one workflow run. A standalone
+tag push does not start CI.
+
+## Validation
+
+| Job                     | What it checks                                                                                                 |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `Build Context`         | Detects an annotated release tag on the exact `master` commit.                                                 |
+| `Rust Workspace`        | Formatting, workspace Clippy, tests, version metadata, and WASM-target checks.                                 |
+| `Web Apps And WASM SDK` | Builds the WASM SDK, dry-runs its npm package, and builds legacy Station and Nebulus.                          |
+| `Docs Site`             | Installs the frozen Bun dependencies and builds Docusaurus.                                                    |
+| `Desktop Check`         | Tests `openipc-video` and checks Nebulus on Linux x64/arm64, macOS Apple Silicon/Intel, and Windows x64/arm64. |
+| `Android Check`         | Clippies the Android video/app paths and builds an arm64 debug APK with `cargo-apk2`.                          |
+
+The three static sites are built once. Successful `master` builds upload their
+outputs as short-lived workflow artifacts, and the deployment matrix sends
+those exact artifacts to Cloudflare Pages. Deployment never rebuilds source.
+
+Master runs are not auto-cancelled because a release may already be publishing
+immutable packages. Superseded pull-request runs are cancelled.
 
 ## Event Behavior
 
-| Event             | Validation      | Deploys                                 | Publishes                                                    |
-| ----------------- | --------------- | --------------------------------------- | ------------------------------------------------------------ |
-| Pull request      | yes             | no                                      | no                                                           |
-| Push to `master`  | yes             | legacy station, Nebulus, and docs       | no                                                           |
-| Push tag `v0.2.0` | yes             | no; the release commit already deployed | crates.io, npm, GitHub Release desktop and Android artifacts |
-| Manual dispatch   | validation jobs | no                                      | no                                                           |
+| Event                  | Validate | Deploy sites | Publish release                                           |
+| ---------------------- | -------- | ------------ | --------------------------------------------------------- |
+| Pull request           | yes      | no           | no                                                        |
+| Ordinary `master` push | yes      | yes          | no                                                        |
+| `cargo release` push   | yes      | yes          | yes, when the exact commit carries one annotated `v*` tag |
+| Manual dispatch        | yes      | no           | no                                                        |
+| Standalone tag push    | no       | no           | no                                                        |
 
-`cargo release` creates a release commit on `master` and a `v*` tag. GitHub
-sees those as separate push events. The release commit runs the normal
-validation and deployment path. The tag runs validation, package publishing,
-and artifact creation without deploying the same sites a second time.
+If a release job fails because of a transient service or runner problem, rerun
+the failed GitHub Actions jobs. Do not move or recreate a published tag. The
+release validator requires the tag to remain annotated, match every package
+version, and resolve to the workflow commit. npm publishing skips an existing
+version, while crates.io publishing either skips a completed release or resumes
+the missing crates from a partial publish in dependency order.
 
-## Release Publishing
+## Publishing
 
-Pushes to tags like `v0.2.0` run the release publishing jobs after validation:
+The reusable release workflow starts only after every validation and
+Cloudflare deployment job succeeds. It performs these jobs in parallel:
 
-- publishable Rust crates (`openipc-core`, `openipc-rtl88xx`, `openipc-video`,
-  `openipc-web`, `wfb-rs`, and `nebulus`) publish to crates.io with
-  `cargo publish --workspace`,
-- `@openipc-rs/web` builds with Bun and publishes to npm with npm trusted
-  publishing,
-- Nebulus builds for six desktop targets and four Android ABIs,
-- after both package publishers succeed, a final job collects the platform
-  installers, executables, APK, and SHA-256 files into one GitHub Release.
+- publishes the workspace's publishable crates with
+  `cargo publish --workspace --locked`,
+- builds and publishes `@openipc-rs/web` through npm trusted publishing,
+- builds six Nebulus desktop packages,
+- builds one universal Android APK containing four ABIs.
 
-Desktop release targets:
+After all publishers and platform builds succeed, the workflow creates the
+GitHub Release and uploads the platform files and SHA-256 checksums.
 
-| Release label         | GitHub runner      | Rust target                 |
-| --------------------- | ------------------ | --------------------------- |
-| `linux-x64`           | `ubuntu-24.04`     | `x86_64-unknown-linux-gnu`  |
-| `linux-arm64`         | `ubuntu-24.04-arm` | `aarch64-unknown-linux-gnu` |
-| `macos-apple-silicon` | `macos-15`         | `aarch64-apple-darwin`      |
-| `macos-intel`         | `macos-15-intel`   | `x86_64-apple-darwin`       |
-| `windows-x64`         | `windows-2025`     | `x86_64-pc-windows-msvc`    |
-| `windows-arm64`       | `windows-11-arm`   | `aarch64-pc-windows-msvc`   |
+Desktop targets:
 
-Linux releases are architecture-labelled executables built on Ubuntu. macOS
-releases are ad-hoc-signed `.dmg` disk images. Windows releases are installer
-`.exe` files that install both Nebulus and the architecture-matched
-`wintun.dll` needed by the optional VPN feature.
+| Release label         | Runner             | Rust target                 | Output               |
+| --------------------- | ------------------ | --------------------------- | -------------------- |
+| `linux-x64`           | `ubuntu-24.04`     | `x86_64-unknown-linux-gnu`  | executable           |
+| `linux-arm64`         | `ubuntu-24.04-arm` | `aarch64-unknown-linux-gnu` | executable           |
+| `macos-apple-silicon` | `macos-15`         | `aarch64-apple-darwin`      | ad-hoc-signed `.dmg` |
+| `macos-intel`         | `macos-15-intel`   | `x86_64-apple-darwin`       | ad-hoc-signed `.dmg` |
+| `windows-x64`         | `windows-2025`     | `x86_64-pc-windows-msvc`    | installer `.exe`     |
+| `windows-arm64`       | `windows-11-arm`   | `aarch64-pc-windows-msvc`   | installer `.exe`     |
 
-Android release artifacts:
+Windows installers include the architecture-matched `wintun.dll` used by the
+optional VPN feature. Linux executables are not AppImages and still require the
+runtime libraries documented on the [Nebulus](./nebulus.md) page. macOS and
+Windows packages are not publicly code-signed or notarized.
 
-| Release label       | GitHub runner   | Included Android ABIs                    | Artifact        |
-| ------------------- | --------------- | ---------------------------------------- | --------------- |
-| `android-universal` | `ubuntu-latest` | arm64-v8a, armeabi-v7a, x86_64, and x86 | installable APK |
+The Android artifact is named `nebulus-android-universal-VERSION.apk` and must
+contain `arm64-v8a`, `armeabi-v7a`, `x86_64`, and `x86` native libraries.
 
-Required repository secret:
+## Credentials
 
-- `CARGO_REGISTRY_TOKEN`
+### crates.io
 
-Bun is used for installs, builds, and package dry-runs. The final npm release
-step intentionally uses npm instead of `bun publish`, because npm trusted
-publishing is not supported by Bun yet. Configure `@openipc-rs/web` on npmjs.com
-with GitHub Actions as the trusted publisher, repository `neelsani/openipc-rs`,
-workflow filename `ci.yml`, and package publishing from this workflow.
-
-The release jobs use the built-in `GITHUB_TOKEN`. Desktop assets use names such
-as:
+Set this repository secret:
 
 ```text
-nebulus-linux-x64-0.2.0
-nebulus-macos-apple-silicon-0.2.0.dmg
-nebulus-windows-arm64-0.2.0.exe
-nebulus-android-universal-0.2.0.apk
+CARGO_REGISTRY_TOKEN
 ```
 
-The Linux asset has no extension and may need `chmod +x` after download. It is
-not an AppImage: the target system still needs the Linux runtime libraries
-listed in the Nebulus and `openipc-video` documentation. macOS bundles are
-ad-hoc signed and are not notarized. Windows installers and Linux executables
-are not code-signed.
+### npm
 
-For Android releases, configure both secrets to keep a stable signing identity:
+Configure `@openipc-rs/web` on npmjs.com with:
+
+| Field                | Value          |
+| -------------------- | -------------- |
+| Publisher            | GitHub Actions |
+| Organization or user | `neelsani`     |
+| Repository           | `openipc-rs`   |
+| Workflow filename    | `ci.yml`       |
+| Allowed action       | `npm publish`  |
+
+The publish command lives in the reusable `release.yml`, but npm validates the
+calling workflow name for `workflow_call`, so the trusted publisher remains
+`ci.yml`. Both workflows grant the publish job `id-token: write`; no npm token
+is stored. npm generates provenance automatically for the public package.
+
+### Android signing
+
+For APKs that can upgrade an earlier Nebulus installation, set both secrets:
 
 ```text
 ANDROID_KEYSTORE_BASE64
 ANDROID_KEYSTORE_PASSWORD
 ```
 
-`ANDROID_KEYSTORE_BASE64` is the base64-encoded Java keystore. Its key password
-must match the keystore password because that is the interface exposed by
-`cargo-apk2`. If the secrets are absent, CI creates an ephemeral key and still
-publishes an installable APK, but that APK cannot upgrade an installation from
-another release because Android requires matching signing identities.
+The key password must match the keystore password. Without these secrets CI
+uses an ephemeral key, which produces an installable APK that cannot upgrade an
+APK signed by another release.
 
-The workspace also contains local `publish = false` crates, including the Tauri
-desktop shell and `tauri-plugin-openipc-usb`. They are checked, tested, and
-versioned with the repo, but they are not crates.io packages.
+### Cloudflare Pages
 
-## Cloudflare Deployments
+Set:
 
-Nebulus, legacy Station, and the docs site deploy on normal pushes to `master`
-and on `v*` release tags using `cloudflare/wrangler-action`. Each app has its
-own Cloudflare Pages project. The repo does not need local Cloudflare config
-files or deployment dependencies.
+```text
+CLOUDFLARE_API_TOKEN
+CLOUDFLARE_ACCOUNT_ID
+```
 
-The workflow passes `--branch=master` to Cloudflare Pages so both `master`
-pushes and release tags update the production custom domains instead of creating
-preview-only deployments.
+The deployment matrix uses these projects:
 
-Public URLs:
+| Site           | Cloudflare project   | Public URL                                                           |
+| -------------- | -------------------- | -------------------------------------------------------------------- |
+| Nebulus        | `nebulus`            | [nebulus.openipc-rs.neels.dev](https://nebulus.openipc-rs.neels.dev) |
+| Legacy Station | `openipc-rs-station` | [station.openipc-rs.neels.dev](https://station.openipc-rs.neels.dev) |
+| Docs           | `openipc-rs-docs`    | [openipc-rs.neels.dev](https://openipc-rs.neels.dev)                 |
 
-- Nebulus: [nebulus.openipc-rs.neels.dev](https://nebulus.openipc-rs.neels.dev)
-- Legacy Station: [station.openipc-rs.neels.dev](https://station.openipc-rs.neels.dev)
-- Docs: [openipc-rs.neels.dev](https://openipc-rs.neels.dev)
-
-Required repository secrets:
-
-- `CLOUDFLARE_API_TOKEN`
-- `CLOUDFLARE_ACCOUNT_ID`
-
-Create the `openipc-rs-nebulus` Pages project in the same Cloudflare account
-before its first CI deployment. The existing `openipc-rs-station` project is
-left unchanged and continues serving the legacy app.
-
-Nebulus builds to `apps/nebulus/dist`; legacy Station builds to
-`apps/openipc-station/dist`; docs build to `docs/build`.
+When the Cloudflare secrets are absent, validation still succeeds and the
+deployment steps report that they were skipped.

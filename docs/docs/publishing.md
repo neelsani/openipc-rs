@@ -36,15 +36,15 @@ cargo release patch --workspace --execute --no-push
 ```
 
 `release.toml` has `publish = false`, so local release commands do not publish
-to crates.io. CI publishes from the pushed tag. The release hook also updates the
-Bun-managed `package.json` versions and regenerates app/docs `bun.lock` files
-with `bun install --lockfile-only`. It also prepends the release
-notes to `CHANGELOG.md` with `git-cliff`.
+to crates.io. The release hook updates the Bun-managed `package.json` versions,
+regenerates app/docs `bun.lock` files with `bun install --lockfile-only`, and
+prepends release notes to `CHANGELOG.md` with `git-cliff`.
 
-Pushing the `v0.2.0` tag triggers GitHub Actions release jobs. After the normal
-checks pass, CI publishes crates.io packages, publishes `@openipc-rs/web` to npm
-with npm trusted publishing, and uploads Nebulus desktop and Android artifacts
-to the GitHub Release.
+`cargo release` atomically pushes the release commit and its annotated tag. The
+single `master` workflow detects that `v0.2.0` points at the pushed commit. After
+validation and site deployment pass, it calls the reusable release workflow to
+publish crates.io packages, publish `@openipc-rs/web` through npm trusted
+publishing, and upload Nebulus desktop and Android artifacts.
 
 Required release secret:
 
@@ -52,13 +52,17 @@ Required release secret:
 
 Configure npm trusted publishing for `@openipc-rs/web` on npmjs.com:
 
-| Field                | Value                         |
-| -------------------- | ----------------------------- |
-| Publisher            | GitHub Actions                |
-| Organization or user | `neelsani`                    |
-| Repository           | `openipc-rs`                  |
-| Workflow filename    | `ci.yml`                      |
-| Allowed action       | package publish from `ci.yml` |
+| Field                | Value          |
+| -------------------- | -------------- |
+| Publisher            | GitHub Actions |
+| Organization or user | `neelsani`     |
+| Repository           | `openipc-rs`   |
+| Workflow filename    | `ci.yml`       |
+| Allowed action       | `npm publish`  |
+
+The publish job is implemented in reusable `release.yml`, but npm validates
+the calling workflow for `workflow_call`, so the configured filename remains
+`ci.yml`.
 
 The existing Cloudflare secrets are required for deployments from `master`:
 
@@ -71,9 +75,9 @@ CI deploys the public sites:
 - Legacy Station: [station.openipc-rs.neels.dev](https://station.openipc-rs.neels.dev)
 - Docs: [openipc-rs.neels.dev](https://openipc-rs.neels.dev)
 
-Release commits on `master` run the normal branch CI and deploy the sites. The
-tag workflow for the same commit runs validation, crates.io and npm publishing,
-and Nebulus artifact creation. It does not deploy the sites again.
+Release commits use the same workflow run as ordinary `master` commits. The
+release tag adds publishing and platform packaging after validation and site
+deployment; it does not create a second tag-triggered workflow run.
 
 ## Release Checklist
 
@@ -91,7 +95,7 @@ and Nebulus artifact creation. It does not deploy the sites again.
    cargo release patch --workspace --execute
    ```
 
-5. Watch the GitHub Actions run for the `v*` tag.
+5. Watch the GitHub Actions run for the release commit on `master`.
 
 Use `minor` or `major` instead of `patch` when the public API or package
 contract changes enough to require it.
@@ -136,9 +140,10 @@ Publish when ready:
 npm publish crates/openipc-web/pkg --access public --provenance
 ```
 
-CI performs this automatically for `v*` tags. The workflow builds the package
-with Bun, installs npm only for the publish step, and runs `npm publish` so npm
-trusted publishing can issue the release token.
+CI performs this automatically when the `master` commit carries the matching
+annotated `v*` tag. The workflow builds the package with Bun, installs npm only
+for the publish step, and runs `npm publish` so npm trusted publishing can issue
+the release token.
 
 ## Cargo Crates
 
@@ -221,7 +226,8 @@ cd apps/nebulus
 trunk build --release
 ```
 
-The deployable output is `apps/nebulus/dist`. GitHub Actions deploys it to the
-separate `openipc-rs-nebulus` Cloudflare Pages project from normal `master`
-pushes and `v*` release tags. The existing `openipc-rs-station` project keeps
-serving `apps/openipc-station/dist`; neither deployment needs a local script.
+The deployable output is `apps/nebulus/dist`. GitHub Actions builds it once and
+deploys that artifact to the `nebulus` Cloudflare Pages project on `master`
+pushes, including release commits. The existing `openipc-rs-station` project
+keeps serving `apps/openipc-station/dist`; neither deployment needs a local
+script.

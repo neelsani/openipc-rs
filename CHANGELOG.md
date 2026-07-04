@@ -1,5 +1,95 @@
 # Changelog
 
+## 0.1.29 - 2026-07-04
+
+### Changes
+- Chore(deps): bump the github-actions group across 1 directory with 5 updates
+
+Bumps the github-actions group with 5 updates in the / directory:
+
+| Package | From | To |
+| --- | --- | --- |
+| [actions/checkout](https://github.com/actions/checkout) | `6` | `7` |
+| [actions/cache](https://github.com/actions/cache) | `5` | `6` |
+| [android-actions/setup-android](https://github.com/android-actions/setup-android) | `3` | `4` |
+| [cloudflare/wrangler-action](https://github.com/cloudflare/wrangler-action) | `3` | `4` |
+| [softprops/action-gh-release](https://github.com/softprops/action-gh-release) | `2` | `3` |
+
+
+
+Updates `actions/checkout` from 6 to 7
+- [Release notes](https://github.com/actions/checkout/releases)
+- [Changelog](https://github.com/actions/checkout/blob/main/CHANGELOG.md)
+- [Commits](https://github.com/actions/checkout/compare/v6...v7)
+
+Updates `actions/cache` from 5 to 6
+- [Release notes](https://github.com/actions/cache/releases)
+- [Changelog](https://github.com/actions/cache/blob/main/RELEASES.md)
+- [Commits](https://github.com/actions/cache/compare/v5...v6)
+
+Updates `android-actions/setup-android` from 3 to 4
+- [Release notes](https://github.com/android-actions/setup-android/releases)
+- [Commits](https://github.com/android-actions/setup-android/compare/v3...v4)
+
+Updates `cloudflare/wrangler-action` from 3 to 4
+- [Release notes](https://github.com/cloudflare/wrangler-action/releases)
+- [Changelog](https://github.com/cloudflare/wrangler-action/blob/main/CHANGELOG.md)
+- [Commits](https://github.com/cloudflare/wrangler-action/compare/v3...v4)
+
+Updates `softprops/action-gh-release` from 2 to 3
+- [Release notes](https://github.com/softprops/action-gh-release/releases)
+- [Changelog](https://github.com/softprops/action-gh-release/blob/master/CHANGELOG.md)
+- [Commits](https://github.com/softprops/action-gh-release/compare/v2...v3)
+
+---
+updated-dependencies:
+- dependency-name: actions/cache
+  dependency-version: '6'
+  dependency-type: direct:production
+  update-type: version-update:semver-major
+  dependency-group: github-actions
+- dependency-name: actions/checkout
+  dependency-version: '7'
+  dependency-type: direct:production
+  update-type: version-update:semver-major
+  dependency-group: github-actions
+- dependency-name: android-actions/setup-android
+  dependency-version: '4'
+  dependency-type: direct:production
+  update-type: version-update:semver-major
+  dependency-group: github-actions
+- dependency-name: cloudflare/wrangler-action
+  dependency-version: '4'
+  dependency-type: direct:production
+  update-type: version-update:semver-major
+  dependency-group: github-actions
+- dependency-name: softprops/action-gh-release
+  dependency-version: '3'
+  dependency-type: direct:production
+  update-type: version-update:semver-major
+  dependency-group: github-actions
+...
+
+Signed-off-by: dependabot[bot] <support@github.com> (e36b739)
+- Merge pull request #1 from neelsani/dependabot/github_actions/github-actions-8e20360230
+
+chore(deps): bump the github-actions group across 1 directory with 5 updates (bd083bb)
+
+### Ci
+- Ci: consolidate validation and release publishing (6bd3389)
+
+### Features
+- Feat(nebulus): add receiver operations and HUD customization (2f66f0a)
+- Feat(nebulus): add multi-adapter receive diversity (aa36825)
+- Feat(nebulus): add telemetry-driven OSD and diagnostics
+
+Add MAVLink, MSP, and CRSF telemetry decoding, protocol controls, signing verification, route logging, OSD customization with undo, responsive diagnostics, persistent recording destinations, and updated documentation. (13b0bba)
+
+### Fixes
+- Fix(nebulus): improve route and OSD controls (2a5281d)
+- Fix(ci): install Bun for site deployments (f6c32b0)
+
+
 ## 0.1.28 - 2026-07-03
 
 ### Features

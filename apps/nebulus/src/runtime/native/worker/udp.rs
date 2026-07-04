@@ -74,6 +74,7 @@ pub(super) fn run(
     let mut armed_path: Option<PathBuf> = None;
     let mut first_peer = None;
     let mut last_decode_errors = 0;
+    let mut last_decoded_frames = 0;
 
     while !stop.load(Ordering::Relaxed) {
         let receive_started = Instant::now();
@@ -105,7 +106,7 @@ pub(super) fn run(
             );
         }
 
-        let metrics = process_packet(
+        let mut metrics = process_packet(
             &request,
             &packet_buffer[..packet_length],
             payload_sequence,
@@ -127,7 +128,12 @@ pub(super) fn run(
         if metrics.video_frames > 0 {
             present_latest(&mut decoder, &presenter);
         }
-        let decode_errors = decoder.stats().decode_errors;
+        let decoder_stats = decoder.stats();
+        metrics.decoder_frames = decoder_stats
+            .frames_decoded
+            .saturating_sub(last_decoded_frames);
+        last_decoded_frames = decoder_stats.frames_decoded;
+        let decode_errors = decoder_stats.decode_errors;
         if decode_errors > last_decode_errors {
             last_decode_errors = decode_errors;
             log(

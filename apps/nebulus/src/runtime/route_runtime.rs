@@ -505,6 +505,39 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
+    fn mock_receiver_can_delegate_raw_video_rtp_to_the_decode_worker() {
+        let settings = Settings::default();
+        let request = request_from_settings(settings);
+        let video_route = PayloadRouteId::new(1);
+        let mut receiver = ReceiverRuntime::with_mock_video_route(
+            FrameLayout::WithFcs,
+            video_route,
+            ChannelId::new(request.channel_id),
+            0,
+        );
+        let mut options = configure_mock_receiver(&mut receiver, &request);
+        options.depacketize_video = false;
+        options.raw_payload_routes.push(video_route);
+        let mut source = crate::runtime::codec_mock::MockAvStream::new().unwrap();
+        let event = source.next_event();
+
+        let mut raw_video_packets = 0;
+        for (index, packet) in event.packets.iter().enumerate() {
+            let batch = receiver
+                .push_mock_payload(receiver.video_runtime(), index as u64, packet, &options)
+                .unwrap();
+            raw_video_packets += batch
+                .raw_payloads
+                .iter()
+                .filter(|payload| payload.route_id == video_route)
+                .count();
+        }
+
+        assert!(raw_video_packets > 0);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
     fn mock_udp_route_forwards_the_raw_mixed_rtp_packet() {
         let listener = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         listener

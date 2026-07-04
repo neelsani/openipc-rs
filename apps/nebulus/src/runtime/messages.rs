@@ -253,6 +253,7 @@ pub(crate) struct BatchMetrics {
     pub(crate) packets: usize,
     pub(crate) rtp_packets: usize,
     pub(crate) video_frames: usize,
+    pub(crate) decoder_frames: u64,
     pub(crate) video_bytes: usize,
     pub(crate) usb_latency_ms: f64,
     pub(crate) parse_latency_ms: f64,
@@ -285,6 +286,7 @@ impl BatchMetrics {
         self.packets = self.packets.saturating_add(newer.packets);
         self.rtp_packets = self.rtp_packets.saturating_add(newer.rtp_packets);
         self.video_frames = self.video_frames.saturating_add(newer.video_frames);
+        self.decoder_frames = self.decoder_frames.saturating_add(newer.decoder_frames);
         self.video_bytes = self.video_bytes.saturating_add(newer.video_bytes);
         self.usb_latency_ms = newer.usb_latency_ms;
         self.parse_latency_ms = newer.parse_latency_ms;

@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use openipc_core::rtp::{RTP_PAYLOAD_TYPE_H264, RTP_PAYLOAD_TYPE_OPUS};
 
-pub(crate) const MOCK_FPS: u32 = 60;
+pub(crate) const MOCK_FPS: u32 = 240;
 
 const CLOCK_RATE: u32 = 90_000;
 const AUDIO_CLOCK_RATE: u32 = 48_000;
@@ -85,6 +85,21 @@ impl MockAvStream {
             packets,
             next_due_micros: next_due,
         }
+    }
+
+    /// Rebase the synthetic clock after a debugger or expensive UI pass stalls it.
+    ///
+    /// The mock is a live-source simulator, so replaying an arbitrarily large
+    /// backlog is less useful than preserving A/V order and resuming at "now".
+    pub(crate) fn rebase_timing_if_late(&mut self, now_micros: u64, max_lag_micros: u64) -> bool {
+        let next_due = self.next_video_micros.min(self.next_audio_micros);
+        let lag = now_micros.saturating_sub(next_due);
+        if lag <= max_lag_micros {
+            return false;
+        }
+        self.next_video_micros = self.next_video_micros.saturating_add(lag);
+        self.next_audio_micros = self.next_audio_micros.saturating_add(lag);
+        true
     }
 }
 
@@ -392,6 +407,28 @@ mod tests {
             first.next_due_micros,
             (1_000_000 / u64::from(MOCK_FPS)).min(20_000)
         );
+    }
+
+    #[test]
+    fn late_live_mock_rebases_without_changing_av_order() {
+        let mut stream = MockAvStream::new().unwrap();
+        let first = stream.next_event();
+        let before_gap = stream
+            .next_audio_micros
+            .saturating_sub(stream.next_video_micros);
+
+        assert!(stream.rebase_timing_if_late(500_000, 50_000));
+        assert_eq!(
+            stream
+                .next_audio_micros
+                .saturating_sub(stream.next_video_micros),
+            before_gap
+        );
+        assert_eq!(
+            stream.next_video_micros.min(stream.next_audio_micros),
+            500_000
+        );
+        assert_eq!(first.next_due_micros, 1_000_000 / u64::from(MOCK_FPS));
     }
 
     #[test]

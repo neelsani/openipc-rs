@@ -105,6 +105,16 @@ diversity receivers, then press **Start RX**. With no authorized selection,
 use the same Rust Realtek initialization and WFB/FEC/RTP pipeline as native
 builds. WebCodecs performs H.264/H.265 decoding and WebGL uploads the retained
 browser `VideoFrame` directly, without copying decoded pixels through WASM.
+Recovered RTP batches are transferred to a Rust/WASM RTP worker. Complete
+access units then cross a direct `MessageChannel` to a separate WebCodecs
+worker, so a slow decoder cannot stall RTP ingest. Both handoff queues are
+bounded and discard dependent frames until a keyframe after overload. Only the
+newest transferable `VideoFrame` crosses back for presentation. The Metrics
+tab reports receive, decoder-output, and presentation rates separately.
+
+The worker is the feature-gated `nebulus-decode-worker` binary inside this
+same Cargo package, not another app or crate. Trunk enables it automatically;
+normal native builds and `cargo install nebulus` only build the main binary.
 
 Create deployable files with:
 
@@ -175,10 +185,11 @@ Either source -> openipc-core route fanout
 
 Desktop and Android keep one bulk-IN capture worker per adapter and one shared
 protocol/decode worker. The egui event loop only updates state and uploads the
-newest presentable frame. The browser keeps WebUSB and WebCodecs on its local async
-executor because browser handles are not `Send`. Rust/WASM submits compressed
-access units directly to the browser WebCodecs API; application-written
-JavaScript callbacks are not part of the receive path.
+newest presentable frame. The browser keeps WebUSB and WFB recovery on the app
+executor, then transfers recovered RTP batches to an RTP worker. A second
+worker owns WebCodecs, and a direct `MessageChannel` carries complete access
+units between them; application-written JavaScript callbacks are not part of
+the receive path.
 
 Enabled payload routes share the receiver's WFB runtimes whenever they use the
 same channel and key slot. The default mixed-audio route therefore taps Opus
@@ -334,6 +345,7 @@ cargo fmt --all --check
 cargo clippy -p nebulus --all-targets --no-deps -- -D warnings
 cargo test -p nebulus --all-targets
 cargo check -p nebulus --target wasm32-unknown-unknown
+cargo check -p nebulus --bin nebulus-decode-worker --features web-decode-worker --target wasm32-unknown-unknown
 cargo check -p nebulus --target aarch64-linux-android --lib
 ```
 

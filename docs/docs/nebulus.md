@@ -60,11 +60,13 @@ H.264/H.265 depacketizer, audio route, recorder, metrics, decoder, and latest
 frame presenter as USB video. This mode intentionally skips Realtek, 802.11,
 WFB crypto, and FEC.
 
-The browser follows the same stages and races one completion future per
-authorized adapter on the browser's local async executor.
-WebUSB and WebCodecs objects cannot cross Rust threads, so Nebulus polls them
-without a Web Worker. Every asynchronous completion requests an egui repaint;
-the UI does not busy-loop while idle.
+The browser races one WebUSB completion future per authorized adapter on the
+app's local async executor. After WFB/FEC recovery it transfers RTP batches to
+an RTP worker. Complete access units travel over a direct `MessageChannel` to a
+separate WebCodecs worker, so decoder stalls do not pause RTP ingest. The
+decoder worker returns a transferable latest-only `VideoFrame`; asynchronous
+receiver and presentation completions request repaint, so the UI does not
+busy-loop while idle.
 
 ## Platform Boundaries
 
@@ -234,6 +236,16 @@ configuration, while **Add adapter** authorizes additional radios one at a
 time. Both calls happen directly inside the click handler to preserve the
 browser's user gesture. Every selected device is initialized into monitor mode
 by the same Rust HAL used by native targets.
+
+The browser receive loop transfers recovered RTP in length-prefixed batches to
+Nebulus's bundled `nebulus-decode-worker` binary target, compiled to WASM and
+running in RTP mode. A second instance owns WebCodecs. A direct
+`MessageChannel` carries complete access units between them, and both queues
+discard dependent frames until a keyframe after overload. Decoded `VideoFrame`
+objects are transferable: the decoder keeps replacing its pending frame and
+sends at most one back per display refresh. Metrics distinguish access units
+received, WebCodecs outputs, and frames actually presented; visible FPS is
+still limited by display refresh.
 
 To build static deployment files:
 
@@ -623,6 +635,7 @@ pending retry.
 cargo test -p nebulus --all-targets
 cargo clippy -p nebulus --all-targets --no-deps -- -D warnings
 cargo check -p nebulus --target wasm32-unknown-unknown
+cargo check -p nebulus --bin nebulus-decode-worker --features web-decode-worker --target wasm32-unknown-unknown
 cargo check -p nebulus --target aarch64-linux-android --lib
 ```
 

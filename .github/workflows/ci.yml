@@ -119,7 +119,9 @@ jobs:
         run: cargo clippy --workspace --all-targets --no-deps --locked -- -D warnings
 
       - name: Test
-        run: cargo test --workspace --all-targets --locked
+        run: |
+          cargo test --workspace --all-targets --locked
+          cargo test -p nebulus --bin nebulus-decode-worker --features web-decode-worker --locked
 
       - name: Validate shared versions
         run: python3 scripts/validate-versions.py
@@ -128,7 +130,7 @@ jobs:
         run: |
           cargo check -p openipc-web --target wasm32-unknown-unknown --locked
           cargo clippy -p openipc-video --target wasm32-unknown-unknown --all-targets --no-deps --locked -- -D warnings
-          cargo clippy -p nebulus --target wasm32-unknown-unknown --all-targets --no-deps --locked -- -D warnings
+          cargo clippy -p nebulus --target wasm32-unknown-unknown --all-targets --features web-decode-worker --no-deps --locked -- -D warnings
 
   web:
     name: Web Apps And WASM SDK
@@ -196,11 +198,23 @@ jobs:
           from pathlib import Path
           import sys
 
-          wasm = list(Path("apps/nebulus/dist").glob("*_bg.wasm"))
-          if len(wasm) != 1 or wasm[0].read_bytes()[:4] != b"\0asm":
-              print("Nebulus did not produce one valid WASM module", file=sys.stderr)
+          root = Path("apps/nebulus/dist")
+          wasm = sorted(root.rglob("*_bg.wasm"))
+          expected = {"nebulus-decode-worker_bg.wasm"}
+          names = {path.name for path in wasm}
+          main = [path for path in wasm if path.name not in expected]
+          if len(main) != 1 or not expected.issubset(names):
+              print(f"Nebulus produced unexpected WASM modules: {sorted(names)}", file=sys.stderr)
               sys.exit(1)
-          print(f"Validated {wasm[0]}")
+          invalid = [path for path in wasm if path.read_bytes()[:4] != b"\0asm"]
+          if invalid:
+              print(f"Invalid Nebulus WASM modules: {invalid}", file=sys.stderr)
+              sys.exit(1)
+          loader = root / "nebulus-decode-worker_loader.js"
+          if not loader.is_file():
+              print("Nebulus decode-worker loader is missing", file=sys.stderr)
+              sys.exit(1)
+          print(f"Validated {len(wasm)} Nebulus WASM modules and worker loader")
           PY
 
       - name: Upload legacy Station site

@@ -29,7 +29,7 @@ pub struct ReceiverRuntime {
 }
 
 /// Options that control how one receive batch is processed.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ReceiverBatchOptions {
     /// Keep CRC/ICV-marked packets instead of dropping them before WFB parsing.
     pub accept_corrupted: bool,
@@ -37,6 +37,23 @@ pub struct ReceiverBatchOptions {
     pub raw_payload_routes: Vec<PayloadRouteId>,
     /// RTP payload-type filters whose matching packets should be copied.
     pub rtp_payload_taps: Vec<RtpPayloadTap>,
+    /// Depacketize the configured video route into Annex-B access units.
+    ///
+    /// Disable this when an application transfers recovered RTP to another
+    /// execution context, such as a browser decode worker. Raw route taps are
+    /// still produced while this is disabled.
+    pub depacketize_video: bool,
+}
+
+impl Default for ReceiverBatchOptions {
+    fn default() -> Self {
+        Self {
+            accept_corrupted: false,
+            raw_payload_routes: Vec::new(),
+            rtp_payload_taps: Vec::new(),
+            depacketize_video: true,
+        }
+    }
 }
 
 /// Filter for copying RTP packets from a recovered route.
@@ -507,10 +524,12 @@ impl ReceiverRuntime {
                     if route_ids.contains(&self.video_route_id) {
                         batch.counters.wfb_payloads += 1;
                         batch.counters.rtp_packets += 1;
-                        if let Ok(frames) =
-                            self.push_video_payload_into(&payload.data, &mut batch.frames)
-                        {
-                            batch.counters.video_frames += frames;
+                        if options.depacketize_video {
+                            if let Ok(frames) =
+                                self.push_video_payload_into(&payload.data, &mut batch.frames)
+                            {
+                                batch.counters.video_frames += frames;
+                            }
                         }
                     }
 
@@ -772,6 +791,38 @@ mod tests {
         assert!(batch.frames[0].is_keyframe);
         assert_eq!(batch.raw_payloads[0].data, packet);
         assert_eq!(batch.fec_counters, FecCounters::default());
+    }
+
+    #[test]
+    fn video_depacketization_can_be_delegated_without_losing_raw_rtp() {
+        let video_route = PayloadRouteId::new(1);
+        let mut runtime = ReceiverRuntime::with_direct_video_route(
+            FrameLayout::WithFcs,
+            video_route,
+            ChannelId::default_video(),
+            0,
+        );
+        let packet = h264_stap_a_rtp();
+
+        let batch = runtime
+            .push_direct_payload(
+                runtime.video_runtime(),
+                123,
+                &packet,
+                &ReceiverBatchOptions {
+                    raw_payload_routes: vec![video_route],
+                    depacketize_video: false,
+                    ..ReceiverBatchOptions::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(batch.counters.wfb_payloads, 1);
+        assert_eq!(batch.counters.rtp_packets, 1);
+        assert_eq!(batch.counters.video_frames, 0);
+        assert!(batch.frames.is_empty());
+        assert_eq!(batch.raw_payloads[0].data, packet);
+        assert_eq!(batch.rtp_status, RtpDepacketizerStatus::default());
     }
 
     #[test]

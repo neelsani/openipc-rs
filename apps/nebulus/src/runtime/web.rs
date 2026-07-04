@@ -15,8 +15,8 @@ struct RecordingControl {
     stop: bool,
 }
 
-/// Browser receiver owner. Work stays on the browser's local executor because
-/// WebUSB and WebCodecs handles are intentionally not `Send`.
+/// Browser receiver owner. WebUSB/WFB work stays on the app's local executor;
+/// recovered RTP and WebCodecs run in a dedicated WASM worker.
 pub(crate) struct Runtime {
     events: Rc<RefCell<VecDeque<RuntimeEvent>>>,
     cancel: Option<Rc<Cell<bool>>>,
@@ -389,7 +389,6 @@ mod worker {
         build_usb_tx_frame, ChannelWidth, ChipFamily, DriverOptions, Jaguar3PowerTrackingState,
         RadioConfig, RealtekDevice, RealtekTxDescriptor, RealtekTxOptions,
     };
-    use openipc_video::{DecoderOptions, PlatformDecoder, VideoDecoder as _};
     use wasm_bindgen::JsValue;
     use wasm_bindgen_futures::{spawn_local, JsFuture};
     use web_time::Instant;
@@ -398,6 +397,7 @@ mod worker {
         model::LogLevel,
         runtime::{
             route_runtime::{configure_receiver, RouteProcessor},
+            web_decode::{DecodeWorkerSnapshot, WebDecodeWorker},
             AdapterRuntimeMetrics, BatchMetrics, ChannelScanAccumulator, MetricsThrottle,
             RuntimeEvent, ScanRequest, StartRequest,
         },
@@ -894,14 +894,19 @@ mod worker {
         }
         let device = Rc::clone(&devices[0].0);
         let chip = devices[0].1;
-        let mut decoder = PlatformDecoder::new(DecoderOptions::default())
-            .map_err(|error| format!("WebCodecs decoder unavailable: {error}"))?;
+        let decoder = WebDecodeWorker::new(
+            request.rtp_reorder,
+            request.codec_preference,
+            Rc::clone(events),
+            context.clone(),
+        )?;
+        decoder.wait_until_ready().await?;
         super::emit(
             events,
             context,
             RuntimeEvent::Connected {
                 receivers: receiver_infos,
-                decoder: decoder_environment(decoder.capabilities()),
+                decoder: worker_decoder_environment(),
             },
         );
 
@@ -917,7 +922,11 @@ mod worker {
         )
         .map_err(|error| error.to_string())?;
         receiver.set_rtp_reorder_enabled(request.rtp_reorder);
-        let options = configure_receiver(&mut receiver, &request)?;
+        let mut options = configure_receiver(&mut receiver, &request)?;
+        options.depacketize_video = false;
+        if !options.raw_payload_routes.contains(&VIDEO_ROUTE) {
+            options.raw_payload_routes.push(VIDEO_ROUTE);
+        }
         for entry in route_processor.take_startup_logs() {
             log(
                 events,
@@ -952,6 +961,7 @@ mod worker {
         );
 
         let mut last_decode_errors = 0;
+        let mut last_worker_snapshot = DecodeWorkerSnapshot::default();
         let mut recorder: Option<BrowserRecorder> = None;
         let mut recording_armed = false;
         let mut metrics_throttle = MetricsThrottle::new();
@@ -1129,6 +1139,8 @@ mod worker {
                 decision.should_forward()
             });
             let pipeline_start = Instant::now();
+            options.depacketize_video =
+                recorder.is_some() || recording_armed || recording_control.borrow().start;
             let mut batch = receiver.push_rx_packets(selected_packets, &options);
             let pipeline_latency_ms = pipeline_start.elapsed().as_secs_f64() * 1_000.0;
 
@@ -1138,7 +1150,6 @@ mod worker {
             radio.endpoint.submit(completion.buffer);
             radio_futures.push(wait_for_radio(radio));
 
-            let video_bytes = batch.frames.iter().map(|frame| frame.data.len()).sum();
             update_recording(
                 &batch.frames,
                 recording_control,
@@ -1149,34 +1160,15 @@ mod worker {
                 context,
             );
             let decode_submit_start = Instant::now();
-            for frame in std::mem::take(&mut batch.frames)
-                .into_iter()
-                .filter(|frame| request.codec_preference.accepts(frame.codec))
-            {
-                if let Err(error) = decoder.submit(frame.into()) {
-                    log(
-                        events,
-                        context,
-                        LogLevel::Warn,
-                        "decoder",
-                        format!("decode submit failed: {error}"),
-                    );
-                }
-            }
+            decoder.submit_rtp_batch(
+                batch
+                    .raw_payloads
+                    .iter()
+                    .filter(|payload| payload.route_id == VIDEO_ROUTE)
+                    .map(|payload| payload.data.as_slice()),
+            )?;
+            batch.frames.clear();
             let decode_submit_latency_ms = decode_submit_start.elapsed().as_secs_f64() * 1_000.0;
-            if let Some(decoded) = decoder.latest_frame() {
-                let decode_latency_ms = decoder.stats().last_decode_latency_us as f64 / 1_000.0;
-                super::emit(
-                    events,
-                    context,
-                    RuntimeEvent::NativeVideo {
-                        frame: decoded,
-                        decode_latency_ms,
-                        ready_at: Instant::now(),
-                    },
-                );
-            }
-
             let video_submit_path_ms = batch_start.elapsed().as_secs_f64() * 1_000.0;
 
             route_processor.set_audio_volume(audio_volume.get());
@@ -1200,14 +1192,29 @@ mod worker {
             }
             link.record_fec(now, batch.fec_counters);
             let quality = link.quality.quality(now);
-            let stats = decoder.stats();
+            let worker_snapshot = decoder.snapshot();
+            let video_frames = worker_snapshot
+                .rtp
+                .frames_emitted
+                .saturating_sub(last_worker_snapshot.rtp.frames_emitted);
+            let video_bytes = worker_snapshot
+                .encoded_bytes
+                .saturating_sub(last_worker_snapshot.encoded_bytes);
+            let decoder_frames = worker_snapshot
+                .decoder
+                .frames_decoded
+                .saturating_sub(last_worker_snapshot.decoder.frames_decoded);
+            last_worker_snapshot = worker_snapshot;
+            batch.counters.video_frames = video_frames.min(usize::MAX as u64) as usize;
+            let stats = worker_snapshot.decoder;
             if let Some(metrics) = metrics_throttle.push(BatchMetrics {
                 transfers: 1,
                 transfer_bytes: actual_len,
                 packets: batch.counters.packets,
                 rtp_packets: batch.counters.rtp_packets,
                 video_frames: batch.counters.video_frames,
-                video_bytes,
+                decoder_frames,
+                video_bytes: video_bytes.min(usize::MAX as u64) as usize,
                 usb_latency_ms,
                 parse_latency_ms,
                 pipeline_latency_ms,
@@ -1218,12 +1225,17 @@ mod worker {
                 rssi: quality.rssi,
                 snr: quality.snr,
                 link_score: quality.link_score,
-                decoder_drops: stats.waiting_drops + stats.backpressure_drops + stats.output_drops,
+                decoder_drops: stats
+                    .waiting_drops
+                    .saturating_add(stats.backpressure_drops)
+                    .saturating_add(stats.output_drops)
+                    .saturating_add(worker_snapshot.access_unit_queue_drops())
+                    .saturating_add(worker_snapshot.transport_dropped_batches),
                 decoder_errors: stats.decode_errors,
                 fec: batch.fec_counters,
                 counters: batch.counters,
-                rtp: batch.rtp_status,
-                reorder: batch.rtp_reorder_status,
+                rtp: worker_snapshot.rtp,
+                reorder: worker_snapshot.reorder,
                 routes: route_updates,
                 telemetry,
                 audio: route_processor.audio_stats(),
@@ -1272,7 +1284,7 @@ mod worker {
             task.stop().await;
         }
         finish_recording(&mut recorder, events, context);
-        let _ = decoder.flush();
+        drop(decoder);
         let mut shutdown_errors = Vec::new();
         for (device, _) in devices {
             if let Err(error) = device.shutdown_monitor_async().await {
@@ -1357,10 +1369,14 @@ mod worker {
         let context = &handles.context;
         let recording_audio_config = route_processor.recording_audio_config();
         use crate::runtime::{codec_mock::MockAvStream, route_runtime::configure_mock_receiver};
-        use openipc_video::{DecoderOptions, PlatformDecoder, VideoDecoder as _};
 
-        let mut decoder = PlatformDecoder::new(DecoderOptions::default())
-            .map_err(|error| format!("WebCodecs mock decoder unavailable: {error}"))?;
+        let decoder = WebDecodeWorker::new(
+            request.rtp_reorder,
+            request.codec_preference,
+            Rc::clone(events),
+            context.clone(),
+        )?;
+        decoder.wait_until_ready().await?;
         for entry in route_processor.take_startup_logs() {
             log(
                 events,
@@ -1379,7 +1395,7 @@ mod worker {
             context,
             RuntimeEvent::Connected {
                 receivers: vec![crate::runtime::ReceiverInfo::codec_mock()],
-                decoder: decoder_environment(decoder.capabilities()),
+                decoder: worker_decoder_environment(),
             },
         );
         super::emit(events, context, RuntimeEvent::Started);
@@ -1395,105 +1411,143 @@ mod worker {
         let mut receiver =
             ReceiverRuntime::with_mock_video_route(FrameLayout::WithFcs, VIDEO_ROUTE, channel, 0);
         receiver.set_rtp_reorder_enabled(request.rtp_reorder);
-        let options = configure_mock_receiver(&mut receiver, &request);
+        let mut options = configure_mock_receiver(&mut receiver, &request);
+        options.depacketize_video = false;
+        if !options.raw_payload_routes.contains(&VIDEO_ROUTE) {
+            options.raw_payload_routes.push(VIDEO_ROUTE);
+        }
         let runtime = receiver.video_runtime();
         let mut source = MockAvStream::new()?;
         let mock_started = Instant::now();
         let mut payload_sequence = 1u64;
         let mut recorder: Option<BrowserRecorder> = None;
         let mut recording_armed = false;
+        let mut last_worker_snapshot = DecodeWorkerSnapshot::default();
+        let mut metrics_throttle = MetricsThrottle::new();
 
         while !cancel.get() {
+            source.rebase_timing_if_late(
+                mock_started.elapsed().as_micros().min(u64::MAX as u128) as u64,
+                50_000,
+            );
             let loop_started = Instant::now();
-            let event = source.next_event();
-            let mut metrics = BatchMetrics {
-                transfers: 1,
-                transfer_bytes: event.packets.iter().map(Vec::len).sum(),
-                packets: event.packets.len(),
-                rtp_packets: event.packets.len(),
-                ..BatchMetrics::default()
-            };
-            for packet in event.packets {
-                let batch = receiver
-                    .push_mock_payload(runtime, payload_sequence, &packet, &options)
-                    .map_err(|error| format!("mock payload route failed: {error}"))?;
-                payload_sequence = payload_sequence.wrapping_add(1);
-                metrics.video_frames += batch.frames.len();
-                metrics.video_bytes = metrics
-                    .video_bytes
-                    .saturating_add(batch.frames.iter().map(|frame| frame.data.len()).sum());
-                update_recording(
-                    &batch.frames,
-                    recording_control,
-                    &mut recording_armed,
-                    &mut recorder,
-                    recording_audio_config,
-                    events,
-                    context,
-                );
-                route_processor.set_audio_volume(audio_volume.get());
-                let (route_updates, route_logs, recorded_audio, telemetry) =
-                    route_processor.process(&batch.raw_payloads, recorder.is_some());
-                append_recorded_audio(&mut recorder, recorded_audio, events, context);
-                metrics.merge(BatchMetrics {
-                    routes: route_updates,
-                    counters: batch.counters,
-                    rtp: batch.rtp_status,
-                    reorder: batch.rtp_reorder_status,
-                    telemetry,
-                    ..BatchMetrics::default()
-                });
-                for entry in route_logs {
-                    log(
+            let mut metrics = BatchMetrics::default();
+            let mut next_due_micros;
+            let mut catch_up_events = 0usize;
+            loop {
+                let event = source.next_event();
+                next_due_micros = event.next_due_micros;
+                metrics.transfers = metrics.transfers.saturating_add(1);
+                metrics.transfer_bytes = metrics
+                    .transfer_bytes
+                    .saturating_add(event.packets.iter().map(Vec::len).sum::<usize>());
+                metrics.packets = metrics.packets.saturating_add(event.packets.len());
+                metrics.rtp_packets = metrics.rtp_packets.saturating_add(event.packets.len());
+                let mut event_video_packets = Vec::new();
+                for packet in event.packets {
+                    options.depacketize_video =
+                        recorder.is_some() || recording_armed || recording_control.borrow().start;
+                    let mut batch = receiver
+                        .push_mock_payload(runtime, payload_sequence, &packet, &options)
+                        .map_err(|error| format!("mock payload route failed: {error}"))?;
+                    payload_sequence = payload_sequence.wrapping_add(1);
+                    update_recording(
+                        &batch.frames,
+                        recording_control,
+                        &mut recording_armed,
+                        &mut recorder,
+                        recording_audio_config,
                         events,
                         context,
-                        if entry.warning {
-                            LogLevel::Warn
-                        } else {
-                            LogLevel::Info
-                        },
-                        "route",
-                        entry.message,
+                    );
+                    batch.frames.clear();
+                    route_processor.set_audio_volume(audio_volume.get());
+                    let (route_updates, route_logs, recorded_audio, telemetry) =
+                        route_processor.process(&batch.raw_payloads, recorder.is_some());
+                    append_recorded_audio(&mut recorder, recorded_audio, events, context);
+                    metrics.merge(BatchMetrics {
+                        routes: route_updates,
+                        counters: batch.counters,
+                        telemetry,
+                        ..BatchMetrics::default()
+                    });
+                    for entry in route_logs {
+                        log(
+                            events,
+                            context,
+                            if entry.warning {
+                                LogLevel::Warn
+                            } else {
+                                LogLevel::Info
+                            },
+                            "route",
+                            entry.message,
+                        );
+                    }
+                    event_video_packets.extend(
+                        batch
+                            .raw_payloads
+                            .into_iter()
+                            .filter(|payload| payload.route_id == VIDEO_ROUTE)
+                            .map(|payload| payload.data),
                     );
                 }
-                for frame in batch
-                    .frames
-                    .into_iter()
-                    .filter(|frame| request.codec_preference.accepts(frame.codec))
+                decoder.submit_rtp_batch(event_video_packets.iter().map(Vec::as_slice))?;
+                catch_up_events += 1;
+                if next_due_micros > mock_started.elapsed().as_micros() as u64
+                    || catch_up_events >= 16
+                    || cancel.get()
                 {
-                    decoder
-                        .submit(frame.into())
-                        .map_err(|error| format!("mock decode submit failed: {error}"))?;
+                    break;
                 }
             }
-            if let Some(decoded) = decoder.latest_frame() {
-                let decode_latency_ms = decoder.stats().last_decode_latency_us as f64 / 1_000.0;
-                super::emit(
-                    events,
-                    context,
-                    RuntimeEvent::NativeVideo {
-                        frame: decoded,
-                        decode_latency_ms,
-                        ready_at: Instant::now(),
-                    },
-                );
-            }
-            let stats = decoder.stats();
+
+            let worker_snapshot = decoder.snapshot();
+            let video_frames = worker_snapshot
+                .rtp
+                .frames_emitted
+                .saturating_sub(last_worker_snapshot.rtp.frames_emitted);
+            let decoder_frames = worker_snapshot
+                .decoder
+                .frames_decoded
+                .saturating_sub(last_worker_snapshot.decoder.frames_decoded);
+            let video_bytes = worker_snapshot
+                .encoded_bytes
+                .saturating_sub(last_worker_snapshot.encoded_bytes);
+            last_worker_snapshot = worker_snapshot;
+            metrics.video_frames = video_frames.min(usize::MAX as u64) as usize;
+            metrics.decoder_frames = decoder_frames;
+            metrics.video_bytes = video_bytes.min(usize::MAX as u64) as usize;
+            metrics.counters.video_frames = metrics.video_frames;
+            metrics.rtp = worker_snapshot.rtp;
+            metrics.reorder = worker_snapshot.reorder;
+            let stats = worker_snapshot.decoder;
             metrics.pipeline_latency_ms = loop_started.elapsed().as_secs_f64() * 1_000.0;
+            metrics.decode_submit_latency_ms = metrics.pipeline_latency_ms;
+            metrics.video_submit_path_ms = metrics.pipeline_latency_ms;
             metrics.batch_latency_ms = metrics.pipeline_latency_ms;
-            metrics.decoder_drops =
-                stats.waiting_drops + stats.backpressure_drops + stats.output_drops;
+            metrics.decoder_drops = stats
+                .waiting_drops
+                .saturating_add(stats.backpressure_drops)
+                .saturating_add(stats.output_drops)
+                .saturating_add(worker_snapshot.access_unit_queue_drops())
+                .saturating_add(worker_snapshot.transport_dropped_batches);
             metrics.decoder_errors = stats.decode_errors;
             metrics.audio = route_processor.audio_stats();
-            super::emit(events, context, RuntimeEvent::Batch(Box::new(metrics)));
-            let remaining_ms = Duration::from_micros(event.next_due_micros)
+            if let Some(metrics) = metrics_throttle.push(metrics) {
+                super::emit(events, context, RuntimeEvent::Batch(Box::new(metrics)));
+            }
+            let remaining_ms = Duration::from_micros(next_due_micros)
                 .checked_sub(mock_started.elapsed())
                 .map_or(0, |remaining| {
                     remaining.as_millis().min(i32::MAX as u128) as i32
                 });
             sleep_ms(remaining_ms).await;
         }
-        let _ = decoder.flush();
+        if let Some(metrics) = metrics_throttle.flush() {
+            super::emit(events, context, RuntimeEvent::Batch(Box::new(metrics)));
+        }
+        drop(decoder);
         finish_recording(&mut recorder, events, context);
         log(
             events,
@@ -1665,6 +1719,12 @@ mod worker {
             }),
             native_surfaces: capabilities.native_surfaces,
         }
+    }
+
+    fn worker_decoder_environment() -> crate::runtime::DecoderEnvironment {
+        let mut environment = decoder_environment(openipc_video::WebDecoder::probe_capabilities());
+        environment.backend = "webcodecs-worker".to_owned();
+        environment
     }
 
     async fn build_link(

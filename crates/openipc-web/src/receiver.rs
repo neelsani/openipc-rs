@@ -405,6 +405,7 @@ impl OpenIpcReceiver {
                 accept_corrupted: keep_corrupted,
                 raw_payload_routes,
                 rtp_payload_taps: rtp_payload_taps.to_vec(),
+                depacketize_video: true,
             },
         );
         let pipeline_ms = elapsed_ms(pipeline_start);

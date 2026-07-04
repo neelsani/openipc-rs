@@ -48,7 +48,9 @@ The platform boundary is kept at the edges:
   `UsbDevice` into Rust/WASM,
 - Nebulus Android builds perform the same permission/file-descriptor handoff
   through a small Rust JNI module and do not require Tauri,
-- Nebulus browser builds use the `openipc-video` WebCodecs backend directly,
+- Nebulus browser builds run RTP reorder/depacketization and the
+  `openipc-video` WebCodecs backend in separate Rust/WASM workers built from
+  Nebulus's internal `nebulus-decode-worker` binary target,
 - the older Station app uses a local Tauri plugin on Android and WebCodecs in
   its React frontend.
 

@@ -1424,6 +1424,7 @@ mod worker {
         );
 
         let mut last_decode_errors = 0;
+        let mut last_decoded_frames = 0;
         let mut recorder: Option<EncodedRecorder> = None;
         let mut armed_path: Option<PathBuf> = None;
         let mut metrics_throttle = MetricsThrottle::new();
@@ -1631,12 +1632,15 @@ mod worker {
             link.record_fec(now, batch.fec_counters);
             let quality = link.quality.quality(now);
             let stats = decoder.stats();
+            let decoder_frames = stats.frames_decoded.saturating_sub(last_decoded_frames);
+            last_decoded_frames = stats.frames_decoded;
             if let Some(metrics) = metrics_throttle.push(BatchMetrics {
                 transfers: 1,
                 transfer_bytes: event.actual_len,
                 packets: batch.counters.packets,
                 rtp_packets: batch.counters.rtp_packets,
                 video_frames: batch.counters.video_frames,
+                decoder_frames,
                 video_bytes,
                 usb_latency_ms: event.usb_latency_ms,
                 parse_latency_ms,
@@ -1785,8 +1789,13 @@ mod worker {
         let mut payload_sequence = 1u64;
         let mut recorder: Option<EncodedRecorder> = None;
         let mut armed_path: Option<PathBuf> = None;
+        let mut last_decoded_frames = 0;
 
         while !stop.load(Ordering::Relaxed) {
+            source.rebase_timing_if_late(
+                mock_started.elapsed().as_micros().min(u64::MAX as u128) as u64,
+                50_000,
+            );
             let loop_started = Instant::now();
             let event = source.next_event();
             let mut metrics = BatchMetrics {
@@ -1856,6 +1865,8 @@ mod worker {
                 );
             }
             let stats = decoder.stats();
+            metrics.decoder_frames = stats.frames_decoded.saturating_sub(last_decoded_frames);
+            last_decoded_frames = stats.frames_decoded;
             metrics.pipeline_latency_ms = loop_started.elapsed().as_secs_f64() * 1_000.0;
             metrics.batch_latency_ms = metrics.pipeline_latency_ms;
             metrics.decoder_drops =

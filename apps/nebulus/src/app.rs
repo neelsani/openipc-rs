@@ -1296,6 +1296,13 @@ impl NebulusApp {
         self.metrics.wifi_packets += batch.packets as u64;
         self.metrics.rtp_packets += batch.rtp_packets as u64;
         self.metrics.encoded_frames += batch.video_frames as u64;
+        self.metrics.decoded_frames = self
+            .metrics
+            .decoded_frames
+            .saturating_add(batch.decoder_frames);
+        self.rate_window_decoded = self
+            .rate_window_decoded
+            .saturating_add(batch.decoder_frames);
         self.metrics.fec_total_packets = batch.fec.total_packets;
         self.metrics.recovered_packets = batch.fec.recovered_packets;
         self.metrics.lost_packets = batch.fec.lost_packets;
@@ -1412,9 +1419,7 @@ impl NebulusApp {
             + self.metrics.presentation_queue_latency_ms;
         self.diagnostics
             .observe("Hardware decode", decode_latency_ms);
-        self.metrics.decoded_frames += 1;
         self.metrics.render_frames += 1;
-        self.rate_window_decoded += 1;
         self.rate_window_rendered += 1;
         let observed = self.environment.maximum_observed_resolution;
         if observed.is_none_or(|current| {

@@ -12,8 +12,8 @@ pub(crate) struct SupportBundle {
 
 pub(crate) fn build(app: &NebulusApp) -> Result<SupportBundle, String> {
     let build = crate::build_info::current();
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let timestamp = web_time::SystemTime::now()
+        .duration_since(web_time::SystemTime::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs());
     let routes = app
         .settings
@@ -424,6 +424,7 @@ pub(crate) fn save(bundle: SupportBundle) -> Result<String, String> {
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn save(bundle: SupportBundle) -> Result<String, String> {
+    use wasm_bindgen::closure::Closure;
     use wasm_bindgen::JsCast as _;
 
     let parts = js_sys::Array::new();
@@ -434,9 +435,13 @@ pub(crate) fn save(bundle: SupportBundle) -> Result<String, String> {
     let blob = web_sys::Blob::new_with_buffer_source_sequence_and_options(&parts, &options)
         .map_err(js_error)?;
     let url = web_sys::Url::create_object_url_with_blob(&blob).map_err(js_error)?;
-    let document = web_sys::window()
-        .and_then(|window| window.document())
+    let window = web_sys::window().ok_or_else(|| "browser window is unavailable".to_owned())?;
+    let document = window
+        .document()
         .ok_or_else(|| "browser document is unavailable".to_owned())?;
+    let body = document
+        .body()
+        .ok_or_else(|| "browser document body is unavailable".to_owned())?;
     let anchor = document
         .create_element("a")
         .map_err(js_error)?
@@ -444,8 +449,19 @@ pub(crate) fn save(bundle: SupportBundle) -> Result<String, String> {
         .map_err(|_| "could not create support-bundle download link".to_owned())?;
     anchor.set_href(&url);
     anchor.set_download(&bundle.filename);
+    body.append_child(&anchor).map_err(js_error)?;
     anchor.click();
-    web_sys::Url::revoke_object_url(&url).map_err(js_error)?;
+
+    let revoke_url = url.clone();
+    let cleanup_body = body;
+    let cleanup_anchor = anchor;
+    let revoke = Closure::once_into_js(move || {
+        let _ = cleanup_body.remove_child(&cleanup_anchor);
+        let _ = web_sys::Url::revoke_object_url(&revoke_url);
+    });
+    window
+        .set_timeout_with_callback_and_timeout_and_arguments_0(revoke.unchecked_ref(), 1_000)
+        .map_err(js_error)?;
     Ok(format!("Downloaded {}", bundle.filename))
 }
 

@@ -50,6 +50,7 @@ impl CodecPreference {
         }
     }
 
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) const fn accepts(self, codec: openipc_core::Codec) -> bool {
         matches!(self, Self::Auto)
             || matches!(

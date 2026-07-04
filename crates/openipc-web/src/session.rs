@@ -73,6 +73,7 @@ impl WebUsbReceiverSession {
                     payload_type: *payload_type,
                 })
                 .collect(),
+            depacketize_video: true,
         };
 
         Ok(Self {

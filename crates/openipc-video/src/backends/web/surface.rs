@@ -22,6 +22,15 @@ impl WebVideoFrame {
         }
     }
 
+    /// Take ownership of a transferable browser `VideoFrame`.
+    ///
+    /// This is used by applications that decode in a dedicated Web Worker and
+    /// transfer the native frame back to their presentation thread. The frame
+    /// is closed automatically when this surface is dropped.
+    pub fn from_video_frame(frame: web_sys::VideoFrame) -> Self {
+        Self::new(web_codecs::VideoFrame::from(frame))
+    }
+
     /// Borrow the WebCodecs frame for direct canvas or WebGPU use.
     pub fn video_frame(&self) -> &web_sys::VideoFrame {
         &self.frame

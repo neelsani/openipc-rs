@@ -72,6 +72,12 @@ for frame in batch.frames {
 }
 ```
 
+Applications may delegate RTP processing to another execution context without
+running the depacketizer twice. Set `depacketize_video: false` and include the
+video route in `raw_payload_routes`; the batch then contains raw recovered RTP
+but no Annex-B frames. Nebulus uses this mode in browsers to transfer RTP to its
+Rust Web Worker, while native builds keep the default in-process behavior.
+
 One recovered RTP packet may or may not complete a video access unit. The
 depacketizer may return `None` for several packets and then return one Annex-B
 frame when a marker/fragment boundary completes. Fragmented H.264/H.265 NAL
@@ -134,6 +140,14 @@ flowchart LR
     Latest --> GPU["egui GPU presentation"]
     Frame --> Record["keyframe-aligned MP4 muxer"]
 ```
+
+In the Nebulus browser build, Trunk compiles Nebulus's internal
+`nebulus-decode-worker` binary target once and the app instantiates it as
+separate RTP and decoder workers. RTP packets are grouped
+into one transferable buffer per receive batch. The RTP worker emits complete
+access units through a direct `MessageChannel`; bounded, keyframe-aware queues
+prevent decoder pressure from reaching WebUSB. A one-frame acknowledgement gate
+prevents decoded surfaces from accumulating in the main browser event queue.
 
 ## Recording
 

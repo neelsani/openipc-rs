@@ -198,7 +198,10 @@ pub(crate) fn osd_editor(app: &mut NebulusApp, context: &egui::Context) {
             );
             ui.separator();
 
-            let available = ui.available_size();
+            // Do not make the body exactly as large as the resize viewport.
+            // Parent layout spacing would then make the measured content a few
+            // pixels larger on every repaint and grow the window on mouse move.
+            let available = (ui.available_size() - egui::vec2(12.0, 12.0)).max(egui::Vec2::ZERO);
             if available.x >= 820.0 {
                 wide_editor(
                     ui,
@@ -403,9 +406,10 @@ fn wide_editor(
     available: egui::Vec2,
 ) {
     let inspector_width = (available.x * 0.34).clamp(310.0, 370.0);
-    let preview_width = (available.x - inspector_width - 14.0).max(320.0);
+    let column_gap = ui.spacing().item_spacing.x.max(8.0);
+    let preview_width = (available.x - inspector_width - column_gap).max(320.0);
     ui.horizontal(|ui| {
-        ui.allocate_ui_with_layout(
+        let preview = ui.allocate_ui_with_layout(
             egui::vec2(preview_width, available.y),
             egui::Layout::top_down(egui::Align::Center),
             |ui| {
@@ -413,11 +417,17 @@ fn wide_editor(
                 center_preview(ui, hud, selected, max_preview);
             },
         );
-        ui.separator();
         ui.allocate_ui_with_layout(
             egui::vec2(inspector_width, available.y),
             egui::Layout::top_down(egui::Align::Min),
             |ui| selected_item_inspector(ui, hud, selected),
+        );
+        let divider_x = preview.response.rect.right() + column_gap * 0.5;
+        let divider_range = preview.response.rect.y_range();
+        ui.painter().vline(
+            divider_x,
+            divider_range,
+            ui.visuals().widgets.noninteractive.bg_stroke,
         );
     });
 }

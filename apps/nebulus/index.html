@@ -6,6 +6,17 @@
     <meta name="theme-color" content="#060b0d" />
     <title>Nebulus</title>
     <link data-trunk rel="rust" data-target-name="nebulus_app" data-wasm-opt="z" />
+    <link
+      data-trunk
+      rel="rust"
+      href="Cargo.toml"
+      data-bin="nebulus-decode-worker"
+      data-cargo-features="web-decode-worker"
+      data-type="worker"
+      data-bindgen-target="web"
+      data-loader-shim
+      data-wasm-opt="z"
+    />
     <style>
       html,
       body,

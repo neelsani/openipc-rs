@@ -62,17 +62,22 @@ representative performance measurements.
 ## Browser Path
 
 Nebulus keeps WebUSB transfer buffers inside Rust/WASM and recycles each buffer
-after parsing. WFB, FEC, RTP, route selection, and decoder orchestration remain
-in Rust. WebCodecs returns browser `VideoFrame` objects, and the renderer uploads
-the newest frame directly to a WebGL texture. Decoded pixels do not make a
-round-trip through a WASM byte array.
+after parsing. WebUSB, WFB/FEC recovery, route selection, audio, and adaptive
+link remain on the app executor. Recovered video RTP packets are packed into a
+single transferable buffer per receive batch and sent to a Rust/WASM RTP
+worker. Complete access units move over a direct `MessageChannel` to a second
+worker that owns WebCodecs. Decoder stalls therefore cannot block RTP parsing
+or WebUSB buffer recycling.
 
-WebUSB and WebCodecs objects are local to the browser event loop, so the web
-build uses an async local executor rather than a native worker thread. Repaint
-requests are event-driven; Nebulus does not run a fixed 60 Hz timer while idle.
-The canvas requests a desynchronized, high-performance WebGL2 context without
-antialias, depth, stencil, or preserved-backbuffer work. These attributes are
-browser hints; unsupported hints are ignored.
+The RTP-to-decoder and decoder-input queues are bounded. If decode cannot keep
+up, Nebulus drops complete dependent access units and resumes at a keyframe;
+it never grows a latency backlog. The decoder transfers at most one retained
+`VideoFrame` back per display refresh and replaces any older pending output.
+The renderer uploads that frame directly to a WebGL texture, so decoded pixels
+do not make a round-trip through a WASM byte array. Repaint requests remain
+event-driven. The canvas requests a desynchronized WebGL2 context without
+antialias, depth, stencil, or a preserved backbuffer; unsupported hints are
+ignored by the browser.
 
 ## Queue Policy
 
@@ -82,8 +87,8 @@ browser hints; unsupported hints are ignored.
 - Decoder input is bounded per platform. Overload discards stale work, resets
   dependency state, and resumes at a keyframe instead of growing latency.
 - Decoded output is latest-only.
-- Runtime metrics and counters are emitted at 20 Hz; video repaint requests are
-  immediate and independent of that throttle.
+- Runtime metrics and counters are emitted at 20 Hz. Worker output transfer is
+  paced by animation frames and remains independent of that throttle.
 - Native audio requests a 256-frame device buffer and caps queued PCM at 40 ms.
   Web Audio restarts near 5 ms and trims a schedule that exceeds 40 ms.
 

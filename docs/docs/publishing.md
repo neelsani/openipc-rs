@@ -157,7 +157,9 @@ The library crates are intended for crates.io publication:
 - `nebulus`
 
 `apps/openipc-cli`, `apps/openipc-station/src-tauri`, and the local Android USB
-plugin are versioned with the workspace but marked `publish = false`.
+plugin are versioned with the workspace but marked `publish = false`. The
+published Nebulus package contains its internal decode-worker binary target;
+Trunk bundles that target into the site instead of publishing another crate.
 
 `openipc-core` is the easiest crate to publish because it owns protocol logic
 and does not need USB access. `openipc-video` has target-specific decoder

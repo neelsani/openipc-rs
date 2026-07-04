@@ -7,6 +7,11 @@ repository.workspace = true
 description = "Low-latency native OpenIPC FPV ground station built with egui"
 publish = true
 readme = "README.md"
+default-run = "nebulus"
+
+[features]
+default = []
+web-decode-worker = []
 
 [lib]
 name = "nebulus_app"
@@ -15,6 +20,11 @@ crate-type = ["cdylib", "rlib"]
 [[bin]]
 name = "nebulus"
 path = "src/main.rs"
+
+[[bin]]
+name = "nebulus-decode-worker"
+path = "src/bin/nebulus-decode-worker/main.rs"
+required-features = ["web-decode-worker"]
 
 [dependencies]
 catppuccin-egui = { version = "5.7.0", default-features = false, features = ["egui33"] }
@@ -93,11 +103,19 @@ web-sys = { version = "0.3", features = [
     "Blob",
     "BlobPropertyBag",
     "Document",
+    "DedicatedWorkerGlobalScope",
     "Element",
+    "ErrorEvent",
+    "EventTarget",
     "GainNode",
     "HtmlAnchorElement",
     "HtmlCanvasElement",
+    "HtmlElement",
     "Navigator",
+    "Node",
+    "MessageEvent",
+    "MessageChannel",
+    "MessagePort",
     "Usb",
     "UsbDevice",
     "UsbDeviceFilter",
@@ -105,6 +123,10 @@ web-sys = { version = "0.3", features = [
     "Url",
     "VideoFrame",
     "Window",
+    "Worker",
+    "WorkerGlobalScope",
+    "WorkerOptions",
+    "WorkerType",
     "console",
 ] }
 

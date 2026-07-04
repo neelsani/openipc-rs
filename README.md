@@ -42,6 +42,11 @@ scripts                   cleanup helpers
 | `nebulus`         | [crates.io](https://crates.io/crates/nebulus)         | Primary egui ground station for desktop, Android, and browser/WebUSB.                                                      |
 | `@openipc-rs/web` | [npm](https://www.npmjs.com/package/@openipc-rs/web)  | Generated npm package from `openipc-web`, with WASM, JS glue, and TypeScript definitions.                                  |
 
+The Nebulus package also contains an internal `nebulus-decode-worker` binary.
+Trunk compiles that target to WASM for browser RTP processing and WebCodecs;
+it is feature-gated, so a normal `cargo install nebulus` installs only the
+ground-station executable. It is not a separate app or publishable crate.
+
 ## Quick Start
 
 Public links:

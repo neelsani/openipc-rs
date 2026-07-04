@@ -14,6 +14,8 @@ mod native;
 mod udp_input;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 mod web;
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+mod web_decode;
 
 pub(crate) use messages::*;
 #[cfg(not(target_arch = "wasm32"))]

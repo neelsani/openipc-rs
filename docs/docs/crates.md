@@ -61,9 +61,12 @@ depends on a TUN interface.
 
 Use Nebulus when you want the complete ground station or a Rust-native
 application reference. Its desktop and Android builds run the USB receiver and
-decoder on a worker thread; its WASM build runs WebUSB and WebCodecs on the
-browser's local executor. Settings, routes, metrics, recording, adaptive link,
-VPN controls where supported, and the egui UI are shared.
+decoder on worker threads. Its WASM build keeps WebUSB/WFB recovery in the app
+WASM and instantiates the internal `nebulus-decode-worker` binary target as
+isolated RTP and WebCodecs workers connected by a direct `MessageChannel`. Only
+a latest transferable `VideoFrame` returns to egui for presentation. Settings,
+routes, metrics, recording, adaptive link, VPN controls where supported, and the
+egui UI are shared.
 
 `tauri-plugin-openipc-usb` is an app-support crate, not a public SDK. It exists
 because Android apps cannot enumerate USB devices from the normal Linux sysfs

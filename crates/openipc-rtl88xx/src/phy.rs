@@ -68,6 +68,7 @@ pub(crate) fn phy_context(chip: ChipInfo, efuse: EfuseInfo) -> PhyContext {
             ChipFamily::Rtl8814
             | ChipFamily::Rtl8821
             | ChipFamily::Rtl8822b
+            | ChipFamily::Rtl8821c
             | ChipFamily::Rtl8822c
             | ChipFamily::Rtl8822e => PhyConditionMode::RfeType,
         },
@@ -75,7 +76,11 @@ pub(crate) fn phy_context(chip: ChipInfo, efuse: EfuseInfo) -> PhyContext {
         support_interface: 0x02,
         support_platform: 0x04,
         package_type: 0,
-        rfe_type: efuse.rfe_type,
+        rfe_type: if chip.family == ChipFamily::Rtl8821c {
+            efuse.rfe_type >> 3
+        } else {
+            efuse.rfe_type
+        },
         board_type: efuse.board_type,
         type_gpa: efuse.type_gpa,
         type_apa: efuse.type_apa,

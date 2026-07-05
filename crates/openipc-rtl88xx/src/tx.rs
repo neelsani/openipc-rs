@@ -43,7 +43,7 @@ impl RealtekTxDescriptor {
     pub const fn for_chip_family(family: ChipFamily) -> Self {
         match family {
             ChipFamily::Rtl8814 => Self::Rtl8814,
-            ChipFamily::Rtl8822b => Self::Jaguar2,
+            ChipFamily::Rtl8822b | ChipFamily::Rtl8821c => Self::Jaguar2,
             ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => Self::Jaguar3,
             ChipFamily::Rtl8812 | ChipFamily::Rtl8821 => Self::Jaguar1,
         }

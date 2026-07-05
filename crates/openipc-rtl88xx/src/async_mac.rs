@@ -42,7 +42,10 @@ impl RealtekDevice {
                     .await?;
                 self.init_auto_llt_8814_async().await?;
             }
-            ChipFamily::Rtl8822b | ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
+            ChipFamily::Rtl8822b
+            | ChipFamily::Rtl8821c
+            | ChipFamily::Rtl8822c
+            | ChipFamily::Rtl8822e => {
                 return Err(DriverError::UnsupportedFirmwarePath(chip.family));
             }
         }

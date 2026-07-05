@@ -46,6 +46,21 @@ pub struct BeamformingReport {
     pub channel_width: u8,
     /// Encoded subcarrier-grouping field from the MIMO control header.
     pub grouping: u8,
+    /// True when the feedback field selects MU rather than SU feedback.
+    pub mu: bool,
+    /// Number of reported subcarriers for this width/grouping combination.
+    pub subcarriers: u16,
+    /// Packed angle bits carried for each subcarrier.
+    pub bits_per_subcarrier: u8,
+}
+
+/// First compressed-Givens phi/psi angle for each reported subcarrier.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BeamformingAngles {
+    /// Inter-antenna phase angles in radians.
+    pub phi: Vec<f64>,
+    /// Amplitude-ratio angles in radians.
+    pub psi: Vec<f64>,
 }
 
 /// Identify and summarize an HT/VHT compressed beamforming report frame.
@@ -66,14 +81,127 @@ pub fn parse_beamforming_report(frame: &[u8]) -> Option<BeamformingReport> {
         return None;
     }
     let control = &frame[26..29];
+    let columns = (control[0] & 0x07) + 1;
+    let rows = ((control[0] >> 3) & 0x07) + 1;
+    let channel_width = (control[0] >> 6) & 0x03;
+    let grouping_code = control[1] & 0x03;
+    let grouping = match grouping_code {
+        0 => 1,
+        1 => 2,
+        _ => 4,
+    };
+    let mu = control[1] & (1 << 3) != 0;
+    let subcarriers = report_subcarriers(channel_width, grouping)?;
+    let angle_start = 29 + usize::from(columns);
+    let angle_bytes = frame.len().checked_sub(angle_start + 4)?;
+    let bits_per_subcarrier = if mu {
+        10
+    } else {
+        u8::try_from(angle_bytes.checked_mul(8)? / usize::from(subcarriers)).ok()?
+    };
     Some(BeamformingReport {
         vht,
         source: frame[10..16].try_into().ok()?,
-        columns: (control[0] & 0x07) + 1,
-        rows: ((control[0] >> 3) & 0x07) + 1,
-        channel_width: (control[0] >> 6) & 0x03,
-        grouping: control[1] & 0x03,
+        columns,
+        rows,
+        channel_width,
+        grouping,
+        mu,
+        subcarriers,
+        bits_per_subcarrier,
     })
+}
+
+/// Decode the first phi and psi compressed-Givens angle for every subcarrier.
+///
+/// `b_phi` and `b_psi` describe the selected 802.11 codebook and normally
+/// satisfy `b_phi = b_psi + 2`. The input frame must include its four-byte FCS.
+pub fn decode_beamforming_angles(frame: &[u8], b_phi: u8, b_psi: u8) -> Option<BeamformingAngles> {
+    let report = parse_beamforming_report(frame)?;
+    let angle_start = 29 + usize::from(report.columns);
+    let available = frame.len().checked_sub(angle_start + 4)?;
+    let angle_bytes = if report.mu {
+        (usize::from(report.subcarriers) * 10).div_ceil(8)
+    } else {
+        available
+    };
+    let angles = frame.get(angle_start..angle_start + angle_bytes)?;
+    let pairs = angle_pairs(report.rows, report.columns);
+    let bits_per_tone = pairs.0 * usize::from(b_phi) + pairs.1 * usize::from(b_psi);
+    if usize::from(report.subcarriers) * bits_per_tone > angles.len() * 8 {
+        return None;
+    }
+    let mut reader = LsbBitReader::new(angles);
+    let mut phi = Vec::with_capacity(usize::from(report.subcarriers));
+    let mut psi = Vec::with_capacity(usize::from(report.subcarriers));
+    for _ in 0..report.subcarriers {
+        let mut first_phi = 0.0;
+        let mut first_psi = 0.0;
+        for index in 0..pairs.0 {
+            let quantized = reader.read(b_phi)?;
+            if index == 0 {
+                first_phi = (2.0 * f64::from(quantized) + 1.0) * std::f64::consts::PI
+                    / f64::from(1u32 << b_phi);
+            }
+        }
+        for index in 0..pairs.1 {
+            let quantized = reader.read(b_psi)?;
+            if index == 0 {
+                first_psi = (2.0 * f64::from(quantized) + 1.0) * std::f64::consts::PI
+                    / f64::from(1u32 << (b_psi + 2));
+            }
+        }
+        phi.push(first_phi);
+        psi.push(first_psi);
+    }
+    Some(BeamformingAngles { phi, psi })
+}
+
+fn report_subcarriers(width: u8, grouping: u8) -> Option<u16> {
+    const TABLE: [[u16; 3]; 4] = [[52, 30, 16], [108, 58, 30], [234, 122, 62], [468, 244, 124]];
+    let group = match grouping {
+        1 => 0,
+        2 => 1,
+        4 => 2,
+        _ => return None,
+    };
+    TABLE.get(usize::from(width)).map(|row| row[group])
+}
+
+fn angle_pairs(rows: u8, columns: u8) -> (usize, usize) {
+    let limit = columns.min(rows.saturating_sub(1));
+    let mut pairs = 0usize;
+    for column in 1..=limit {
+        pairs += usize::from(rows - column);
+    }
+    if pairs == 0 {
+        (1, 1)
+    } else {
+        (pairs, pairs)
+    }
+}
+
+struct LsbBitReader<'a> {
+    bytes: &'a [u8],
+    position: usize,
+}
+
+impl<'a> LsbBitReader<'a> {
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, position: 0 }
+    }
+
+    fn read(&mut self, count: u8) -> Option<u32> {
+        if self.position + usize::from(count) > self.bytes.len() * 8 {
+            return None;
+        }
+        let mut value = 0u32;
+        for bit in 0..count {
+            value |= u32::from((self.bytes[self.position >> 3] >> (self.position & 7)) & 1) << bit;
+            self.position += 1;
+        }
+        Some(value)
+    }
 }
 
 impl RealtekDevice {
@@ -264,7 +392,7 @@ mod tests {
         assert_eq!(report.columns, 3);
         assert_eq!(report.rows, 2);
         assert_eq!(report.channel_width, 1);
-        assert_eq!(report.grouping, 3);
+        assert_eq!(report.grouping, 4);
     }
 
     #[test]

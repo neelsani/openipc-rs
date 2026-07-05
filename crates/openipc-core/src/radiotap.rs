@@ -396,22 +396,31 @@ pub fn radiotap_len(packet: &[u8]) -> Result<usize, RadiotapError> {
 
 /// Parse a human-readable TX mode such as `6M`, `MCS0/SGI`, or `VHT1SS_MCS3/80`.
 pub fn parse_tx_mode_str(spec: &str) -> TxMode {
+    parse_tx_mode_str_impl(spec, false).unwrap_or_default()
+}
+
+/// Strictly parse a human-readable TX mode.
+///
+/// Unlike [`parse_tx_mode_str`], this returns `None` for an empty specification,
+/// an unknown rate, or an unsupported modifier. It is intended for user-facing
+/// configuration where silently falling back to 1 Mbps would hide a typo.
+pub fn try_parse_tx_mode_str(spec: &str) -> Option<TxMode> {
+    parse_tx_mode_str_impl(spec, true)
+}
+
+fn parse_tx_mode_str_impl(spec: &str, reject_unknown_modifier: bool) -> Option<TxMode> {
     let trimmed = spec
         .chars()
         .filter(|ch| !ch.is_whitespace())
         .flat_map(char::to_uppercase)
         .collect::<String>();
     if trimmed.is_empty() {
-        return TxMode::default();
+        return None;
     }
 
     let mut tokens = trimmed.split('/');
-    let Some(rate_token) = tokens.next() else {
-        return TxMode::default();
-    };
-    let Some(mut mode) = parse_tx_rate_token(rate_token) else {
-        return TxMode::default();
-    };
+    let rate_token = tokens.next()?;
+    let mut mode = parse_tx_rate_token(rate_token)?;
 
     for token in tokens {
         match token {
@@ -422,10 +431,11 @@ pub fn parse_tx_mode_str(spec: &str) -> TxMode {
             "40" => mode.bandwidth = ChannelBandwidth::Mhz40,
             "80" => mode.bandwidth = ChannelBandwidth::Mhz80,
             "160" => mode.bandwidth = ChannelBandwidth::Mhz160,
+            _ if reject_unknown_modifier => return None,
             _ => {}
         }
     }
-    mode
+    Some(mode)
 }
 
 /// Parse supported radiotap TX fields into a `TxMode`.
@@ -609,6 +619,15 @@ mod tests {
         assert!(mode.short_gi);
         assert!(mode.ldpc);
         assert!(mode.stbc);
+    }
+
+    #[test]
+    fn strict_tx_mode_parser_rejects_typos() {
+        assert!(try_parse_tx_mode_str("MCS4/SGI").is_some());
+        assert!(try_parse_tx_mode_str("MCS4/FAST").is_none());
+        assert!(try_parse_tx_mode_str("MCS99").is_none());
+        assert!(try_parse_tx_mode_str("").is_none());
+        assert_eq!(parse_tx_mode_str("not-a-rate"), TxMode::default());
     }
 
     #[test]

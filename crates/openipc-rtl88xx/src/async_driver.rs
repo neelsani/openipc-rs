@@ -93,7 +93,12 @@ impl RealtekDevice {
             detected_family: OnceLock::new(),
             efuse_logical_map: OnceLock::new(),
             efuse_info: OnceLock::new(),
+            cck_filter_8821c: OnceLock::new(),
             h2c_box: AtomicU8::new(0),
+            cw_tone: std::sync::Mutex::new(crate::async_cw::CwToneState::default()),
+            continuous_tx: std::sync::Mutex::new(
+                crate::async_continuous_tx::ContinuousTxState::default(),
+            ),
         })
     }
 
@@ -149,6 +154,7 @@ impl RealtekDevice {
             }
             ChipFamily::Rtl8814
             | ChipFamily::Rtl8822b
+            | ChipFamily::Rtl8821c
             | ChipFamily::Rtl8822c
             | ChipFamily::Rtl8822e => None,
         };
@@ -201,7 +207,9 @@ impl RealtekDevice {
                 ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
                     unreachable!("Jaguar3 is handled before generic init")
                 }
-                ChipFamily::Rtl8822b => unreachable!("Jaguar2 is handled before generic init"),
+                ChipFamily::Rtl8822b | ChipFamily::Rtl8821c => {
+                    unreachable!("Jaguar2 is handled before generic init")
+                }
             }
         }
 
@@ -246,6 +254,9 @@ impl RealtekDevice {
         self.set_monitor_mode_async(options.accept_bad_fcs).await?;
         self.apply_interference_mitigation_async(chip, radio, options)
             .await?;
+        if let Some(gain) = options.cw_tone_gain {
+            self.start_cw_tone_async(radio.channel, gain).await?;
+        }
 
         let report = InitReport {
             chip,
@@ -269,6 +280,7 @@ impl RealtekDevice {
     /// adapter can re-enumerate cleanly after sustained monitor/TX use. Older
     /// Jaguar1-family chips do not currently need extra shutdown writes here.
     pub async fn shutdown_monitor_async(&self) -> Result<(), DriverError> {
+        self.stop_cw_tone_async().await?;
         let chip = self.probe_chip_async().await?;
         self.shutdown_monitor_for_chip_async(chip).await
     }
@@ -337,7 +349,9 @@ impl RealtekDevice {
         chip: ChipInfo,
     ) -> Result<(), DriverError> {
         match chip.family {
-            ChipFamily::Rtl8822b => self.shutdown_monitor_jaguar2_async().await,
+            ChipFamily::Rtl8822b | ChipFamily::Rtl8821c => {
+                self.shutdown_monitor_jaguar2_async(chip.family).await
+            }
             ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
                 self.shutdown_monitor_jaguar3_async().await
             }
@@ -422,7 +436,14 @@ impl RealtekDevice {
             .wait()
             .map_err(|err| DriverError::Nusb(format!("clear halt on bulk IN failed: {err}")))?;
         for attempt in 0..BULK_RETRY_ATTEMPTS {
-            let completion = endpoint.transfer_blocking(endpoint.allocate(length), USB_TIMEOUT);
+            endpoint.submit(endpoint.allocate(length));
+            let completion = loop {
+                if let Some(completion) =
+                    endpoint.wait_next_complete(std::time::Duration::from_secs(60))
+                {
+                    break completion;
+                }
+            };
             match completion.status {
                 Ok(()) => {
                     log::trace!(target: "openipc_rtl88xx::usb", "bulk IN complete endpoint=0x{:02x} bytes={}", self.bulk_in_ep, completion.actual_len);
@@ -464,15 +485,12 @@ impl RealtekDevice {
             let mut transfers = Vec::with_capacity(count);
             let mut retry = false;
             for _ in 0..count {
-                let Some(completion) = endpoint.wait_next_complete(USB_TIMEOUT) else {
-                    endpoint.cancel_all();
-                    if attempt + 1 < BULK_RETRY_ATTEMPTS {
-                        retry = true;
-                        break;
+                let completion = loop {
+                    if let Some(completion) =
+                        endpoint.wait_next_complete(std::time::Duration::from_secs(60))
+                    {
+                        break completion;
                     }
-                    return Err(DriverError::Nusb(
-                        "bulk IN transfer timed out while reading in-flight batch".to_owned(),
-                    ));
                 };
                 match completion.status {
                     Ok(()) => transfers.push(completion.buffer[..completion.actual_len].to_vec()),

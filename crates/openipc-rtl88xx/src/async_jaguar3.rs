@@ -147,11 +147,7 @@ impl RealtekDevice {
         }
         self.config_phydm_parameter_init_8822c_async().await?;
         self.init_rfk_jaguar3_async(chip).await?;
-        match chip.family {
-            ChipFamily::Rtl8822e => self.dac_calibrate_8822e_async().await?,
-            ChipFamily::Rtl8822c => self.dac_calibrate_8822c_async().await?,
-            _ => return Err(DriverError::UnsupportedFirmwarePath(chip.family)),
-        }
+        self.run_dack_jaguar3_with_retry_async(chip).await?;
         self.bf_init_8822c_async().await?;
         self.monitor_rx_cfg_8822c_async(options.accept_bad_fcs)
             .await?;
@@ -164,28 +160,25 @@ impl RealtekDevice {
         )
         .await?;
         if options.should_run_iqk(chip.family) {
-            match chip.family {
-                ChipFamily::Rtl8822e => {
-                    self.run_iqk_8822e_async(
-                        chip,
-                        radio.channel_width,
-                        radio.channel,
-                        options.skip_txgapk,
-                    )
-                    .await?;
-                }
-                ChipFamily::Rtl8822c => {
-                    self.run_iqk_8822c_async(chip, radio.channel_width, radio.channel)
-                        .await?;
-                }
-                _ => return Err(DriverError::UnsupportedIqkPath(chip.family)),
-            }
+            self.run_iqk_jaguar3_with_retry_async(chip, radio, options.skip_txgapk)
+                .await?;
         }
         self.enable_rx_path_jaguar3_async().await?;
         if chip.family == ChipFamily::Rtl8822e {
             self.dpk_force_bypass_8822e_async().await?;
             self.config_rfe_8822e_async(rfe_type, radio.channel).await?;
             self.config_channel_8822e_async(radio.channel).await?;
+        }
+        if let Some(gain) = options.cw_tone_gain {
+            // Devourer arms Jaguar3 here: later TX-power/coex writes can leave
+            // RTL8822E 5 GHz control-IN reads NAKing, while a CW hold needs no
+            // firmware power/coexistence runtime.
+            self.start_cw_tone_async(radio.channel, gain).await?;
+            return Ok(InitReport {
+                chip,
+                status,
+                firmware_downloaded: true,
+            });
         }
         if !options.skip_tx_power {
             self.set_default_tx_power_jaguar3_async(chip, radio.channel)
@@ -210,6 +203,55 @@ impl RealtekDevice {
         self.write_u16_async(REG_CR, 0x0000).await?;
         self.write_u32_async(REG_RCR, 0x0000_0000).await?;
         self.power_off_8822c_async().await
+    }
+
+    async fn run_dack_jaguar3_with_retry_async(&self, chip: ChipInfo) -> Result<(), DriverError> {
+        for attempt in 1..=3 {
+            let result = match chip.family {
+                ChipFamily::Rtl8822e => self.dac_calibrate_8822e_async().await,
+                ChipFamily::Rtl8822c => self.dac_calibrate_8822c_async().await,
+                _ => return Err(DriverError::UnsupportedFirmwarePath(chip.family)),
+            };
+            match result {
+                Ok(()) => return Ok(()),
+                Err(err) if attempt < 3 => {
+                    log::warn!(target: "openipc_rtl88xx::calibration", "Jaguar3 DACK USB/register error: {err}; retry {attempt}/2");
+                    sleep_ms(200).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        unreachable!("DACK retry loop always returns")
+    }
+
+    async fn run_iqk_jaguar3_with_retry_async(
+        &self,
+        chip: ChipInfo,
+        radio: RadioConfig,
+        skip_txgapk: bool,
+    ) -> Result<(), DriverError> {
+        for attempt in 1..=3 {
+            let result = match chip.family {
+                ChipFamily::Rtl8822e => {
+                    self.run_iqk_8822e_async(chip, radio.channel_width, radio.channel, skip_txgapk)
+                        .await
+                }
+                ChipFamily::Rtl8822c => {
+                    self.run_iqk_8822c_async(chip, radio.channel_width, radio.channel)
+                        .await
+                }
+                _ => return Err(DriverError::UnsupportedIqkPath(chip.family)),
+            };
+            match result {
+                Ok(_) => return Ok(()),
+                Err(err) if attempt < 3 => {
+                    log::warn!(target: "openipc_rtl88xx::calibration", "Jaguar3 IQK USB/register error: {err}; retry {attempt}/2");
+                    sleep_ms(200).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        unreachable!("IQK retry loop always returns")
     }
 
     async fn pre_init_system_cfg_8822c_async(&self) -> Result<(), DriverError> {
@@ -863,28 +905,29 @@ impl RealtekDevice {
             self.set_bb_reg_async(0x1830, BIT29, 1).await?;
             self.set_bb_reg_async(0x4130, BIT29, 1).await?;
         } else {
+            self.set_bb_reg_async(0x1c90, BIT8, 0).await?;
             self.write_rf_direct_8822c_async(0x3c00, 0x18, rf18).await?;
             self.write_rf_direct_8822c_async(0x4c00, 0x18, rf18).await?;
-            if plan.is_40mhz || plan.is_80mhz {
-                let rf1a_bandwidth = if plan.is_80mhz {
-                    BIT13 | BIT10
-                } else {
-                    BIT12 | BIT11
-                };
-                for base in [0x3c00, 0x4c00] {
-                    let mut rf1a = self.read_u32_async(base + (0x1a << 2)).await? & 0x000f_ffff;
-                    rf1a = (rf1a & !0x7c00) | rf1a_bandwidth;
-                    if plan.is_40mhz {
-                        rf1a = (rf1a | BIT0) & !BIT16;
-                    }
-                    self.write_rf_direct_8822c_async(base, 0x1a, rf1a).await?;
-                }
+            let rf1a_bandwidth = if plan.is_80mhz {
+                BIT13 | BIT10
+            } else if plan.is_40mhz {
+                BIT12 | BIT11
             } else {
-                self.write_rf_direct_8822c_async(0x3c00, 0x3f, 0x18).await?;
-                self.write_rf_direct_8822c_async(0x4c00, 0x3f, 0x18).await?;
+                BIT11 | BIT10
+            };
+            for base in [0x3c00, 0x4c00] {
+                let mut rf1a = self.read_u32_async(base + (0x1a << 2)).await? & 0x000f_ffff;
+                rf1a = (rf1a & !0x7c00) | rf1a_bandwidth;
+                if plan.is_40mhz {
+                    rf1a = (rf1a | BIT0) & !BIT16;
+                }
+                self.write_rf_direct_8822c_async(base, 0x1a, rf1a).await?;
             }
             self.set_bb_reg_async(0x3f7c, BIT18, if central <= 14 { 1 } else { 0 })
                 .await?;
+            self.set_bb_reg_async(0x1c90, BIT8, 1).await?;
+            self.set_bb_reg_async(0x1830, BIT29, 1).await?;
+            self.set_bb_reg_async(0x4130, BIT29, 1).await?;
         }
 
         if let Some((cck_table, ofdm_table)) = jaguar3_agc_tables(central, width, is_8822c) {
@@ -898,10 +941,8 @@ impl RealtekDevice {
         }
 
         if central <= 14 {
-            if is_8822c {
-                self.set_bb_reg_async(0x1a9c, BIT20, 1).await?;
-                self.set_bb_reg_async(0x1a14, 0x300, 0).await?;
-            }
+            self.set_bb_reg_async(0x1a9c, BIT20, 1).await?;
+            self.set_bb_reg_async(0x1a14, 0x300, 0).await?;
             self.write_u8_async(
                 0x0454,
                 self.read_u8_async(0x0454).await.unwrap_or(0) & !0x80,
@@ -910,10 +951,8 @@ impl RealtekDevice {
             self.set_bb_reg_async(0x1a80, BIT18, 0).await?;
             self.set_bb_reg_async(0x1c80, 0x3f00_0000, 0x0f).await?;
         } else {
-            if is_8822c {
-                self.set_bb_reg_async(0x1a9c, BIT20, 0).await?;
-                self.set_bb_reg_async(0x1a14, 0x300, 3).await?;
-            }
+            self.set_bb_reg_async(0x1a9c, BIT20, 0).await?;
+            self.set_bb_reg_async(0x1a14, 0x300, 3).await?;
             self.write_u8_async(0x0454, self.read_u8_async(0x0454).await.unwrap_or(0) | 0x80)
                 .await?;
             self.set_bb_reg_async(0x1a80, BIT18, 1).await?;
@@ -1991,7 +2030,15 @@ fn jaguar3_agc_tables(
     is_8822c: bool,
 ) -> Option<(Option<u32>, u32)> {
     if !is_8822c {
-        return None;
+        return Some(if channel <= 14 {
+            (Some(8), 0)
+        } else if channel < 80 {
+            (None, 1)
+        } else if channel <= 144 {
+            (None, 2)
+        } else {
+            (None, 3)
+        });
     }
     let bw20 = matches!(
         width,
@@ -2218,7 +2265,10 @@ mod tests {
             jaguar3_agc_tables(149, ChannelWidth::Mhz20, true),
             Some((None, 3))
         );
-        assert_eq!(jaguar3_agc_tables(6, ChannelWidth::Mhz20, false), None);
+        assert_eq!(
+            jaguar3_agc_tables(6, ChannelWidth::Mhz20, false),
+            Some((Some(8), 0))
+        );
     }
 
     #[test]

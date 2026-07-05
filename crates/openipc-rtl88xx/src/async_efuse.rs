@@ -124,7 +124,21 @@ impl RealtekDevice {
         &self,
         chip: ChipInfo,
     ) -> Result<EfuseInfo, DriverError> {
-        let map = self.read_efuse_logical_map_async(chip).await?;
+        let mut map = self.read_efuse_logical_map_async(chip).await?;
+        if chip.family == ChipFamily::Rtl8812 && !has_valid_8812_tx_power_pg(&map) {
+            for attempt in 1..=3 {
+                log::warn!(target: "openipc_rtl88xx::efuse", "RTL8812 EFUSE TX-power data blank; rereading map ({attempt}/3)");
+                map = self.read_efuse_logical_map_async(chip).await?;
+                if has_valid_8812_tx_power_pg(&map) {
+                    break;
+                }
+            }
+            if !has_valid_8812_tx_power_pg(&map) {
+                // tx_power_info_from_efuse_map applies the same per-cell IC
+                // defaults as devourer's LoadTxPowerInfo autoload-fail path.
+                log::error!(target: "openipc_rtl88xx::efuse", "RTL8812 EFUSE TX-power data invalid after retries; using IC-default calibration");
+            }
+        }
         let amplifiers = amplifier_flags_from_efuse_map(&map);
         let bluetooth_coexist = bluetooth_coexist_from_efuse_map(&map);
         Ok(EfuseInfo {
@@ -158,7 +172,7 @@ impl RealtekDevice {
         }
         self.read_efuse_autoload_probe_bytes_async().await?;
         self.efuse_power_switch_async(false, true).await?;
-        let physical_limit = if chip.family == ChipFamily::Rtl8822b {
+        let physical_limit = if chip.family.is_jaguar2() {
             1024
         } else {
             EFUSE_REAL_CONTENT_LEN_JAGUAR
@@ -169,7 +183,7 @@ impl RealtekDevice {
         let power_off = self.efuse_power_switch_async(false, false).await;
         match (result, power_off) {
             (Ok(map), Ok(())) => {
-                if chip.family == ChipFamily::Rtl8822b {
+                if chip.family.is_jaguar2() {
                     let _ = self.efuse_logical_map.set(map);
                 }
                 Ok(map)
@@ -482,6 +496,10 @@ impl RealtekDevice {
     }
 }
 
+fn has_valid_8812_tx_power_pg(map: &[u8; EFUSE_MAP_LEN_JAGUAR]) -> bool {
+    map[0x22..0x22 + 11].iter().any(|byte| *byte != 0xff)
+}
+
 fn apply_efuse_block_8822e(
     map: &mut [u8; EFUSE_MAP_LEN_JAGUAR],
     header0: u8,
@@ -519,7 +537,10 @@ fn mac_from_efuse_map(chip: ChipInfo, map: &[u8; EFUSE_MAP_LEN_JAGUAR]) -> Optio
         ChipFamily::Rtl8812 => EEPROM_MAC_ADDR_8812AU,
         ChipFamily::Rtl8814 => EEPROM_MAC_ADDR_8814AU,
         ChipFamily::Rtl8821 => EEPROM_MAC_ADDR_8821AU,
-        ChipFamily::Rtl8822b | ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => return None,
+        ChipFamily::Rtl8822b
+        | ChipFamily::Rtl8821c
+        | ChipFamily::Rtl8822c
+        | ChipFamily::Rtl8822e => return None,
     };
     let bytes = map.get(offset..offset + 6)?;
 
@@ -539,7 +560,10 @@ fn rfe_type_from_efuse_map(
 ) -> u8 {
     let rfe_option = map[EEPROM_RFE_OPTION_8812];
     match chip.family {
-        ChipFamily::Rtl8822b | ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
+        ChipFamily::Rtl8822b
+        | ChipFamily::Rtl8821c
+        | ChipFamily::Rtl8822c
+        | ChipFamily::Rtl8822e => {
             if rfe_option == 0xff {
                 0
             } else {
@@ -1196,7 +1220,10 @@ fn tx_power_base_byte(family: ChipFamily, map: &[u8; EFUSE_MAP_LEN_JAGUAR], offs
         ChipFamily::Rtl8812 => Some(tx_power_defaults::RTL8812A),
         ChipFamily::Rtl8814 => Some(tx_power_defaults::RTL8814A),
         ChipFamily::Rtl8821 => Some(tx_power_defaults::RTL8821A),
-        ChipFamily::Rtl8822b | ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => None,
+        ChipFamily::Rtl8822b
+        | ChipFamily::Rtl8821c
+        | ChipFamily::Rtl8822c
+        | ChipFamily::Rtl8822e => None,
     }) else {
         return programmed;
     };
@@ -1250,6 +1277,7 @@ mod tests {
                 ChipFamily::Rtl8812 => RfType::TwoTTwoR,
                 ChipFamily::Rtl8814 => RfType::FourTFourR,
                 ChipFamily::Rtl8821 => RfType::OneTOneR,
+                ChipFamily::Rtl8821c => RfType::OneTOneR,
                 ChipFamily::Rtl8822b | ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
                     RfType::TwoTTwoR
                 }
@@ -1264,6 +1292,17 @@ mod tests {
         assert!(!is_valid_mac([0xff; 6]));
         assert!(!is_valid_mac([0x00; 6]));
         assert!(is_valid_mac([0x02, 0x0d, 0xb0, 0xc7, 0xe4, 0xb3]));
+    }
+
+    #[test]
+    fn validates_the_same_8812_tx_power_window_as_devourer() {
+        let mut map = [0xff; EFUSE_MAP_LEN_JAGUAR];
+        assert!(!has_valid_8812_tx_power_pg(&map));
+        map[0x22 + 10] = 0x2d;
+        assert!(has_valid_8812_tx_power_pg(&map));
+        map[0x22 + 10] = 0xff;
+        map[0x22 + 11] = 0x2d;
+        assert!(!has_valid_8812_tx_power_pg(&map));
     }
 
     #[test]

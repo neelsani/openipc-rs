@@ -159,8 +159,21 @@ WFB-ng does not have because upstream uses kernel monitor interfaces:
 ```
 
 `wfb_rx` additionally has `--max-transfers` and `--rx-urbs`.
-`wfb_tx` additionally has `--session-interval`, `--max-packets`, and
-`--tx-power`.
+`wfb_tx` additionally has `--session-interval`, `--max-packets`, `--tx-power`,
+`--mcs-sweep`, `--mcs-step-ms`, and `--thermal-poll-ms`.
+
+The MCS sweep is the Rust equivalent of devourer's active-link headroom probe.
+It changes the radiotap rate on newly emitted packets without reinitializing the
+adapter. For example:
+
+```bash
+wfb_tx --mcs-sweep MCS0,MCS2,MCS4,MCS6,MCS7 --mcs-step-ms 3000 \
+  --thermal-poll-ms 1000
+```
+
+Each dwell emits a `<wfb-rs-mcs-sweep>` marker. Thermal samples are emitted as
+`<wfb-rs-thermal>` records so a test harness can align receiver delivery/SNR
+with rate and transmitter temperature.
 
 On Jaguar3, `wfb_tx` closes the ordinary receive filters, keeps bulk-IN queued
 to drain firmware C2H reports, and runs coex plus thermal maintenance every two

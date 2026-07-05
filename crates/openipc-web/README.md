@@ -18,10 +18,12 @@ JavaScript:
   `mavlinkPayloads`
 - Adaptive-link feedback helpers
 - WebUSB Realtek device access
-- Jaguar2 RTL8812BU/RTL8822BU and Jaguar3 RTL8812CU/EU/RTL8822CU/EU detection
+- Jaguar2 RTL8811CU/RTL8821CU/RTL8812BU/RTL8822BU and Jaguar3
+  RTL8812CU/EU/RTL8822CU/EU detection
   and shared Rust HAL
 - 5/10/20/40/80 MHz Jaguar3 setup and 40-in-80 TX placement
 - SU/MU sounding controls plus RX CSI masks and NBI notches
+- Jaguar1/2/3 CW single-tone controls for RF test equipment
 - Realtek diagnostics and calibration hooks: false-alarm counters, PHYDM DIG
   watchdog ticks, RTL8812 power tracking, Jaguar3 thermal tracking,
   RTL8812/RTL8814/Jaguar3 IQK, C2H packets, RTL8814 TX-status reports, and
@@ -134,6 +136,10 @@ await radio.armBeamformingSounder(ownMac);
 // On a second adapter, pass the sounder's MAC and an empty own-MAC array to
 // use the deterministic Jaguar2/3 beamformee address.
 await secondRadio.armBeamformee(ownMac, new Uint8Array(), false);
+
+// RF test mode only. Always restore the adapter afterwards.
+await radio.startCwTone(channel, 8);
+await radio.stopCwTone();
 ```
 
 `withKeypair(...)` is still available as a compatibility shortcut. It creates

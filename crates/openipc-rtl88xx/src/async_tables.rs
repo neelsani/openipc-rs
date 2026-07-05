@@ -17,6 +17,7 @@ impl RealtekDevice {
             ChipFamily::Rtl8814 => rtl_data::RTL8814_MAC_REG,
             ChipFamily::Rtl8821 => rtl_data::RTL8821_MAC_REG,
             ChipFamily::Rtl8822b => rtl_data::RTL8822B_MAC_REG,
+            ChipFamily::Rtl8821c => rtl_data::RTL8821C_MAC_REG,
             ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
                 return Err(DriverError::UnsupportedFirmwarePath(chip.family));
             }
@@ -37,6 +38,7 @@ impl RealtekDevice {
             ChipFamily::Rtl8814 => (rtl_data::RTL8814_PHY_REG, rtl_data::RTL8814_AGC_TAB),
             ChipFamily::Rtl8821 => (rtl_data::RTL8821_PHY_REG, rtl_data::RTL8821_AGC_TAB),
             ChipFamily::Rtl8822b => (rtl_data::RTL8822B_PHY_REG, rtl_data::RTL8822B_AGC_TAB),
+            ChipFamily::Rtl8821c => (rtl_data::RTL8821C_PHY_REG, rtl_data::RTL8821C_AGC_TAB),
             ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
                 return Err(DriverError::UnsupportedFirmwarePath(chip.family));
             }
@@ -145,6 +147,23 @@ impl RealtekDevice {
                     )
                     .await?;
                 }
+            }
+            ChipFamily::Rtl8821c => {
+                load_phy_table_async(
+                    rtl_data::RTL8821C_RADIO_A,
+                    phy_context(chip, efuse),
+                    |addr, value| async move {
+                        self.set_rf_reg_async(
+                            chip,
+                            RfPath::A,
+                            addr as u16,
+                            B_LSSI_WRITE_DATA,
+                            value,
+                        )
+                        .await
+                    },
+                )
+                .await?;
             }
             ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
                 return Err(DriverError::UnsupportedFirmwarePath(chip.family));

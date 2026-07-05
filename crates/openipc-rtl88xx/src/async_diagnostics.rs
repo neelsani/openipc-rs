@@ -78,7 +78,13 @@ impl RealtekDevice {
     /// Read the RF thermal meter and compare it to EFUSE baseline data.
     pub async fn read_thermal_status_async(&self) -> Result<ThermalStatus, DriverError> {
         let chip = self.probe_chip_async().await?;
-        let efuse = self.read_efuse_info_async(chip).await?;
+        let efuse = if let Some(efuse) = self.efuse_info.get().copied() {
+            efuse
+        } else {
+            let efuse = self.read_efuse_info_async(chip).await?;
+            let _ = self.efuse_info.set(efuse);
+            efuse
+        };
         self.read_thermal_status_with_efuse_async(chip, efuse).await
     }
 

@@ -15,7 +15,8 @@ radio setup, RX parsing, TX descriptors, and TX power.
 The source of truth is `SUPPORTED_DEVICES` in the driver crate. The current
 table includes the Realtek reference IDs, common RTL8812AU OEM IDs used by
 PixelPilot, the RTL8821AU vendor IDs mirrored from devourer, Jaguar2
-RTL8812BU/RTL8822BU, and Jaguar3 RTL8812CU/EU and RTL8822CU/EU:
+RTL8811CU/RTL8821CU/RTL8812BU/RTL8822BU, and Jaguar3 RTL8812CU/EU and
+RTL8822CU/EU:
 
 | VID:PID     | Family Hint | Label                               |
 | ----------- | ----------- | ----------------------------------- |
@@ -35,6 +36,7 @@ RTL8812BU/RTL8822BU, and Jaguar3 RTL8812CU/EU and RTL8822CU/EU:
 | `0409:0408` | RTL8812     | NEC AtermWL900U / RTL8812AU         |
 | `0586:3426` | RTL8812     | ZyXEL NWD6605 / RTL8812AU           |
 | `0bda:8813` | RTL8814     | RTL8814AU                           |
+| `0bda:c811` | RTL8821C    | RTL8811CU / RTL8821CU               |
 | `0bda:b812` | RTL8822B    | RTL8812BU / RTL8822BU WiFi-only     |
 | `0bda:b82c` | RTL8822B    | RTL8822BU multi-function            |
 | `2357:012d` | RTL8822B    | TP-Link Archer T3U                  |
@@ -69,7 +71,8 @@ RTL8812BU/RTL8822BU, and Jaguar3 RTL8812CU/EU and RTL8822CU/EU:
 | `0bda:e822` | RTL8822E    | RTL8822EU                           |
 | `0bda:a82a` | RTL8822E    | RTL8822EU                           |
 
-The chip probe still reads `SYS_CFG2` after opening the device. Chip ID `0x0a`
+The chip probe still reads `SYS_CFG2` after opening the device. Chip ID `0x09`
+selects RTL8821C. Chip ID `0x0a`
 selects RTL8822B (`0x50` is accepted during its cold transient); `0x13` and
 `0x17` select RTL8822C and RTL8822E. That register is
 authoritative because RTL8812EU can enumerate with the same `0bda:8812`,
@@ -95,6 +98,9 @@ Platform-specific filters are derived from this table:
 - Jaguar2 RTL8812BU/RTL8822BU HalMAC bring-up: firmware reserved-page/DDMA,
   MAC/USB queues, EFUSE/RFE, conditional BB/AGC/RF tables, LCK, software IQK,
   DIG, regulatory TX power, and the 8822B-specific TX checksum,
+- RTL8811CU/RTL8821CU one-path Jaguar2 bring-up with its own firmware,
+  power/FIFO tables, RF/channel setup, WLAN antenna grant, regulatory TXAGC,
+  descriptor parsing, and CW support,
 - Jaguar3 RTL8812CU/EU and RTL8822CU/EU firmware download, MAC/USB setup,
   RFE-aware BB/AGC/RF tables, 24-byte RX descriptor parsing, 48-byte checksummed
   TX descriptors, 5/10 MHz narrowband setup, native 40/80 MHz RF/MAC setup,
@@ -289,6 +295,25 @@ queue-depth registers, BB register/dbgport reads, PHYDM DIG watchdog ticks,
 IQK, RTL8812 power tracking ticks, Jaguar3 coex keepalive, C2H payloads, and
 RTL8814 TX-status parsing.
 
+Frame-free sensing and continuous TX are explicit for the same reason:
+
+```rust
+let energy = device.read_rx_energy_async().await?;
+println!(
+    "IGI={} OFDM CCA={} NHM={:?}",
+    energy.igi, energy.cca_ofdm, energy.nhm
+);
+
+device.start_continuous_tx_async().await?;
+// Take the RF measurement, then always restore normal operation.
+device.stop_continuous_tx_async().await?;
+```
+
+`read_rx_energy_async` resets FA/CCA latches and spends about 2 ms collecting
+the NHM histogram. Do not call it from the latency-sensitive USB completion
+path. Continuous TX radiates a test carrier until stopped and is intended only
+for controlled RF diagnostics.
+
 ## Validation Boundary
 
 The driver does not build against devourer. Hardware bring-up still needs
@@ -308,13 +333,13 @@ Current status:
 - RTL8812 thermal power tracking, RTL8812 IQK, RTL8814 IQK, and the PHYDM
   false-alarm/DIG watchdog have Rust implementations. They are exposed natively
   and through WASM, but still need register-trace comparison on real adapters.
-- RTL8812BU/RTL8822BU Jaguar2 support is audited through devourer `bad37a8`.
-  The checked-in 161,240-byte firmware and MAC/PHY/AGC/RF/TX-limit tables
-  reproduce byte-for-byte from the importer, and the firmware, IQK, RX, and TX
-  state machines are present. Live cold-plug/on-air validation is still
-  required.
+- Jaguar2 support is audited through devourer `4df2a3b`.
+  Both firmware images and their MAC/PHY/AGC/RF/TX-limit tables reproduce from
+  checked-in importers. Both chips have their variant-specific software IQK
+  state machines; RTL8821C uses its one-path BTG/WLG/WLA LOK/TXK/RXK flow.
+  Live cold-plug/on-air validation is required.
 - RTL8812CU/EU and RTL8822CU/EU Jaguar3 support is audited through devourer
-  `bad37a8`. The RTL8822E firmware and generated table arrays are
+  `4df2a3b`. The RTL8822E firmware and generated table arrays are
   byte-for-byte equal to the reference commit. Chip-ID dispatch, V1 EFUSE,
   PA-bias, RFE defaults/pinmux, DACK, IQK, TXGAPK, DPK bypass, per-rate TXAGC,
   thermal tracking, descriptors, coex/H2C, and shutdown are implemented. This
@@ -325,6 +350,10 @@ Current status:
   40-in-80 TX placement, 8822E path-B TXAGC protection for concurrent RX/TX,
   promiscuous RCR AAP, Jaguar1's in-flight RX queue model, explicit sounding,
   beamforming-report detection, and CSI/NBI receive masking.
+- The latest July 2026 hardening is represented: Jaguar1/2/3 CW single-tone,
+  RTL8812 TX-power EFUSE rereads with IC-default fallback, Jaguar3 DACK/IQK
+  retries, persistent timeout-free RX submissions, and desktop
+  topology-lock/claim-before-reset ownership.
 - Newer devourer runtime TX-mode behavior is mirrored: radiotap RATE/MCS/VHT
   wins, a programmatic default can fill rate-less packets, 5 GHz CCK TX is
   clamped to OFDM, and the newer 8812/8821/8814 descriptor differences are

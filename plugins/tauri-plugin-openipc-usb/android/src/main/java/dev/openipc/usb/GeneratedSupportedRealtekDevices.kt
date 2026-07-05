@@ -12,6 +12,7 @@ internal data class SupportedRealtekDevice(
 
 internal val supportedRealtekDevices =
   listOf(
+    SupportedRealtekDevice(0x0bda, 0xc811, "RTL8821CU / RTL8811CU"),
     SupportedRealtekDevice(0x0bda, 0x8812, "RTL8812AU / RTL8811AU / RTL8812EU reference PID"),
     SupportedRealtekDevice(0x0bda, 0x881a, "RTL8812AU-VS / RTL8812EU variant"),
     SupportedRealtekDevice(0x0bda, 0x881b, "RTL8812AU-VL / RTL8812EU variant"),

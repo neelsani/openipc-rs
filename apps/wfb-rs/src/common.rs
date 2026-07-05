@@ -3,15 +3,13 @@
 use std::fs;
 use std::path::Path;
 
-#[cfg(not(target_os = "android"))]
-use nusb::MaybeFuture;
 use openipc_core::{
     ChannelBandwidth, ChannelId, FrameLayout, RadioPort, TxMode, TxModeKind, TxRadioParams,
     WfbKeypair, WfbTxKeypair, FRAME_TYPE_DATA, FRAME_TYPE_RTS,
 };
 use openipc_rtl88xx::{
-    is_supported_id, ChannelWidth, ChipFamily, DriverOptions, Firmware8814Mode, MonitorOptions,
-    RadioConfig, RealtekDevice, RealtekTxDescriptor, RealtekTxOptions,
+    ChannelWidth, ChipFamily, DriverOptions, Firmware8814Mode, MonitorOptions, RadioConfig,
+    RealtekDevice, RealtekTxDescriptor, RealtekTxOptions,
 };
 
 pub type CliResult<T> = Result<T, Box<dyn std::error::Error>>;
@@ -60,32 +58,13 @@ pub fn open_radios(config: &RadioDeviceConfig) -> CliResult<Vec<OpenedRadio>> {
     {
         let mut driver_options = config.driver_options;
         driver_options.initialize_hardware = config.initialize_hardware;
-        let infos: Vec<_> = nusb::list_devices()
-            .wait()
-            .map_err(|err| format!("list_devices failed: {err}"))?
-            .filter(|device| {
-                device_matches_options(device.vendor_id(), device.product_id(), driver_options)
-            })
-            .collect();
-
-        if infos.is_empty() {
-            return Err("no supported Realtek adapters found".into());
-        }
-
         let mut opened = Vec::new();
         let mut errors = Vec::new();
-        for info in infos {
-            let vendor_id = info.vendor_id();
-            let product_id = info.product_id();
-            match info.open().wait() {
-                Ok(device) => match RealtekDevice::from_nusb_device(device, driver_options) {
-                    Ok(device) => match open_claimed_radio(config, device) {
-                        Ok(radio) => opened.push(radio),
-                        Err(err) => errors.push(format!("{vendor_id:04x}:{product_id:04x}: {err}")),
-                    },
-                    Err(err) => errors.push(format!("{vendor_id:04x}:{product_id:04x}: {err}")),
-                },
-                Err(err) => errors.push(format!("{vendor_id:04x}:{product_id:04x}: {err}")),
+        for device in RealtekDevice::open_all(driver_options)? {
+            let id = format!("{:04x}:{:04x}", device.vendor_id(), device.product_id());
+            match open_claimed_radio(config, device) {
+                Ok(radio) => opened.push(radio),
+                Err(err) => errors.push(format!("{id}: {err}")),
             }
         }
 
@@ -98,16 +77,6 @@ pub fn open_radios(config: &RadioDeviceConfig) -> CliResult<Vec<OpenedRadio>> {
         }
 
         Ok(opened)
-    }
-}
-
-#[cfg(not(target_os = "android"))]
-fn device_matches_options(vendor_id: u16, product_id: u16, options: DriverOptions) -> bool {
-    match (options.target_vendor_id, options.target_product_id) {
-        (Some(vid), Some(pid)) => vendor_id == vid && product_id == pid,
-        (Some(vid), None) => vendor_id == vid && is_supported_id(vendor_id, product_id),
-        (None, Some(pid)) => product_id == pid && is_supported_id(vendor_id, product_id),
-        (None, None) => is_supported_id(vendor_id, product_id),
     }
 }
 

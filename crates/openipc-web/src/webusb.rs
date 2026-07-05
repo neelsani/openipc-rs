@@ -9,7 +9,7 @@ use openipc_rtl88xx::{
     FalseAlarmCounters, Firmware8814Mode, InitReport, InitStatus, IqkReport,
     Jaguar3PowerTrackingReport, Jaguar3PowerTrackingState, MonitorOptions, PhydmDigState,
     PhydmWatchdogReport, PowerTrackingReport, PowerTrackingState, RadioConfig, RealtekDevice,
-    RealtekTxDescriptor, RealtekTxOptions, ThermalBucket, ThermalStatus,
+    RealtekTxDescriptor, RealtekTxOptions, RxEnergy, ThermalBucket, ThermalStatus,
 };
 use wasm_bindgen::prelude::*;
 
@@ -104,6 +104,49 @@ impl WebThermalStatus {
     #[wasm_bindgen(getter)]
     pub fn bucket(&self) -> String {
         thermal_bucket_name(self.status.bucket()).to_owned()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Frame-free receive-energy snapshot returned to JavaScript.
+pub struct WebRxEnergy {
+    energy: RxEnergy,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+impl WebRxEnergy {
+    #[wasm_bindgen(getter, js_name = faOfdm)]
+    pub fn fa_ofdm(&self) -> u32 {
+        self.energy.fa_ofdm
+    }
+    #[wasm_bindgen(getter, js_name = faCck)]
+    pub fn fa_cck(&self) -> u32 {
+        self.energy.fa_cck
+    }
+    #[wasm_bindgen(getter, js_name = ccaOfdm)]
+    pub fn cca_ofdm(&self) -> u32 {
+        self.energy.cca_ofdm
+    }
+    #[wasm_bindgen(getter, js_name = ccaCck)]
+    pub fn cca_cck(&self) -> u32 {
+        self.energy.cca_cck
+    }
+    #[wasm_bindgen(getter)]
+    pub fn igi(&self) -> u8 {
+        self.energy.igi
+    }
+    #[wasm_bindgen(getter, js_name = nhmDuration)]
+    pub fn nhm_duration(&self) -> u16 {
+        self.energy.nhm_duration
+    }
+    #[wasm_bindgen(getter, js_name = nhmValid)]
+    pub fn nhm_valid(&self) -> bool {
+        self.energy.nhm_valid
+    }
+    pub fn nhm(&self) -> Uint8Array {
+        Uint8Array::from(self.energy.nhm.as_slice())
     }
 }
 
@@ -675,6 +718,39 @@ impl WebUsbRealtekDevice {
             .map_err(driver_error)
     }
 
+    #[wasm_bindgen(js_name = startCwTone)]
+    /// Start a Devourer-compatible bare RF carrier for test equipment use.
+    pub async fn start_cw_tone(&self, channel: u8, gain: u8) -> Result<(), JsValue> {
+        self.driver
+            .start_cw_tone_async(channel, gain)
+            .await
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = stopCwTone)]
+    /// Stop a CW carrier and restore the adapter's RF/baseband state.
+    pub async fn stop_cw_tone(&self) -> Result<(), JsValue> {
+        self.driver.stop_cw_tone_async().await.map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = startContinuousTx)]
+    /// Start a hardware-generated modulated continuous carrier.
+    pub async fn start_continuous_tx(&self) -> Result<(), JsValue> {
+        self.driver
+            .start_continuous_tx_async()
+            .await
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = stopContinuousTx)]
+    /// Stop modulated continuous TX and restore normal RF state.
+    pub async fn stop_continuous_tx(&self) -> Result<(), JsValue> {
+        self.driver
+            .stop_continuous_tx_async()
+            .await
+            .map_err(driver_error)
+    }
+
     #[wasm_bindgen(js_name = setRxPathMask)]
     /// Select active Jaguar1 receive chains for diversity diagnostics.
     pub async fn set_rx_path_mask(&self, mask: u8) -> Result<(), JsValue> {
@@ -920,6 +996,17 @@ impl WebUsbRealtekDevice {
             .await
             .map_err(driver_error)?;
         Ok(status.into())
+    }
+
+    #[wasm_bindgen(js_name = readRxEnergy)]
+    /// Read frame-free FA/CCA/IGI and NHM diagnostics.
+    pub async fn read_rx_energy(&self) -> Result<WebRxEnergy, JsValue> {
+        let energy = self
+            .driver
+            .read_rx_energy_async()
+            .await
+            .map_err(driver_error)?;
+        Ok(WebRxEnergy { energy })
     }
 
     #[wasm_bindgen(js_name = readQueueDepth8814)]

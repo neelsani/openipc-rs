@@ -33,6 +33,14 @@ impl RealtekDevice {
                     ran: true,
                 })
             }
+            ChipFamily::Rtl8821c => {
+                self.run_iqk_8821c_async(chip, channel <= 14).await?;
+                Ok(IqkReport {
+                    chip,
+                    channel,
+                    ran: true,
+                })
+            }
             ChipFamily::Rtl8822c => {
                 self.run_iqk_8822c_async(chip, ChannelWidth::Mhz20, channel)
                     .await

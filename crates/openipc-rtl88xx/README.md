@@ -17,12 +17,18 @@ lists.
 
 - Descriptor-driven endpoint discovery through `nusb`.
 - Interface claim/reset handling.
+- Topology-keyed cross-process ownership on desktop, with claim-before-reset
+  ordering so a second process cannot reset an adapter already in use.
 - Realtek vendor request `0x05` register reads and writes.
 - Firmware download and MAC/BB/RF setup for supported rtl88xx families.
-- Jaguar2 `rtl8822b` support from devourer: RTL8812BU/RTL8822BU detection,
+- Jaguar2 `rtl8822b` and `rtl8821c` support from devourer: RTL8812BU/RTL8822BU
+  and RTL8811CU/RTL8821CU detection,
   HalMAC firmware download, MAC/USB setup, EFUSE/RFE handling, BB/AGC/RF
   tables, LCK/IQK/DIG, 24-byte RX descriptors, and 48-byte TX descriptors with
   the chip-specific 32-byte checksum span.
+- RTL8821C-specific firmware, one-path PHY/RF tables, power/FIFO/channel
+  sequences, WLAN/BT antenna grant, LOK/TXK/RXK IQK, calibrated per-rate TXAGC,
+  and CW carrier.
 - Jaguar3 `rtl8822c` and `rtl8822e` support from devourer: RTL8812CU/EU and
   RTL8822CU/EU chip-ID dispatch, firmware/table loading, 24-byte RX and
   checksummed 48-byte TX descriptors, 5/10/20/40/80 MHz widths, 40-in-80 TX
@@ -38,10 +44,15 @@ lists.
   gated RXBB write, per-band AGC selection, CCK RX-IQ setup, and force-anapar
   update needed for 2.4 GHz receive.
 - RX bulk transfer reads, including multi-transfer in-flight reads.
+- Persistent bulk-IN submissions with no device-side timeout, avoiding idle-RX
+  timeout churn on macOS while retaining explicit queue cancellation in apps.
 - TX bulk writes, runtime TX-mode/radiotap parsing, descriptors, and TX power
   overrides for adaptive-link feedback frames.
 - Explicit Jaguar1/2/3 SU/MU beamformee and sounding-engine controls, NDPA TX
-  descriptor support, and compressed beamforming report detection.
+  descriptor support, and compressed beamforming report angle decoding.
+- Frame-free FA/CCA/IGI energy snapshots and 12-bucket NHM measurements across
+  all three generations.
+- Modulated hardware continuous-TX controls with state restoration.
 - RX CSI tone masks and NBI notch filters across Jaguar1/2/3, with pure
   center-frequency and subcarrier-index helpers.
 - EFUSE-backed per-rate TXAGC programming, including the devourer 8812A
@@ -52,6 +63,10 @@ lists.
   false-alarm/DIG watchdog helpers.
 - Thermal, false-alarm counter, RTL8814 queue-depth, BB-register, C2H/TX-status,
   and BB-dbgport diagnostics.
+- SDR-validated Jaguar1/2/3 MP single-tone control through
+  `start_cw_tone[_async]` and `stop_cw_tone[_async]`, including state restore.
+- RTL8812 blank TX-power EFUSE rereads and Jaguar3 DACK/IQK retry recovery for
+  transient USB control-read failures.
 
 ## Example
 
@@ -128,6 +143,20 @@ for summary in list_supported_devices()? {
 The id includes the host bus and hub-port chain, with the device address used
 only when no port chain is available. This lets an application keep one driver
 instance and bulk-IN queue per physical radio for receive diversity.
+Desktop open helpers also hold an advisory lock for that topology until the
+`RealtekDevice` is dropped. A competing process receives `DriverError::DeviceBusy`
+before it can claim or reset the adapter.
+
+For RF test equipment, an initialized and tuned adapter can emit a bare carrier:
+
+```rust
+device.start_cw_tone(161, 8)?;
+// Measure the carrier. Do not use CW mode during normal receive.
+device.stop_cw_tone()?;
+```
+
+The async methods expose the same sequence to WASM/WebUSB. Gain is a Realtek
+RF index and is masked to `0..=31`, matching devourer.
 
 ## Driver Options
 
@@ -182,6 +211,8 @@ DEVOURER_RX_CSI_MASK=<range>[/w]  mask an MHz range, for example 5230-5250/7
 DEVOURER_RX_NBI=<mhz>             place one RX narrow-band interference notch
 DEVOURER_TX_TIMEOUT_MS=<n>        set the native bulk-OUT timeout
 DEVOURER_TX_LEGACY_8812_DESC      use the older 8812 descriptor shape on RTL8814 TX
+DEVOURER_CW_TONE                  arm RF-test CW mode during initialization
+DEVOURER_CW_TONE_GAIN=0..31       set the CW RF gain index (default 0)
 ```
 
 ## Native And WebUSB
@@ -238,11 +269,11 @@ logging is intentionally high volume and should be enabled only for short
 hardware investigations.
 
 The crate exposes diagnostics as explicit calls: thermal meter reads, false
-alarm counters, RTL8814 queue depth, BB register/dbgport reads, PHYDM watchdog
-ticks, IQK, RTL8812 power tracking ticks, and Jaguar3 thermal tracking ticks. It
-does not start hidden polling threads. Applications should schedule these from
-their own event loop or worker so RX/TX timing, browser WebUSB constraints, and
-UI responsiveness stay under the application's control.
+alarm counters, frame-free FA/CCA/IGI plus NHM sensing, RTL8814 queue depth, BB
+register/dbgport reads, PHYDM watchdog ticks, IQK, power tracking, and
+modulated continuous TX. It does not start hidden polling threads. Applications
+should schedule these from their own event loop or worker so RX/TX timing,
+browser WebUSB constraints, and UI responsiveness stay under their control.
 
 ## Validation Notes
 
@@ -251,9 +282,10 @@ using devourer, aviateur, and openipc-zig as references. The cold-start path now
 includes EFUSE-backed RFE selection and devourer-style band switching for
 RTL8812/RTL8821/RTL8814, plus the newer devourer TX power, PHYDM, power
 tracking, IQK, C2H, TX-status, RTL8814 firmware controls, and the complete
-`rtl8822e` Jaguar3 path through devourer `bad37a8`. This audit also includes
+`rtl8822e` Jaguar3 path through devourer `4df2a3b`. This audit also includes
 RTL8822B Jaguar2, Jaguar3 40/80 MHz and 40-in-80, RX CSI/NBI masking,
-beamforming self-sounding, concurrent TX/RX behavior, and Jaguar1's unified
-in-flight USB RX queue. Hardware bring-up still
+beamforming self-sounding, concurrent TX/RX behavior, Jaguar1's unified
+in-flight USB RX queue, all-generation CW control, EFUSE/calibration retries,
+infinite RX submissions, and exclusive claim-before-reset ownership. Hardware bring-up still
 needs live adapter testing and register-trace comparison per chip family before
 the support matrix should be treated as final.

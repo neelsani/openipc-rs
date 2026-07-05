@@ -149,7 +149,9 @@ impl RealtekDevice {
         let chip = self.probe_chip_async().await?;
         validate_tx_power(chip.family, power)?;
         match chip.family {
-            ChipFamily::Rtl8822b => self.set_tx_power_flat_8822b_async(power).await,
+            ChipFamily::Rtl8822b | ChipFamily::Rtl8821c => {
+                self.set_tx_power_flat_8822b_async(power).await
+            }
             ChipFamily::Rtl8814 => {
                 self.set_tx_power_override_8814_async(chip, current_channel, power)
                     .await
@@ -172,7 +174,9 @@ impl RealtekDevice {
     ) -> Result<(), DriverError> {
         validate_tx_power(chip.family, power)?;
         match chip.family {
-            ChipFamily::Rtl8822b => self.set_tx_power_flat_8822b_async(power).await,
+            ChipFamily::Rtl8822b | ChipFamily::Rtl8821c => {
+                self.set_tx_power_flat_8822b_async(power).await
+            }
             ChipFamily::Rtl8814 => {
                 self.set_tx_power_override_8814_async(chip, current_channel, power)
                     .await
@@ -202,7 +206,9 @@ impl RealtekDevice {
         }
 
         match chip.family {
-            ChipFamily::Rtl8822b => self.set_tx_power_flat_8822b_async(fallback_power).await,
+            ChipFamily::Rtl8822b | ChipFamily::Rtl8821c => {
+                self.set_tx_power_flat_8822b_async(fallback_power).await
+            }
             ChipFamily::Rtl8814 => {
                 self.set_tx_power_from_efuse_8814_async(chip, current_channel, width, efuse)
                     .await

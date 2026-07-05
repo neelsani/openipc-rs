@@ -291,7 +291,7 @@ pub fn parse_rx_aggregate_with_kind(
         if attrib.pkt_rpt_type == RxPacketType::NormalRx {
             let phy_start = offset + RX_DESC_SIZE;
             let phy_end = phy_start + attrib.drvinfo_sz as usize;
-            parse_phy_status(&mut attrib, &buf[phy_start..phy_end]);
+            parse_phy_status(&mut attrib, &buf[phy_start..phy_end], kind);
         }
 
         let data_end = data_start + attrib.pkt_len as usize;
@@ -370,7 +370,11 @@ const fn bits(word: u32, offset: u8, len: u8) -> u32 {
     }
 }
 
-fn parse_phy_status(attrib: &mut RxPacketAttrib, phy: &[u8]) {
+fn parse_phy_status(attrib: &mut RxPacketAttrib, phy: &[u8], kind: RxDescriptorKind) {
+    if kind != RxDescriptorKind::Jaguar1 {
+        parse_phy_status_jaguar23(attrib, phy, kind);
+        return;
+    }
     if phy.len() < 2 {
         return;
     }
@@ -392,6 +396,46 @@ fn parse_phy_status(attrib: &mut RxPacketAttrib, phy: &[u8]) {
     attrib.evm[1] = phy[14] as i8;
     attrib.evm[2] = phy[19] as i8;
     attrib.evm[3] = phy[20] as i8;
+}
+
+fn parse_phy_status_jaguar23(attrib: &mut RxPacketAttrib, phy: &[u8], kind: RxDescriptorKind) {
+    if phy.len() < 28 {
+        return;
+    }
+    let is_cck = if kind == RxDescriptorKind::Jaguar3 {
+        phy[0] & 0x0f == 0
+    } else {
+        attrib.data_rate <= 3
+    };
+    if is_cck {
+        attrib.rssi[0] = phy[1];
+        return;
+    }
+    attrib.rssi.copy_from_slice(&phy[1..5]);
+    attrib.ldpc = (phy[7] >> 5) & 1;
+    attrib.stbc = (phy[7] >> 6) & 1;
+    let l_rxsc = phy[5] & 0x0f;
+    let ht_rxsc = (phy[5] >> 4) & 0x0f;
+    let rxsc = if (4..=11).contains(&attrib.data_rate) {
+        l_rxsc
+    } else {
+        ht_rxsc
+    };
+    attrib.bw = if rxsc >= 13 {
+        2
+    } else if rxsc >= 9 {
+        1
+    } else {
+        0
+    };
+
+    // Jaguar3 pages other than type 1 reuse these bytes for unrelated data.
+    if kind == RxDescriptorKind::Jaguar2 || phy[0] & 0x0f == 1 {
+        for path in 0..4 {
+            attrib.evm[path] = phy[16 + path] as i8;
+            attrib.snr[path] = phy[24 + path] as i8;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -634,6 +678,49 @@ mod tests {
         assert_eq!(packets.len(), 1);
         assert_eq!(packets[0].attrib.pkt_rpt_type, RxPacketType::C2hPacket);
         assert_eq!(packets[0].data, &[0x61, 0x01, 0x02]);
+    }
+
+    #[test]
+    fn jaguar3_type1_phy_status_uses_jgr3_offsets() {
+        let mut phy = [0u8; 32];
+        phy[0] = 1;
+        phy[1..5].copy_from_slice(&[71, 57, 0, 0]);
+        phy[5] = 13 << 4;
+        phy[7] = (1 << 5) | (1 << 6);
+        phy[16..20].copy_from_slice(&[0xd5, 0x80, 0, 0]);
+        phy[24..28].copy_from_slice(&[43, 25, 0, 0]);
+        let mut aggregate = Vec::new();
+        aggregate.extend_from_slice(&jaguar3_descriptor(3, 4, 0, 13, false));
+        aggregate.extend_from_slice(&phy);
+        aggregate.extend_from_slice(&[1, 2, 3]);
+
+        let packet = parse_rx_aggregate_with_kind(&aggregate, RxDescriptorKind::Jaguar3)
+            .unwrap()
+            .remove(0);
+        assert_eq!(packet.attrib.rssi, [71, 57, 0, 0]);
+        assert_eq!(packet.attrib.evm[0], -43);
+        assert_eq!(packet.attrib.snr[..2], [43, 25]);
+        assert_eq!(packet.attrib.bw, 2);
+        assert_eq!((packet.attrib.ldpc, packet.attrib.stbc), (1, 1));
+    }
+
+    #[test]
+    fn jaguar3_non_type1_page_does_not_decode_evm_or_snr() {
+        let mut phy = [0u8; 32];
+        phy[0] = 2;
+        phy[1] = 64;
+        phy[16] = 0x80;
+        phy[24] = 0x7f;
+        let mut aggregate = Vec::new();
+        aggregate.extend_from_slice(&jaguar3_descriptor(1, 4, 0, 13, false));
+        aggregate.extend_from_slice(&phy);
+        aggregate.push(0xaa);
+        let packet = parse_rx_aggregate_with_kind(&aggregate, RxDescriptorKind::Jaguar3)
+            .unwrap()
+            .remove(0);
+        assert_eq!(packet.attrib.rssi[0], 64);
+        assert_eq!(packet.attrib.evm, [0; 4]);
+        assert_eq!(packet.attrib.snr, [0; 4]);
     }
 
     #[test]

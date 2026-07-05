@@ -6,16 +6,14 @@ The repo contains the shared Rust packet pipeline, Realtek USB WiFi driver,
 adaptive-link feedback, a WASM/WebUSB SDK, and Nebulus, the primary ground
 station for desktop, Android, and the browser.
 
-Native Nebulus builds can also listen for already-recovered H.264/H.265 RTP on
-UDP and send it through the same depacketizer, decoder, audio, metrics, and
-recording path used by USB reception.
+## Nebulus Features
 
-Nebulus supports packet-level receive diversity: several USB radios can feed
-one low-latency WFB/FEC/RTP pipeline while the first valid packet copy wins.
-It also supports portable, data-only preset packs for sharing OSD layouts,
-themes, route templates, telemetry policy, and latency preferences without
-sharing receiver keys or machine-specific configuration. Packs can be installed
-from files, HTTPS URLs, or static GitHub-hosted registries.
+- Native `nusb` and browser WebUSB reception with a shared Rust WFB/FEC/RTP pipeline.
+- Low-latency hardware H.264/H.265 decoding, Opus audio, MP4 recording, and UDP RTP input.
+- Multiple-adapter packet diversity, adaptive-link feedback, channel scanning, and recovery tools.
+- Configurable payload routes, telemetry decoding, and an editable ground-side OSD.
+- Live radio, pipeline, RTP, codec, latency, logging, and support-bundle diagnostics.
+- Profiles and installable preset packs for receiver, OSD, routes, telemetry, and themes.
 
 ## Repository
 

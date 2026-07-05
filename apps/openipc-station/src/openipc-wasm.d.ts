@@ -360,6 +360,8 @@ declare module "@openipc/wasm" {
       firmware8814Chunk: number,
     ): Promise<WebInitReport>;
     shutdownMonitor(): Promise<void>;
+    startCwTone(channel: number, gain: number): Promise<void>;
+    stopCwTone(): Promise<void>;
     readRxTransfer(length: number): Promise<Uint8Array>;
     readRxTransfers(length: number, inFlight: number): Promise<Uint8Array[]>;
     writeTxTransfer(data: Uint8Array): Promise<number>;

@@ -436,7 +436,7 @@ fn tone_mask_family(family: ChipFamily) -> ToneMaskFamily {
     match family {
         ChipFamily::Rtl8812 | ChipFamily::Rtl8821 => ToneMaskFamily::Ac1,
         ChipFamily::Rtl8814 => ToneMaskFamily::Ac2_8814,
-        ChipFamily::Rtl8822b => ToneMaskFamily::Ac2_8822b,
+        ChipFamily::Rtl8822b | ChipFamily::Rtl8821c => ToneMaskFamily::Ac2_8822b,
         ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => ToneMaskFamily::Jaguar3,
     }
 }

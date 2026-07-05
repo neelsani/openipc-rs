@@ -23,7 +23,18 @@ OpenIPC/devourer 19460a6 Jaguar3 promiscuous RX and 8822E TXAGC fix (#160)
 OpenIPC/devourer 1ac94c2 Three-generation beamforming self-sounding (#161)
 OpenIPC/devourer 5db0015 RTL8822E narrowband MAC/BB fixes (#162)
 OpenIPC/devourer 9f887f8 Jaguar3 40/80 MHz and 40-in-80 (#166)
-OpenIPC/devourer bad37a8 Current audited master
+OpenIPC/devourer bad37a8 Previous audited baseline
+OpenIPC/devourer 7a7ab38 Jaguar1/Jaguar2 CW tone and RTL8812 EFUSE retry
+OpenIPC/devourer d31f915 Persistent RX URBs with infinite timeout
+OpenIPC/devourer 35bcdb7 Exclusive lock and claim-before-reset USB ownership
+OpenIPC/devourer 341eb54 Jaguar3 CW tone and DACK/IQK USB retry
+OpenIPC/devourer 0d5cd60 RTL8821C / RTL8811CU Jaguar2 support
+OpenIPC/devourer 300cea9 RTL8821C CW single-tone support
+OpenIPC/devourer d2e45e8 Jaguar3 PHY status and RTL8822E 2.4 GHz RXBB fixes
+OpenIPC/devourer 0a7b9eb Frame-free RX energy and NHM sensing
+OpenIPC/devourer 40f2656 Modulated continuous TX and active-link primitives
+OpenIPC/devourer 7a5123e MCS-headroom probe, thermal overlay, and rendezvous beacon
+OpenIPC/devourer 4df2a3b Adaptive-link sensing and interference-control documentation
 ```
 
 ## Audit Plan
@@ -74,7 +85,7 @@ boundaries are:
 
 ## Executed Checks
 
-### Jaguar2 RTL8812BU / RTL8822BU
+### Jaguar2 RTL8811CU / RTL8821CU / RTL8812BU / RTL8822BU
 
 The Jaguar2 path is separate from both the older 8812A HAL and Jaguar3. The
 Rust driver now mirrors the new devourer implementation:
@@ -95,6 +106,12 @@ Rust driver now mirrors the new devourer implementation:
 
 The importer is intentionally a development tool. Building and publishing the
 crate does not require a devourer checkout.
+
+RTL8821C is represented as its own one-path family, selected by `SYS_CFG2`
+chip ID `0x09` and the `0bda:c811` reference PID. It uses its own firmware,
+power sequence, 512-page TX FIFO layout, PHY/AGC/RF tables, RF-set/channel
+programming, antenna grant, TX-power limits, and CW sequence. It never falls
+through to the two-path RTL8822B tables.
 
 ### Jaguar3 RTL8812CU/EU and RTL8822CU/EU
 
@@ -197,6 +214,36 @@ limited to demo environment variables:
 - Native `DEVOURER_RX_CSI_MASK` and `DEVOURER_RX_NBI` remain accepted through
   `MonitorOptions::from_env`; browser apps use the same controls through typed
   WebUSB methods.
+- `start_cw_tone_async` and `stop_cw_tone_async` implement the SDR-validated
+  Jaguar1, Jaguar2, and Jaguar3 MP carrier recipes. They snapshot RF/BB state,
+  use Jaguar3's HSSI write-only RF0 path, drive RTL8822E RFE pins after arming,
+  and restore normal TX/RX state when stopped. Native drop adds a best-effort
+  safety restore; WebUSB callers explicitly await `stopCwTone` or shutdown.
+  `openipc-web` exports the operations as `startCwTone` and `stopCwTone`.
+- `start_continuous_tx_async`, `retune_async`, and `read_rx_energy_async`
+  provide the three primitives used by devourer's rendezvous test: park a
+  modulated beacon, scan candidate channels without another cold start, and
+  compare frame-free OFDM/CCK energy. This remains app-owned policy rather than
+  a hidden driver loop.
+- `wfb_tx --mcs-sweep` applies a comma-separated rate ladder to newly emitted
+  packets at a configurable dwell interval. It also supports periodic thermal
+  markers, matching the useful behavior of devourer's MCS-headroom probe while
+  retaining the Rust per-packet radiotap TX path.
+
+The July 4 USB hardening is also mirrored. Desktop open helpers take a
+topology-keyed process lock before opening the adapter, claim interface 0 before
+reset, discard nusb's invalidated handle, reopen by physical topology, claim the
+fresh handle, and retain the lock for the device lifetime.
+Android keeps its `UsbManager`/`from_fd` ownership boundary and browsers retain
+WebUSB's user-granted interface ownership. Native and WebUSB bulk-IN queues post
+transfers without a USB timeout; application polling deadlines remain separate
+and can still provide responsive cancellation.
+
+RTL8812 now checks the exact 11-byte TX-power PG window at logical EFUSE offset
+`0x22`, rereads a blank map three times, then uses the existing IC-default
+per-cell fallback. Jaguar3 DACK and IQK each retry up to three total attempts
+with the same 200 ms recovery delay as devourer before reporting a persistent
+failure.
 
 The Rust driver does not need a `StartRxLoop` method because initialization and
 bulk endpoint ownership are already separate. Apps keep an `nusb`/WebUSB

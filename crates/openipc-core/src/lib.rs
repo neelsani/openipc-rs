@@ -44,8 +44,8 @@ pub use ieee80211::{FrameLayout, WifiFrame};
 pub use mock::{MockRtpFrame, MockRtpPipeline};
 pub use pipeline::{MockPayloadPipeline, PayloadPipeline, PayloadPipelineEvent, RecoveredPayload};
 pub use radiotap::{
-    build_stream_radiotap, parse_tx_mode_str, ChannelBandwidth, TxMode, TxModeKind, TxRadioParams,
-    FRAME_TYPE_DATA, FRAME_TYPE_RTS,
+    build_stream_radiotap, parse_tx_mode_str, try_parse_tx_mode_str, ChannelBandwidth, TxMode,
+    TxModeKind, TxRadioParams, FRAME_TYPE_DATA, FRAME_TYPE_RTS,
 };
 pub use realtek::{
     parse_rx_aggregate, parse_rx_aggregate_with_kind, RealtekRxPacket, RxDescriptorKind,

@@ -8,8 +8,10 @@ use nusb::transfer::{Bulk, In, Out};
 use nusb::MaybeFuture;
 use openipc_core::realtek::{parse_rx_aggregate_with_kind, RealtekRxPacket, RxDescriptorKind};
 use std::sync::atomic::AtomicU8;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
+use crate::async_continuous_tx::ContinuousTxState;
+use crate::async_cw::CwToneState;
 use crate::async_efuse::EfuseInfo;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -19,6 +21,8 @@ use crate::types::{
     is_supported_id, ChipInfo, DriverOptions, InitReport, MonitorOptions, RadioConfig,
 };
 use crate::types::{supported_family_hint, ChipFamily, DriverError};
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+use crate::usb_lock::UsbDeviceLock;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::usb_recovery::{
     retry_delay_ms, should_retry_transfer_error, transfer_error, BULK_RETRY_ATTEMPTS,
@@ -50,7 +54,12 @@ pub struct RealtekDevice {
     pub(crate) detected_family: OnceLock<ChipFamily>,
     pub(crate) efuse_logical_map: OnceLock<[u8; 512]>,
     pub(crate) efuse_info: OnceLock<EfuseInfo>,
+    pub(crate) cck_filter_8821c: OnceLock<[u32; 3]>,
     pub(crate) h2c_box: AtomicU8,
+    pub(crate) cw_tone: Mutex<CwToneState>,
+    pub(crate) continuous_tx: Mutex<ContinuousTxState>,
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+    pub(crate) _usb_lock: Option<UsbDeviceLock>,
 }
 
 impl RealtekDevice {
@@ -104,15 +113,7 @@ impl RealtekDevice {
             .find(|dev| device_matches_options(dev.vendor_id(), dev.product_id(), options))
             .ok_or(DriverError::DeviceNotFound)?;
 
-        let vendor_id = info.vendor_id();
-        let product_id = info.product_id();
-        let device = info.open().wait().map_err(|err| {
-            DriverError::Nusb(format!(
-                "open {vendor_id:04x}:{product_id:04x} failed: {err}"
-            ))
-        })?;
-
-        Self::from_nusb_device(device, options)
+        Self::open_device_info(info, options)
     }
 
     #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
@@ -130,11 +131,7 @@ impl RealtekDevice {
                     && device_matches_options(device.vendor_id(), device.product_id(), options)
             })
             .ok_or(DriverError::DeviceNotFound)?;
-        let device = info
-            .open()
-            .wait()
-            .map_err(|err| DriverError::Nusb(format!("open adapter {stable_id} failed: {err}")))?;
-        Self::from_nusb_device(device, options)
+        Self::open_device_info(info, options)
     }
 
     #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
@@ -158,11 +155,8 @@ impl RealtekDevice {
         for info in infos {
             let vendor_id = info.vendor_id();
             let product_id = info.product_id();
-            match info.open().wait() {
-                Ok(device) => match Self::from_nusb_device(device, options) {
-                    Ok(device) => devices.push(device),
-                    Err(err) => errors.push(format!("{vendor_id:04x}:{product_id:04x}: {err}")),
-                },
+            match Self::open_device_info(info, options) {
+                Ok(device) => devices.push(device),
                 Err(err) => errors.push(format!("{vendor_id:04x}:{product_id:04x}: {err}")),
             }
         }
@@ -210,18 +204,105 @@ impl RealtekDevice {
                 "unsupported or unexpected USB device {vendor_id:04x}:{product_id:04x}"
             )));
         }
-
         if !options.skip_reset {
-            device
-                .reset()
-                .wait()
-                .map_err(|err| DriverError::Nusb(format!("device reset failed: {err}")))?;
+            // nusb invalidates a Device after reset. An externally supplied
+            // handle cannot be rediscovered safely here (notably Android's
+            // UsbManager fd), so reset ownership remains with its caller.
+            log::warn!(target: "openipc_rtl88xx::usb", "skip_reset=false ignored for externally opened nusb device; use open_first/open_by_id for reset and re-enumeration");
         }
-
         let interface = device
             .detach_and_claim_interface(0)
             .wait()
             .map_err(|err| DriverError::Nusb(format!("claim interface 0 failed: {err}")))?;
+        #[cfg(target_os = "android")]
+        return Self::from_claimed_device(device, interface, options);
+        #[cfg(not(target_os = "android"))]
+        Self::from_claimed_device(device, interface, options, None)
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+    fn open_device_info(
+        info: nusb::DeviceInfo,
+        options: DriverOptions,
+    ) -> Result<Self, DriverError> {
+        let vendor_id = info.vendor_id();
+        let product_id = info.product_id();
+        let stable_id = crate::types::nusb_device_id(&info);
+        let bus_id = info.bus_id().to_owned();
+        let port_chain = info.port_chain().to_vec();
+        let usb_lock = UsbDeviceLock::acquire(&info)?;
+
+        let (mut device, mut interface) = Self::open_and_claim(&info)?;
+        let reset_requested = !options.skip_reset && !cfg!(target_os = "windows");
+        if !options.skip_reset && cfg!(target_os = "windows") {
+            log::debug!(target: "openipc_rtl88xx::usb", "USB reset skipped because nusb does not support device reset on Windows");
+        }
+        if reset_requested {
+            device
+                .reset()
+                .wait()
+                .map_err(|err| DriverError::Nusb(format!("device reset failed: {err}")))?;
+            drop(interface);
+            drop(device);
+
+            let mut reopened = None;
+            for _ in 0..30 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let Ok(devices) = nusb::list_devices().wait() else {
+                    continue;
+                };
+                let candidate = devices.into_iter().find(|candidate| {
+                    if !port_chain.is_empty() {
+                        candidate.bus_id() == bus_id && candidate.port_chain() == port_chain
+                    } else {
+                        candidate.bus_id() == bus_id
+                            && candidate.vendor_id() == vendor_id
+                            && candidate.product_id() == product_id
+                    }
+                });
+                if let Some(candidate) = candidate {
+                    reopened = Some(Self::open_and_claim(&candidate)?);
+                    break;
+                }
+            }
+            (device, interface) = reopened.ok_or_else(|| {
+                DriverError::Nusb(format!(
+                    "USB adapter {stable_id} did not re-enumerate after reset"
+                ))
+            })?;
+        }
+
+        Self::from_claimed_device(device, interface, options, Some(usb_lock))
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+    fn open_and_claim(
+        info: &nusb::DeviceInfo,
+    ) -> Result<(nusb::Device, nusb::Interface), DriverError> {
+        let id = crate::types::nusb_device_id(info);
+        let device = info
+            .open()
+            .wait()
+            .map_err(|err| DriverError::Nusb(format!("open adapter {id} failed: {err}")))?;
+        let interface = device
+            .detach_and_claim_interface(0)
+            .wait()
+            .map_err(|err| DriverError::Nusb(format!("claim interface 0 failed: {err}")))?;
+        Ok((device, interface))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn from_claimed_device(
+        device: nusb::Device,
+        interface: nusb::Interface,
+        options: DriverOptions,
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))] usb_lock: Option<
+            UsbDeviceLock,
+        >,
+    ) -> Result<Self, DriverError> {
+        let descriptor = device.device_descriptor();
+        let vendor_id = descriptor.vendor_id();
+        let product_id = descriptor.product_id();
         let (bulk_in_ep, bulk_out_ep, bulk_out_ep_count) =
             discover_bulk_endpoints_with_override(&interface, options.tx_endpoint_override)?;
 
@@ -236,7 +317,12 @@ impl RealtekDevice {
             detected_family: OnceLock::new(),
             efuse_logical_map: OnceLock::new(),
             efuse_info: OnceLock::new(),
+            cck_filter_8821c: OnceLock::new(),
             h2c_box: AtomicU8::new(0),
+            cw_tone: Mutex::new(CwToneState::default()),
+            continuous_tx: Mutex::new(ContinuousTxState::default()),
+            #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+            _usb_lock: usb_lock,
         })
     }
 
@@ -285,6 +371,21 @@ impl RealtekDevice {
     /// Best-effort monitor-mode shutdown for chips that need explicit deinit.
     pub fn shutdown_monitor(&self) -> Result<(), DriverError> {
         block_on_ready(self.shutdown_monitor_async())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Radiate an unmodulated carrier at the currently tuned channel center.
+    ///
+    /// `gain` uses the Realtek RF gain-index range; values are masked to 0..31
+    /// to match devourer's MP single-tone interface.
+    pub fn start_cw_tone(&self, channel: u8, gain: u8) -> Result<(), DriverError> {
+        block_on_ready(self.start_cw_tone_async(channel, gain))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Stop an active CW carrier and restore the snapshotted RF/BB state.
+    pub fn stop_cw_tone(&self) -> Result<(), DriverError> {
+        block_on_ready(self.stop_cw_tone_async())
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -537,7 +638,7 @@ impl RealtekDevice {
             .copied()
             .or_else(|| supported_family_hint(self.vendor_id, self.product_id))
         {
-            Some(ChipFamily::Rtl8822b) => RxDescriptorKind::Jaguar2,
+            Some(ChipFamily::Rtl8822b | ChipFamily::Rtl8821c) => RxDescriptorKind::Jaguar2,
             Some(family) if family.is_jaguar3() => RxDescriptorKind::Jaguar3,
             _ => RxDescriptorKind::Jaguar1,
         }
@@ -621,6 +722,22 @@ impl RealtekDevice {
     /// Write a 32-bit little-endian register value.
     pub fn write_u32(&self, register: u16, value: u32) -> Result<(), DriverError> {
         self.write_register(register, &value.to_le_bytes())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for RealtekDevice {
+    fn drop(&mut self) {
+        let tone_active = self
+            .cw_tone
+            .get_mut()
+            .map(|state| state.is_active())
+            .unwrap_or(false);
+        if tone_active {
+            if let Err(err) = block_on_ready(self.stop_cw_tone_async()) {
+                log::warn!(target: "openipc_rtl88xx::cw", "failed to restore CW tone state while dropping adapter: {err}");
+            }
+        }
     }
 }
 

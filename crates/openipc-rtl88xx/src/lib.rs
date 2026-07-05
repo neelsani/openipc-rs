@@ -5,6 +5,8 @@
 //! monitor-mode RX setup, and bulk-IN receive transfers. Packet parsing and the
 //! OpenIPC/WFB/RTP pipeline live in `openipc-core`.
 
+mod async_continuous_tx;
+mod async_cw;
 mod async_diagnostics;
 mod async_driver;
 mod async_efuse;
@@ -13,6 +15,7 @@ mod async_firmware_8814;
 mod async_iqk;
 mod async_iqk_8812;
 mod async_jaguar2;
+mod async_jaguar2_8821c_iqk;
 mod async_jaguar2_iqk;
 mod async_jaguar3;
 mod async_jaguar3_8822e;
@@ -21,6 +24,7 @@ mod async_mac;
 mod async_phydm;
 mod async_power_tracking;
 mod async_radio;
+mod async_sensing;
 mod async_tables;
 mod async_tx_power;
 mod beamforming;
@@ -35,6 +39,8 @@ mod tone_mask;
 mod tx;
 mod tx_power_defaults;
 mod types;
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+mod usb_lock;
 mod usb_recovery;
 mod usb_transport;
 
@@ -43,7 +49,11 @@ pub use async_iqk::IqkReport;
 pub use async_jaguar3_iqk::{Jaguar3PowerTrackingReport, Jaguar3PowerTrackingState};
 pub use async_phydm::{FalseAlarmCounters, PhydmDigState, PhydmWatchdogReport};
 pub use async_power_tracking::{PowerTrackingReport, PowerTrackingState};
-pub use beamforming::{parse_beamforming_report, BeamformingFeedback, BeamformingReport};
+pub use async_sensing::RxEnergy;
+pub use beamforming::{
+    decode_beamforming_angles, parse_beamforming_report, BeamformingAngles, BeamformingFeedback,
+    BeamformingReport,
+};
 pub use device::RealtekDevice;
 pub use tone_mask::{center_frequency_mhz, enumerate_mask_tones, CsiMaskSpec};
 pub use tx::{
@@ -109,6 +119,9 @@ mod tests {
         }
         let one_path = ChipInfo::from_probe(0x0bda, 0xb812, 0, 0x0a);
         assert_eq!(one_path.rf_type, RfType::OneTOneR);
+        let rtl8821c = ChipInfo::from_probe(0x0bda, 0xc811, 0, 0x09);
+        assert_eq!(rtl8821c.family, ChipFamily::Rtl8821c);
+        assert_eq!(rtl8821c.rf_type, RfType::OneTOneR);
     }
 
     #[test]
@@ -148,5 +161,12 @@ mod tests {
         assert!(rtl_data::RTL8822B_RADIO_B.len().is_multiple_of(2));
         assert!(!rtl_data::RTL8822B_TX_POWER_LIMITS_WW.is_empty());
         assert!(!rtl_data::RTL8822B_TX_POWER_LIMITS_TYPE3_WW.is_empty());
+    }
+
+    #[test]
+    fn generated_rtl8821c_reference_payload_has_vendor_shapes() {
+        assert!(rtl_data::RTL8821C_FW_NIC.len() > 100_000);
+        assert!(rtl_data::RTL8821C_PHY_REG.len() > 1_000);
+        assert!(rtl_data::RTL8821C_RADIO_A.len() > 500);
     }
 }

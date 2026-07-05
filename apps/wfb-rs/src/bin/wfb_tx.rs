@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use nusb::transfer::{Bulk, In, Out};
 use openipc_core::{
     ieee80211::build_wfb_header_with_frame_type, radiotap::build_radiotap_header,
-    wfb::WFB_PACKET_FEC_ONLY, ChannelId, TxMode, TxRadioParams, WfbTransmitter, WfbTxKeypair,
-    FRAME_TYPE_DATA,
+    try_parse_tx_mode_str, wfb::WFB_PACKET_FEC_ONLY, ChannelId, TxMode, TxRadioParams,
+    WfbTransmitter, WfbTxKeypair, FRAME_TYPE_DATA,
 };
 use openipc_rtl88xx::{ChipFamily, Jaguar3PowerTrackingState, RealtekDevice, RealtekTxOptions};
 
@@ -55,6 +55,10 @@ struct TxConfig {
     mirror: bool,
     max_packets: Option<u64>,
     tx_power: Option<u8>,
+    mcs_sweep: Vec<(String, TxMode)>,
+    mcs_step_interval: Duration,
+    thermal_poll_interval: Option<Duration>,
+    thermal_poll_configured: bool,
     radio_device: RadioDeviceConfig,
     output_names: Vec<String>,
 }
@@ -89,6 +93,10 @@ impl TxConfig {
             mirror: false,
             max_packets: None,
             tx_power: None,
+            mcs_sweep: Vec::new(),
+            mcs_step_interval: Duration::from_millis(2_000),
+            thermal_poll_interval: None,
+            thermal_poll_configured: false,
             radio_device: RadioDeviceConfig::default(),
             output_names: Vec::new(),
         };
@@ -167,6 +175,22 @@ impl TxConfig {
                 "--tx-power" => {
                     config.tx_power = Some(parse_u8(&next_arg(&mut args, "--tx-power")?)?)
                 }
+                "--mcs-sweep" => {
+                    config.mcs_sweep = parse_mcs_sweep(&next_arg(&mut args, "--mcs-sweep")?)?;
+                }
+                "--mcs-step-ms" => {
+                    let millis = parse_u64(&next_arg(&mut args, "--mcs-step-ms")?)?;
+                    if millis == 0 {
+                        return Err("--mcs-step-ms must be greater than zero".into());
+                    }
+                    config.mcs_step_interval = Duration::from_millis(millis);
+                }
+                "--thermal-poll-ms" => {
+                    let millis = parse_u64(&next_arg(&mut args, "--thermal-poll-ms")?)?;
+                    config.thermal_poll_interval =
+                        (millis > 0).then_some(Duration::from_millis(millis));
+                    config.thermal_poll_configured = true;
+                }
                 "-R" | "-s" | "-P" => {
                     let _ = next_arg(&mut args, &arg)?;
                 }
@@ -186,8 +210,28 @@ impl TxConfig {
         if !config.fec.valid() {
             return Err("invalid FEC settings; require 1 <= k <= n <= 255".into());
         }
+        if !config.mcs_sweep.is_empty() && !config.thermal_poll_configured {
+            config.thermal_poll_interval = Some(Duration::from_secs(1));
+        }
         Ok(config)
     }
+}
+
+fn parse_mcs_sweep(spec: &str) -> CliResult<Vec<(String, TxMode)>> {
+    let mut modes = Vec::new();
+    for raw in spec.split(',') {
+        let label = raw.trim();
+        if label.is_empty() {
+            continue;
+        }
+        let mode = try_parse_tx_mode_str(label)
+            .ok_or_else(|| format!("invalid TX mode in --mcs-sweep: {label}"))?;
+        modes.push((label.to_owned(), mode));
+    }
+    if modes.is_empty() {
+        return Err("--mcs-sweep requires at least one TX mode".into());
+    }
+    Ok(modes)
 }
 
 #[derive(Default)]
@@ -214,6 +258,11 @@ struct TxState {
     transmitter: WfbTransmitter,
     source_fragments_in_block: u8,
     sequence_control: u16,
+    mcs_sweep: Vec<(String, TxMode)>,
+    mcs_step_interval: Duration,
+    mcs_sweep_index: usize,
+    next_mcs_step: Option<Duration>,
+    swept_tx_mode: Option<TxMode>,
 }
 
 impl TxState {
@@ -236,6 +285,11 @@ impl TxState {
             transmitter,
             source_fragments_in_block: 0,
             sequence_control: 0,
+            mcs_sweep: config.mcs_sweep.clone(),
+            mcs_step_interval: config.mcs_step_interval,
+            mcs_sweep_index: 0,
+            next_mcs_step: None,
+            swept_tx_mode: None,
         })
     }
 
@@ -256,6 +310,9 @@ impl TxState {
     }
 
     fn tx_mode(&self) -> TxMode {
+        if let Some(mode) = self.swept_tx_mode {
+            return mode;
+        }
         parse_tx_mode_flags(
             u16::from(self.radio_settings.bandwidth),
             self.radio_settings.short_gi,
@@ -265,6 +322,23 @@ impl TxState {
             self.radio_settings.vht_nss,
             self.radio_settings.vht_mode,
         )
+    }
+
+    fn tick_mcs_sweep(&mut self, elapsed: Duration) -> Option<(String, TxMode)> {
+        if self.mcs_sweep.is_empty()
+            || self
+                .next_mcs_step
+                .is_some_and(|deadline| elapsed < deadline)
+        {
+            return None;
+        }
+        if self.next_mcs_step.is_some() {
+            self.mcs_sweep_index = (self.mcs_sweep_index + 1) % self.mcs_sweep.len();
+        }
+        let (label, mode) = &self.mcs_sweep[self.mcs_sweep_index];
+        self.swept_tx_mode = Some(*mode);
+        self.next_mcs_step = elapsed.checked_add(self.mcs_step_interval);
+        Some((label.clone(), *mode))
     }
 
     fn has_open_fec_block(&self) -> bool {
@@ -320,6 +394,7 @@ struct UsbOutput {
     ep_out: nusb::Endpoint<Bulk, Out>,
     tx_options: RealtekTxOptions,
     last_jaguar3_tick: Instant,
+    last_thermal_poll: Instant,
     jaguar3_power_tracking: Jaguar3PowerTrackingState,
 }
 
@@ -342,7 +417,7 @@ impl TxOutput {
         }
     }
 
-    fn service(&mut self) {
+    fn service(&mut self, thermal_poll_interval: Option<Duration>) {
         let Self::Usb(outputs) = self else {
             return;
         };
@@ -364,6 +439,21 @@ impl TxOutput {
                     .tick_jaguar3_power_tracking(&mut output.jaguar3_power_tracking)
                 {
                     eprintln!("Jaguar3 thermal tracking failed: {error}");
+                }
+            }
+            if let Some(interval) = thermal_poll_interval {
+                if output.last_thermal_poll.elapsed() >= interval {
+                    output.last_thermal_poll = Instant::now();
+                    match output.device.read_thermal_status() {
+                        Ok(status) => eprintln!(
+                            "<wfb-rs-thermal>raw={} baseline={} delta={} valid={}",
+                            status.raw,
+                            status.baseline,
+                            status.delta,
+                            u8::from(status.valid)
+                        ),
+                        Err(error) => eprintln!("thermal polling failed: {error}"),
+                    }
                 }
             }
         }
@@ -439,6 +529,7 @@ fn open_tx_output(config: &TxConfig) -> CliResult<TxOutput> {
             ep_out,
             tx_options,
             last_jaguar3_tick: Instant::now(),
+            last_thermal_poll: Instant::now(),
             jaguar3_power_tracking: Jaguar3PowerTrackingState::default(),
         });
     }
@@ -470,6 +561,7 @@ fn run_tx(config: TxConfig) -> CliResult<()> {
             .checked_add(timeout)
             .unwrap_or_else(Instant::now)
     });
+    let started_at = Instant::now();
 
     eprintln!(
         "wfb_tx: listen=0.0.0.0:{} channel=0x{:08x} key={} fec={}/{} control={:?} outputs={} mirror={} debug={:?}",
@@ -486,7 +578,14 @@ fn run_tx(config: TxConfig) -> CliResult<()> {
 
     let mut buf = vec![0u8; 2048];
     loop {
-        output.service();
+        output.service(config.thermal_poll_interval);
+        if let Some((label, _mode)) = state.tick_mcs_sweep(started_at.elapsed()) {
+            eprintln!(
+                "<wfb-rs-mcs-sweep>mcs={} t_ms={}",
+                label,
+                started_at.elapsed().as_millis()
+            );
+        }
         if let Some(max) = config.max_packets {
             if stats.input_packets >= max {
                 break;
@@ -844,6 +943,9 @@ Common options:
   -E <usec>                   delay between injection retries, default 5000
   -m                          mirror each packet to every opened output
   --tx-power <0..127>         override TXAGC index (max 63 on Jaguar1)
+  --mcs-sweep <modes>         cycle comma-separated modes, e.g. MCS0,MCS2,MCS4
+  --mcs-step-ms <ms>          MCS sweep dwell time, default 2000
+  --thermal-poll-ms <ms>      emit thermal samples; 0 disables polling
 
 Radio mode:
   -B <20|40|80> -G short|long -S <stbc> -L <0|1> -M <mcs> -N <nss> -V
@@ -852,4 +954,28 @@ Radio device options:
   {}"#,
         common::usage_common_radio()
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openipc_core::TxModeKind;
+
+    #[test]
+    fn parses_devourer_style_mcs_sweep() {
+        let modes = parse_mcs_sweep("MCS0, MCS4/SGI, VHT1SS_MCS7/40").unwrap();
+        assert_eq!(modes.len(), 3);
+        assert_eq!(modes[0].0, "MCS0");
+        assert_eq!(modes[0].1.kind, TxModeKind::Ht);
+        assert!(modes[1].1.short_gi);
+        assert_eq!(modes[2].1.kind, TxModeKind::Vht);
+        assert_eq!(modes[2].1.vht_mcs, 7);
+    }
+
+    #[test]
+    fn rejects_invalid_mcs_sweep_entries() {
+        assert!(parse_mcs_sweep("").is_err());
+        assert!(parse_mcs_sweep("MCS0,MCS99").is_err());
+        assert!(parse_mcs_sweep("MCS0/FAST").is_err());
+    }
 }

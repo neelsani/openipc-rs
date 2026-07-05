@@ -70,6 +70,27 @@ The default `fec_change` thresholds match PixelPilot:
 The transmitter-side adaptive-link process decides what those values mean for
 bitrate, GOP, FEC denominator, and keyframe requests.
 
+## Active Link Characterization
+
+The feedback loop above is the production protocol. Active probing is a
+separate commissioning and diagnostics tool that can measure operating
+headroom before choosing a policy:
+
+- `wfb_tx --mcs-sweep MCS0,MCS2,MCS4,...` changes the per-packet radiotap rate
+  at a fixed dwell interval. A receiver can align delivery and SNR samples with
+  the emitted dwell markers and select the highest rate that clears its target.
+- `--thermal-poll-ms` records transmitter thermal drift during the sweep. It is
+  a safety input, not another link-quality score.
+- `RealtekDevice::start_continuous_tx[_async]` supplies a full-channel stimulus
+  for spectral and thermal characterization. It is intentionally not used as a
+  decodable link probe and should not be left running continuously.
+- `retune[_async]` plus `read_rx_energy[_async]` lets an application scan a
+  channel list for a continuous rendezvous beacon after feedback is lost.
+
+These are explicit building blocks. Neither the driver nor `openipc-core`
+silently changes channels, rates, receive chains, notches, or power behind an
+application's back.
+
 ## What Adaptive Link Does Not Mean
 
 Adaptive link is not the same thing as "the ground station automatically picks

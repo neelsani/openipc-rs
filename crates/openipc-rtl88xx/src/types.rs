@@ -14,6 +14,12 @@ use crate::regs::{CHIP_VER_RTL_MASK, CHIP_VER_RTL_SHIFT, RF_TYPE_ID};
 pub const SUPPORTED_DEVICES: &[SupportedDevice] = &[
     SupportedDevice::new(
         0x0bda,
+        0xc811,
+        ChipFamily::Rtl8821c,
+        "RTL8821CU / RTL8811CU",
+    ),
+    SupportedDevice::new(
+        0x0bda,
         0x8812,
         ChipFamily::Rtl8812,
         "RTL8812AU / RTL8811AU / RTL8812EU reference PID",
@@ -184,6 +190,8 @@ pub enum ChipFamily {
     Rtl8821,
     /// RTL8812BU / RTL8822BU Jaguar2 class.
     Rtl8822b,
+    /// RTL8821CU / RTL8811CU one-path Jaguar2 class.
+    Rtl8821c,
     /// RTL8812CU / RTL8822CU Jaguar3 class.
     Rtl8822c,
     /// RTL8812EU / RTL8822EU Jaguar3 class.
@@ -198,6 +206,7 @@ impl ChipFamily {
             Self::Rtl8814 => "RTL8814",
             Self::Rtl8821 => "RTL8821",
             Self::Rtl8822b => "RTL8812BU/RTL8822BU",
+            Self::Rtl8821c => "RTL8821CU/RTL8811CU",
             Self::Rtl8822c => "RTL8812CU/RTL8822CU",
             Self::Rtl8822e => "RTL8812EU/RTL8822EU",
         }
@@ -215,13 +224,16 @@ impl ChipFamily {
 
     /// Return true for the RTL8822B Jaguar2 generation.
     pub const fn is_jaguar2(self) -> bool {
-        matches!(self, Self::Rtl8822b)
+        matches!(self, Self::Rtl8822b | Self::Rtl8821c)
     }
 
     /// Return true for chips using a 48-byte checksummed HalMAC TX descriptor
     /// and 24-byte RX descriptor.
     pub const fn uses_halmac_descriptor(self) -> bool {
-        matches!(self, Self::Rtl8822b | Self::Rtl8822c | Self::Rtl8822e)
+        matches!(
+            self,
+            Self::Rtl8822b | Self::Rtl8821c | Self::Rtl8822c | Self::Rtl8822e
+        )
     }
 }
 
@@ -259,7 +271,9 @@ impl ChipInfo {
         // SYS_CFG2 is authoritative for Jaguar3. RTL8812EU can use the same
         // USB PID as RTL8812AU, so PID-only dispatch silently selects the wrong
         // firmware, PHY tables, and RX descriptor layout.
-        let family = if matches!(sys_cfg2_chip_id, 0x0a | 0x50) {
+        let family = if sys_cfg2_chip_id == 0x09 {
+            ChipFamily::Rtl8821c
+        } else if matches!(sys_cfg2_chip_id, 0x0a | 0x50) {
             ChipFamily::Rtl8822b
         } else if sys_cfg2_chip_id == 0x17 {
             ChipFamily::Rtl8822e
@@ -281,6 +295,7 @@ impl ChipInfo {
         let rf_type = match family {
             ChipFamily::Rtl8814 => RfType::FourTFourR,
             ChipFamily::Rtl8821 => RfType::OneTOneR,
+            ChipFamily::Rtl8821c => RfType::OneTOneR,
             ChipFamily::Rtl8822b => {
                 if sys_cfg & RF_TYPE_ID != 0 {
                     RfType::TwoTTwoR
@@ -302,6 +317,7 @@ impl ChipInfo {
             family,
             ChipFamily::Rtl8814
                 | ChipFamily::Rtl8822b
+                | ChipFamily::Rtl8821c
                 | ChipFamily::Rtl8822c
                 | ChipFamily::Rtl8822e
         ) {
@@ -473,6 +489,11 @@ pub struct MonitorOptions {
     pub csi_mask: Option<CsiMaskSpec>,
     /// Optional RX narrow-band notch frequency in kHz.
     pub nbi_frequency_khz: Option<u32>,
+    /// Optional MP single-tone RF gain index (`0..=31`).
+    ///
+    /// This is an RF test mode. When set, initialization arms a bare carrier
+    /// at the configured channel center instead of entering normal runtime.
+    pub cw_tone_gain: Option<u8>,
 }
 
 impl Default for MonitorOptions {
@@ -489,6 +510,7 @@ impl Default for MonitorOptions {
             rfe_type_override: None,
             csi_mask: None,
             nbi_frequency_khz: None,
+            cw_tone_gain: None,
         }
     }
 }
@@ -521,6 +543,8 @@ impl MonitorOptions {
                     .and_then(|value| CsiMaskSpec::parse_mhz(&value)),
                 nbi_frequency_khz: read_env_u32("DEVOURER_RX_NBI")
                     .and_then(|frequency| frequency.checked_mul(1000)),
+                cw_tone_gain: std::env::var_os("DEVOURER_CW_TONE")
+                    .map(|_| read_env_u8("DEVOURER_CW_TONE_GAIN").unwrap_or(0) & 0x1f),
                 ..Self::default()
             }
         }
@@ -548,6 +572,7 @@ impl MonitorOptions {
             ChipFamily::Rtl8814 => self.force_iqk,
             ChipFamily::Rtl8821 => false,
             ChipFamily::Rtl8822b => true,
+            ChipFamily::Rtl8821c => true,
             ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => true,
         }
     }
@@ -578,8 +603,12 @@ pub struct InitReport {
 pub enum DriverError {
     /// Error from nusb or platform USB access.
     Nusb(String),
+    /// Internal state lock was poisoned by a prior panic.
+    DriverStatePoisoned,
     /// No matching supported adapter was found.
     DeviceNotFound,
+    /// Another process owns the selected physical adapter.
+    DeviceBusy(String),
     /// Required endpoint was missing.
     EndpointNotFound(&'static str),
     /// Requested bulk-OUT endpoint override was not present.
@@ -617,7 +646,9 @@ impl fmt::Display for DriverError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Nusb(message) => write!(f, "{message}"),
+            Self::DriverStatePoisoned => write!(f, "Realtek driver state lock was poisoned"),
             Self::DeviceNotFound => write!(f, "no supported Realtek rtl88xx adapter found"),
+            Self::DeviceBusy(device) => write!(f, "USB adapter {device} is already in use"),
             Self::EndpointNotFound(kind) => write!(f, "no {kind} endpoint found on interface 0"),
             Self::EndpointOverrideNotFound(endpoint) => {
                 write!(

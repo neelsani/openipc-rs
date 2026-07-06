@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.32 - 2026-07-06
+
+### Changes
+- Chore: remove legacy OpenIPC Station (4f3d32a)
+
+### Features
+- Feat: integrate latest Devourer driver capabilities (6b921d4)
+- Feat: harden receiver pipeline and VTX control (cbd307d)
+
+
 ## 0.1.31 - 2026-07-04
 
 

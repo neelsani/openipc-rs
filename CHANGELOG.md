@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.33 - 2026-07-06
+
+### Changes
+- Improve RTP compatibility and damaged-frame recovery (6105948)
+
+
 ## 0.1.32 - 2026-07-06
 
 ### Changes

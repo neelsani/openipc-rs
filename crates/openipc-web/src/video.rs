@@ -1,6 +1,7 @@
 use js_sys::{Object, Reflect, Uint8Array};
 use openipc_core::{
-    Codec, CodecConfigState, DepacketizedFrame, RtpDepacketizerStatus, RtpReorderStatus,
+    Codec, CodecConfigState, DepacketizedFrame, FrameDamage, RtpDepacketizerStatus,
+    RtpReorderStatus,
 };
 use wasm_bindgen::prelude::*;
 
@@ -53,6 +54,20 @@ pub(crate) fn video_frame_object(frame: DepacketizedFrame) -> Result<Object, JsV
         &JsValue::from_str("decoderConfigComplete"),
         &JsValue::from_bool(frame.codec_config.is_complete_for(frame.codec)),
     )?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("damaged"),
+        &JsValue::from_bool(frame.damaged),
+    )?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("damageKind"),
+        &JsValue::from_str(match frame.damage {
+            FrameDamage::None => "none",
+            FrameDamage::MissingSlice => "missing-slice",
+            FrameDamage::TruncatedFragment => "truncated-fragment",
+        }),
+    )?;
     Reflect::set(&object, &JsValue::from_str("codecConfig"), &codec_config)?;
     Ok(object)
 }
@@ -80,6 +95,16 @@ pub(crate) fn rtp_status_object(
         &object,
         "fragmentSequenceGaps",
         status.fragment_sequence_gaps,
+    )?;
+    set_u64(
+        &object,
+        "damagedFramesForwarded",
+        status.damaged_frames_forwarded,
+    )?;
+    set_u64(
+        &object,
+        "damagedFramesDropped",
+        status.damaged_frames_dropped,
     )?;
     set_u64(&object, "fragmentOverflows", status.fragment_overflows)?;
     set_u64(&object, "unsupportedPayloads", status.unsupported_payloads)?;

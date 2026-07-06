@@ -543,6 +543,8 @@ fn merge_rtp_snapshot(snapshot: &mut DecodeWorkerSnapshot, message: &JsValue) {
         keyframes_with_prepended_config: u64_field(message, "keyframesWithPrependedConfig"),
         parameter_sets_prepended: u64_field(message, "parameterSetsPrepended"),
         fragment_sequence_gaps: u64_field(message, "fragmentSequenceGaps"),
+        damaged_frames_forwarded: u64_field(message, "damagedFramesForwarded"),
+        damaged_frames_dropped: u64_field(message, "damagedFramesDropped"),
         fragment_overflows: u64_field(message, "fragmentOverflows"),
         unsupported_payloads: u64_field(message, "unsupportedPayloads"),
         malformed_packets: u64_field(message, "malformedPackets"),

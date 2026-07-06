@@ -158,6 +158,12 @@ pub(crate) fn rtp(app: &NebulusApp, ui: &mut egui::Ui) {
             status.parameter_sets_prepended,
         );
         row(ui, "Fragment gaps", status.fragment_sequence_gaps);
+        row(
+            ui,
+            "Damaged frames forwarded",
+            status.damaged_frames_forwarded,
+        );
+        row(ui, "Damaged frames dropped", status.damaged_frames_dropped);
         row(ui, "Fragment overflows", status.fragment_overflows);
         row(ui, "Malformed", status.malformed_packets);
         row(ui, "Unsupported payloads", status.unsupported_payloads);

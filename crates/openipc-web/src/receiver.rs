@@ -1,8 +1,8 @@
 use js_sys::{Array, Object, Reflect, Uint8Array};
 use openipc_core::realtek::{parse_rx_aggregate_with_kind, RxDescriptorKind};
 use openipc_core::{
-    ChannelId, FrameLayout, PayloadRouteId, RadioPort, ReceiverBatch, ReceiverBatchOptions,
-    ReceiverRuntime, RtpPayloadTap, WfbKeypair,
+    ChannelId, DamagedFramePolicy, FrameLayout, PayloadRouteId, RadioPort, ReceiverBatch,
+    ReceiverBatchOptions, ReceiverRuntime, RtpPayloadTap, WfbKeypair,
 };
 use wasm_bindgen::prelude::*;
 
@@ -24,6 +24,16 @@ pub struct OpenIpcReceiver {
 }
 
 impl OpenIpcReceiver {
+    fn from_runtime(mut runtime: ReceiverRuntime) -> Self {
+        runtime
+            .rtp_mut()
+            .set_damaged_frame_policy(DamagedFramePolicy::Forward);
+        Self {
+            runtime,
+            rx_descriptor_kind: RxDescriptorKind::Jaguar1,
+        }
+    }
+
     pub(crate) fn video_fec_counters(&self) -> openipc_core::FecCounters {
         self.runtime.video_fec_counters()
     }
@@ -53,10 +63,7 @@ impl OpenIpcReceiver {
             fec_n,
         )
         .map_err(|err| JsValue::from_str(&format!("invalid receiver config: {err}")))?;
-        Ok(Self {
-            runtime,
-            rx_descriptor_kind: RxDescriptorKind::Jaguar1,
-        })
+        Ok(Self::from_runtime(runtime))
     }
 
     #[wasm_bindgen(js_name = withKeypair)]
@@ -96,10 +103,7 @@ impl OpenIpcReceiver {
             minimum_epoch,
         )
         .map_err(|err| JsValue::from_str(&format!("invalid encrypted receiver config: {err}")))?;
-        Ok(OpenIpcReceiver {
-            runtime,
-            rx_descriptor_kind: RxDescriptorKind::Jaguar1,
-        })
+        Ok(OpenIpcReceiver::from_runtime(runtime))
     }
 
     #[wasm_bindgen(js_name = setRxDescriptorKind)]
@@ -113,6 +117,16 @@ impl OpenIpcReceiver {
     /// Enable or disable the small RTP sequence reorder buffer.
     pub fn set_rtp_reorder_enabled(&mut self, enabled: bool) {
         self.runtime.set_rtp_reorder_enabled(enabled);
+    }
+
+    #[wasm_bindgen(js_name = setForwardDamagedFrames)]
+    /// Forward damaged access units for decoder concealment instead of dropping them.
+    pub fn set_forward_damaged_frames(&mut self, enabled: bool) {
+        self.runtime.rtp_mut().set_damaged_frame_policy(if enabled {
+            DamagedFramePolicy::Forward
+        } else {
+            DamagedFramePolicy::Drop
+        });
     }
 
     #[wasm_bindgen(js_name = withKeypairAndMavlinkChannel)]
@@ -504,10 +518,7 @@ fn openipc_receiver_with_keypair_and_telemetry_channel_inner(
             minimum_epoch,
         )
         .map_err(|err| JsValue::from_str(&format!("invalid MAVLink receiver config: {err}")))?;
-    Ok(OpenIpcReceiver {
-        runtime,
-        rx_descriptor_kind: RxDescriptorKind::Jaguar1,
-    })
+    Ok(OpenIpcReceiver::from_runtime(runtime))
 }
 
 pub(crate) fn parse_rx_descriptor_kind(kind: &str) -> Result<RxDescriptorKind, JsValue> {

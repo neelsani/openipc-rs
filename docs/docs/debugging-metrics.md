@@ -63,7 +63,11 @@ unavailable.
 
 The RTP view reports sequence number, timestamp, payload type, codec/NAL type,
 fragment gaps, malformed packets, unsupported packets, parameter-set state,
-keyframe waits, and optional reorder-buffer counters.
+keyframe waits, damaged frames forwarded or dropped, and optional
+reorder-buffer counters. Nebulus forwards guarded damaged frames to an already
+synchronized decoder; a rising forwarded count paired with decoder errors
+indicates loss beyond the decoder's error-concealment ability. After such an
+error, the decoder waits for a clean keyframe.
 
 For H.264, a decoder needs SPS, PPS, and an IDR. H.265 normally needs VPS, SPS,
 PPS, and a BLA/IDR/CRA access unit. “Packets arriving, waiting for IDR” therefore

@@ -182,6 +182,13 @@ await radio.initializeMonitorAdvancedWithTxgapk(
 );
 ```
 
+Receivers forward packet-damaged video access units by default so WebCodecs
+can attempt error concealment. Call `receiver.setForwardDamagedFrames(false)`
+for strict drop-on-loss behavior. Emitted frame objects include `damaged`, and
+`damageKind` (`none`, `missing-slice`, or `truncated-fragment`). RTP status
+includes `damagedFramesForwarded` and `damagedFramesDropped`. Damaged keyframes
+never initialize or resynchronize the WebCodecs decoder.
+
 ## WebCodecs Rendering
 
 The Rust/WASM side outputs compressed H.264/H.265 frames. Pass those frames to

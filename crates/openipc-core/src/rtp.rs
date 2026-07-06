@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 const DEFAULT_RTP_REORDER_WINDOW: usize = 15;
 const DEFAULT_MAX_ACCESS_UNIT_SIZE: usize = 8 * 1024 * 1024;
@@ -29,6 +29,47 @@ pub enum Codec {
     H264,
     /// H.265/HEVC video.
     H265,
+}
+
+/// Policy used when packet loss leaves an encoded access unit incomplete.
+///
+/// Strict applications can drop damaged units, while latency-sensitive FPV
+/// receivers can forward the bytes that arrived and let the decoder conceal
+/// the damage.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DamagedFramePolicy {
+    /// Drop access units that contain an RTP sequence gap or incomplete FU.
+    #[default]
+    Drop,
+    /// Emit the received bytes at the next known access-unit boundary.
+    Forward,
+}
+
+/// The kind of packet loss retained in a best-effort access unit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FrameDamage {
+    /// The access unit contains all packets observed by the receiver.
+    #[default]
+    None,
+    /// One or more complete packets or slices were absent between valid NAL units.
+    MissingSlice,
+    /// A fragmented NAL ends at the last contiguous byte received before a gap.
+    TruncatedFragment,
+}
+
+impl FrameDamage {
+    /// Return true when the access unit is incomplete.
+    pub const fn is_damaged(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    const fn combine(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::TruncatedFragment, _) | (_, Self::TruncatedFragment) => Self::TruncatedFragment,
+            (Self::MissingSlice, _) | (_, Self::MissingSlice) => Self::MissingSlice,
+            _ => Self::None,
+        }
+    }
 }
 
 /// Dynamic RTP payload type used by OpenIPC for H.264.
@@ -81,8 +122,12 @@ pub struct RtpDepacketizerStatus {
     pub keyframes_with_prepended_config: u64,
     /// Cached SPS/PPS/VPS parameter-set NAL units prepended to keyframes.
     pub parameter_sets_prepended: u64,
-    /// Fragment chains dropped because an RTP sequence gap was observed.
+    /// RTP sequence gaps observed while assembling access units.
     pub fragment_sequence_gaps: u64,
+    /// Damaged access units forwarded to the decoder in best-effort mode.
+    pub damaged_frames_forwarded: u64,
+    /// Damaged access units discarded in strict mode.
+    pub damaged_frames_dropped: u64,
     /// Fragment chains that exceeded the configured size guard.
     pub fragment_overflows: u64,
     /// Packets rejected because they were not H.264/H.265 video.
@@ -329,6 +374,10 @@ pub struct DepacketizedFrame {
     pub nal_type: u8,
     /// Decoder parameter-set state at the time this frame was emitted.
     pub codec_config: CodecConfigState,
+    /// True when packet loss left this access unit incomplete.
+    pub damaged: bool,
+    /// Classification of the retained packet damage.
+    pub damage: FrameDamage,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -337,6 +386,10 @@ struct FragmentState {
     timestamp: u32,
     next_sequence: Option<u16>,
     corrupted: bool,
+    is_keyframe: bool,
+    payload_type: u8,
+    sequence_number: u16,
+    nal_type: u8,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -345,8 +398,11 @@ struct AccessUnitState {
     timestamp: Option<u32>,
     next_sequence: Option<u16>,
     corrupted: bool,
+    damage: FrameDamage,
     is_keyframe: bool,
     has_decoder_config: bool,
+    payload_type: u8,
+    sequence_number: u16,
     nal_type: u8,
 }
 
@@ -358,12 +414,14 @@ struct FrameMeta {
     payload_type: u8,
     sequence_number: u16,
     nal_type: u8,
+    damage: FrameDamage,
 }
 
 /// Stateful RTP depacketizer for OpenIPC H.264/H.265 video.
 ///
-/// The depacketizer buffers fragmented NAL units, drops incomplete fragments
-/// across sequence gaps, and emits complete Annex-B access units.
+/// The depacketizer buffers fragmented NAL units and emits Annex-B access
+/// units. Its damaged-frame policy controls whether incomplete units are
+/// dropped or forwarded for decoder error concealment.
 #[derive(Debug, Clone)]
 pub struct RtpDepacketizer {
     h264: FragmentState,
@@ -375,6 +433,11 @@ pub struct RtpDepacketizer {
     h265_vps: Option<Vec<u8>>,
     h265_sps: Option<Vec<u8>>,
     h265_pps: Option<Vec<u8>>,
+    codec_hint: Option<Codec>,
+    detected_codec: Option<Codec>,
+    h265_legacy_fu: bool,
+    damaged_frame_policy: DamagedFramePolicy,
+    ready_frames: VecDeque<DepacketizedFrame>,
     max_fragment: usize,
     status: RtpDepacketizerStatus,
 }
@@ -398,6 +461,11 @@ impl RtpDepacketizer {
             h265_vps: None,
             h265_sps: None,
             h265_pps: None,
+            codec_hint: None,
+            detected_codec: None,
+            h265_legacy_fu: false,
+            damaged_frame_policy: DamagedFramePolicy::Drop,
+            ready_frames: VecDeque::new(),
             max_fragment: DEFAULT_MAX_ACCESS_UNIT_SIZE,
             status: RtpDepacketizerStatus::default(),
         }
@@ -422,6 +490,31 @@ impl RtpDepacketizer {
         }
     }
 
+    /// Prefer a codec when a transmitter reuses the same dynamic RTP payload
+    /// type for H.264 and H.265.
+    ///
+    /// `None` keeps automatic detection. Automatic mode locks from unambiguous
+    /// SPS/PPS/VPS NAL units, so it also accepts Divinus H.265 on payload type
+    /// 96. A hint is useful when joining a stream after its parameter sets.
+    pub fn set_codec_hint(&mut self, codec: Option<Codec>) {
+        self.codec_hint = codec;
+        self.detected_codec = codec;
+    }
+
+    /// Choose whether packet-damaged access units are dropped or forwarded.
+    ///
+    /// The default is [`DamagedFramePolicy::Drop`]. FPV applications normally
+    /// prefer [`DamagedFramePolicy::Forward`] so a decoder can conceal damage
+    /// instead of waiting for an entirely clean picture.
+    pub fn set_damaged_frame_policy(&mut self, policy: DamagedFramePolicy) {
+        self.damaged_frame_policy = policy;
+    }
+
+    /// Return the active damaged-frame policy.
+    pub const fn damaged_frame_policy(&self) -> DamagedFramePolicy {
+        self.damaged_frame_policy
+    }
+
     /// Push one RTP packet and return a complete frame when one is ready.
     pub fn push(&mut self, packet: &[u8]) -> Result<Option<DepacketizedFrame>, RtpError> {
         self.status.packets = self.status.packets.saturating_add(1);
@@ -435,7 +528,14 @@ impl RtpDepacketizer {
         self.status.last_payload_type = Some(header.payload_type);
         self.status.last_sequence_number = Some(header.sequence_number);
         self.status.last_timestamp = Some(header.timestamp);
-        let payload = header.payload(packet);
+        let rtp_payload = header.payload(packet);
+        let mut annex_b = AnnexBNalus::new(rtp_payload);
+        let first_annex_b = annex_b.next();
+        let payload = first_annex_b.unwrap_or(rtp_payload);
+        if payload.is_empty() {
+            self.record_error(RtpError::EmptyPayload);
+            return Err(RtpError::EmptyPayload);
+        }
         log::trace!(
             target: "openipc_core::rtp",
             "received RTP packet sequence={} timestamp={} pt={} marker={} bytes={}",
@@ -449,33 +549,81 @@ impl RtpDepacketizer {
             self.record_error(RtpError::UnsupportedPayload);
             return Err(RtpError::UnsupportedPayload);
         }
-        let Some(codec) =
-            codec_from_payload_type(header.payload_type).or_else(|| detect_codec(payload))
-        else {
+        let Some(codec) = self.resolve_codec(header.payload_type, payload) else {
             self.record_error(RtpError::UnsupportedPayload);
             return Err(RtpError::UnsupportedPayload);
         };
         self.status.last_codec = Some(codec);
-        self.observe_access_unit_packet(codec, header);
+        if let Some(frame) = self.flush_incomplete_fragment_on_timestamp(codec, header.timestamp)? {
+            self.ready_frames.push_back(frame);
+        }
+        if let Some(frame) = self.observe_access_unit_packet(codec, header) {
+            self.ready_frames.push_back(frame);
+        }
+        if first_annex_b.is_some() {
+            let mut current = payload;
+            loop {
+                let next = annex_b.next();
+                let mut unit_header = header;
+                unit_header.marker = header.marker && next.is_none();
+                self.push_codec_payload(codec, current, unit_header)?;
+                let Some(next) = next else {
+                    break;
+                };
+                current = next;
+            }
+        } else {
+            self.push_codec_payload(codec, payload, header)?;
+        }
+        let frame = self.ready_frames.pop_front();
+        if frame.is_some() {
+            self.status.frames_emitted = self.status.frames_emitted.saturating_add(1);
+        }
+        Ok(frame)
+    }
+
+    fn push_codec_payload(
+        &mut self,
+        codec: Codec,
+        payload: &[u8],
+        header: RtpHeader,
+    ) -> Result<(), RtpError> {
         let result = match codec {
             Codec::H264 => self.push_h264(payload, header),
             Codec::H265 => self.push_h265(payload, header),
         };
-        match &result {
-            Ok(Some(_)) => {
-                self.status.frames_emitted = self.status.frames_emitted.saturating_add(1)
-            }
+        match result {
+            Ok(Some(frame)) => self.ready_frames.push_back(frame),
             Err(err) => {
                 log::debug!(
                     target: "openipc_core::rtp",
                     "RTP packet rejected sequence={}: {err:?}",
                     header.sequence_number
                 );
-                self.record_error(*err);
+                self.record_error(err);
+                return Err(err);
             }
             _ => {}
         }
-        result
+        Ok(())
+    }
+
+    fn resolve_codec(&mut self, payload_type: u8, payload: &[u8]) -> Option<Codec> {
+        if let Some(codec) = self.codec_hint {
+            return Some(codec);
+        }
+        if let Some(codec) = self.detected_codec {
+            return Some(codec);
+        }
+        if let Some(codec) = codec_parameter_set_signature(payload) {
+            self.detected_codec = Some(codec);
+            return Some(codec);
+        }
+        let codec = codec_from_payload_type(payload_type).or_else(|| detect_codec(payload));
+        if payload_type == RTP_PAYLOAD_TYPE_H265 {
+            self.detected_codec = codec;
+        }
+        codec
     }
 
     fn push_h264(
@@ -506,6 +654,7 @@ impl RtpDepacketizer {
                         payload_type: header.payload_type,
                         sequence_number: header.sequence_number,
                         nal_type,
+                        damage: FrameDamage::None,
                     },
                     header.marker,
                 ),
@@ -552,6 +701,7 @@ impl RtpDepacketizer {
                         payload_type: header.payload_type,
                         sequence_number: header.sequence_number,
                         nal_type,
+                        damage: FrameDamage::None,
                     },
                     header.marker,
                 ),
@@ -582,19 +732,30 @@ impl RtpDepacketizer {
             self.h264.timestamp = header.timestamp;
             self.h264.next_sequence = Some(header.sequence_number.wrapping_add(1));
             self.h264.corrupted = false;
+            self.h264.is_keyframe = nal_type == 5;
+            self.h264.payload_type = header.payload_type;
+            self.h264.sequence_number = header.sequence_number;
+            self.h264.nal_type = nal_type;
             self.h264.data.push((fu_indicator & 0xe0) | nal_type);
-        } else if !self.accept_fragment_sequence(Codec::H264, header.sequence_number) {
-            return Ok(None);
         }
-        if !self.h264.corrupted {
+        let append_payload =
+            start || self.accept_fragment_sequence(Codec::H264, header.sequence_number);
+        self.h264.sequence_number = header.sequence_number;
+        if append_payload {
             self.append_fragment(Codec::H264, &payload[2..])?;
         }
         if end {
+            if self.h264.data.is_empty() {
+                self.reset_fragment(Codec::H264);
+                return Ok(None);
+            }
             if !is_h264_vcl_nal(nal_type) {
                 self.reset_fragment(Codec::H264);
                 return Ok(None);
             }
-            if self.h264.corrupted || !self.has_decoder_config(Codec::H264) {
+            if (self.h264.corrupted && self.damaged_frame_policy == DamagedFramePolicy::Drop)
+                || !self.has_decoder_config(Codec::H264)
+            {
                 if !self.has_decoder_config(Codec::H264) {
                     self.status.config_wait_drops = self.status.config_wait_drops.saturating_add(1);
                 }
@@ -609,6 +770,11 @@ impl RtpDepacketizer {
                 payload_type: header.payload_type,
                 sequence_number: header.sequence_number,
                 nal_type,
+                damage: if self.h264.corrupted {
+                    FrameDamage::TruncatedFragment
+                } else {
+                    FrameDamage::None
+                },
             };
             self.reset_fragment(Codec::H264);
             self.push_complete_owned_annex_b(data, meta, header.marker, false)
@@ -625,34 +791,70 @@ impl RtpDepacketizer {
         if payload.len() < 3 {
             return Err(RtpError::UnsupportedPayload);
         }
-        let fu_header = payload[2];
+        // Divinus's special UDP output predates its standards-compliant RTSP
+        // packetizer. It emits [FU indicator, FU header, data] and stores the
+        // original first HEVC header byte in the FU type field. Keep support
+        // local to an FU chain; normal RFC 7798 packets remain unchanged.
+        let legacy_start = payload[1] & 0x80 != 0;
+        if legacy_start {
+            self.h265_legacy_fu = true;
+        }
+        let legacy = self.h265_legacy_fu;
+        let fu_header = payload[if legacy { 1 } else { 2 }];
         let start = fu_header & 0x80 != 0;
         let end = fu_header & 0x40 != 0;
-        let nal_type = fu_header & 0x3f;
+        let nal_type = if legacy {
+            (fu_header & 0x3f) >> 1
+        } else {
+            fu_header & 0x3f
+        };
         if start {
             self.h265.data.clear();
             self.h265.data.extend_from_slice(&[0, 0, 0, 1]);
             self.h265.timestamp = header.timestamp;
             self.h265.next_sequence = Some(header.sequence_number.wrapping_add(1));
             self.h265.corrupted = false;
-            self.h265.data.push((payload[0] & 0x81) | (nal_type << 1));
-            self.h265.data.push(payload[1]);
-        } else if !self.accept_fragment_sequence(Codec::H265, header.sequence_number) {
-            return Ok(None);
+            self.h265.is_keyframe = (16..=23).contains(&nal_type);
+            self.h265.payload_type = header.payload_type;
+            self.h265.sequence_number = header.sequence_number;
+            self.h265.nal_type = nal_type;
+            if legacy {
+                self.h265
+                    .data
+                    .push((payload[0] & 0x80) | (fu_header & 0x3f));
+                // Divinus omits the second HEVC payload-header byte. OpenIPC
+                // encoder output uses layer 0 and temporal_id_plus1 1.
+                self.h265.data.push(0x01);
+            } else {
+                self.h265.data.push((payload[0] & 0x81) | (nal_type << 1));
+                self.h265.data.push(payload[1]);
+            }
         }
-        if !self.h265.corrupted {
-            self.append_fragment(Codec::H265, &payload[3..])?;
+        let append_payload =
+            start || self.accept_fragment_sequence(Codec::H265, header.sequence_number);
+        self.h265.sequence_number = header.sequence_number;
+        if append_payload {
+            self.append_fragment(Codec::H265, &payload[if legacy { 2 } else { 3 }..])?;
         }
         if end {
-            if !is_h265_vcl_nal(nal_type) {
+            if self.h265.data.is_empty() {
                 self.reset_fragment(Codec::H265);
+                self.h265_legacy_fu = false;
                 return Ok(None);
             }
-            if self.h265.corrupted || !self.has_decoder_config(Codec::H265) {
+            if !is_h265_vcl_nal(nal_type) {
+                self.reset_fragment(Codec::H265);
+                self.h265_legacy_fu = false;
+                return Ok(None);
+            }
+            if (self.h265.corrupted && self.damaged_frame_policy == DamagedFramePolicy::Drop)
+                || !self.has_decoder_config(Codec::H265)
+            {
                 if !self.has_decoder_config(Codec::H265) {
                     self.status.config_wait_drops = self.status.config_wait_drops.saturating_add(1);
                 }
                 self.reset_fragment(Codec::H265);
+                self.h265_legacy_fu = false;
                 return Ok(None);
             }
             let data = std::mem::take(&mut self.h265.data);
@@ -663,8 +865,14 @@ impl RtpDepacketizer {
                 payload_type: header.payload_type,
                 sequence_number: header.sequence_number,
                 nal_type,
+                damage: if self.h265.corrupted {
+                    FrameDamage::TruncatedFragment
+                } else {
+                    FrameDamage::None
+                },
             };
             self.reset_fragment(Codec::H265);
+            self.h265_legacy_fu = false;
             self.push_complete_owned_annex_b(data, meta, header.marker, false)
         } else {
             Ok(None)
@@ -681,13 +889,15 @@ impl RtpDepacketizer {
         };
         state.next_sequence = Some(sequence_number.wrapping_add(1));
         if sequence_number != expected {
-            state.data.clear();
             state.corrupted = true;
-            self.status.fragment_sequence_gaps =
-                self.status.fragment_sequence_gaps.saturating_add(1);
+            if self.damaged_frame_policy == DamagedFramePolicy::Drop {
+                state.data.clear();
+                self.status.damaged_frames_dropped =
+                    self.status.damaged_frames_dropped.saturating_add(1);
+            }
             return false;
         }
-        true
+        !state.corrupted
     }
 
     fn reset_fragment(&mut self, codec: Codec) {
@@ -698,6 +908,10 @@ impl RtpDepacketizer {
         state.data.clear();
         state.next_sequence = None;
         state.corrupted = false;
+        state.is_keyframe = false;
+        state.payload_type = 0;
+        state.sequence_number = 0;
+        state.nal_type = 0;
     }
 
     fn h264_stap_a(
@@ -758,6 +972,7 @@ impl RtpDepacketizer {
                 payload_type: header.payload_type,
                 sequence_number: header.sequence_number,
                 nal_type: last_slice_type,
+                damage: FrameDamage::None,
             },
             header.marker,
             has_sps && has_pps,
@@ -827,6 +1042,7 @@ impl RtpDepacketizer {
                 payload_type: header.payload_type,
                 sequence_number: header.sequence_number,
                 nal_type: last_slice_type,
+                damage: FrameDamage::None,
             },
             header.marker,
             has_vps && has_sps && has_pps,
@@ -888,9 +1104,10 @@ impl RtpDepacketizer {
         additional_len: usize,
     ) -> Result<bool, RtpError> {
         let max_fragment = self.max_fragment;
+        let drop_damaged = self.damaged_frame_policy == DamagedFramePolicy::Drop;
         let state = self.access_unit_mut(meta.codec);
         debug_assert_eq!(state.timestamp, Some(meta.timestamp));
-        if state.corrupted {
+        if state.corrupted && drop_damaged {
             if marker {
                 reset_access_unit_state(state);
             }
@@ -912,8 +1129,12 @@ impl RtpDepacketizer {
         has_decoder_config: bool,
     ) -> Result<Option<DepacketizedFrame>, RtpError> {
         let state = self.access_unit_mut(meta.codec);
+        state.damage = state.damage.combine(meta.damage);
+        state.corrupted = state.damage.is_damaged();
         state.is_keyframe |= meta.is_keyframe;
         state.has_decoder_config |= has_decoder_config;
+        state.payload_type = meta.payload_type;
+        state.sequence_number = meta.sequence_number;
         state.nal_type = meta.nal_type;
         if !marker {
             return Ok(None);
@@ -923,7 +1144,18 @@ impl RtpDepacketizer {
         let is_keyframe = state.is_keyframe;
         let has_decoder_config = state.has_decoder_config;
         let nal_type = state.nal_type;
+        let damage = state.damage;
+        let damaged = damage.is_damaged();
         reset_access_unit_state(state);
+        if damaged && self.damaged_frame_policy == DamagedFramePolicy::Drop {
+            self.status.damaged_frames_dropped =
+                self.status.damaged_frames_dropped.saturating_add(1);
+            return Ok(None);
+        }
+        if damaged {
+            self.status.damaged_frames_forwarded =
+                self.status.damaged_frames_forwarded.saturating_add(1);
+        }
         if is_keyframe && !has_decoder_config {
             let mut prefixed = Vec::with_capacity(data.len() + self.cached_config_len(meta.codec));
             self.prepend_cached_config(&mut prefixed, meta.codec);
@@ -939,6 +1171,8 @@ impl RtpDepacketizer {
             sequence_number: meta.sequence_number,
             nal_type,
             codec_config: self.codec_config(),
+            damaged,
+            damage,
         }))
     }
 
@@ -949,35 +1183,155 @@ impl RtpDepacketizer {
         }
     }
 
-    fn observe_access_unit_packet(&mut self, codec: Codec, header: RtpHeader) {
-        let state = match codec {
-            Codec::H264 => &mut self.h264_access_unit,
-            Codec::H265 => &mut self.h265_access_unit,
-        };
-        if state
+    fn observe_access_unit_packet(
+        &mut self,
+        codec: Codec,
+        header: RtpHeader,
+    ) -> Option<DepacketizedFrame> {
+        let timestamp_changed = self
+            .access_unit_mut(codec)
             .timestamp
-            .is_some_and(|timestamp| timestamp != header.timestamp)
-        {
-            if !state.data.is_empty() {
-                self.status.fragment_sequence_gaps =
-                    self.status.fragment_sequence_gaps.saturating_add(1);
+            .is_some_and(|timestamp| timestamp != header.timestamp);
+        let completed = timestamp_changed
+            .then(|| self.take_unmarked_access_unit(codec))
+            .flatten();
+        let drop_damaged = self.damaged_frame_policy == DamagedFramePolicy::Drop;
+        let (sequence_gap, discarded_data) = {
+            let state = self.access_unit_mut(codec);
+            if state.timestamp.is_none() {
+                state.timestamp = Some(header.timestamp);
             }
+            let sequence_gap = state
+                .next_sequence
+                .is_some_and(|expected| expected != header.sequence_number);
+            let discarded_data = sequence_gap && drop_damaged && !state.data.is_empty();
+            if sequence_gap {
+                state.corrupted = true;
+                state.damage = state.damage.combine(FrameDamage::MissingSlice);
+                if drop_damaged {
+                    state.data.clear();
+                }
+            }
+            state.next_sequence = Some(header.sequence_number.wrapping_add(1));
+            (sequence_gap, discarded_data)
+        };
+        if sequence_gap {
+            self.status.fragment_sequence_gaps =
+                self.status.fragment_sequence_gaps.saturating_add(1);
+            if discarded_data {
+                self.status.damaged_frames_dropped =
+                    self.status.damaged_frames_dropped.saturating_add(1);
+            }
+        }
+        completed
+    }
+
+    fn take_unmarked_access_unit(&mut self, codec: Codec) -> Option<DepacketizedFrame> {
+        let state = self.access_unit_mut(codec);
+        if state.data.is_empty() {
             reset_access_unit_state(state);
+            return None;
         }
-        if state.timestamp.is_none() {
-            state.timestamp = Some(header.timestamp);
-        } else if state
-            .next_sequence
-            .is_some_and(|expected| expected != header.sequence_number)
-        {
-            if !state.corrupted {
-                self.status.fragment_sequence_gaps =
-                    self.status.fragment_sequence_gaps.saturating_add(1);
+        let mut data = std::mem::take(&mut state.data);
+        let timestamp = state.timestamp.unwrap_or_default();
+        let is_keyframe = state.is_keyframe;
+        let has_decoder_config = state.has_decoder_config;
+        let payload_type = state.payload_type;
+        let sequence_number = state.sequence_number;
+        let nal_type = state.nal_type;
+        let damage = state.damage;
+        let damaged = damage.is_damaged();
+        reset_access_unit_state(state);
+        if damaged && self.damaged_frame_policy == DamagedFramePolicy::Drop {
+            self.status.damaged_frames_dropped =
+                self.status.damaged_frames_dropped.saturating_add(1);
+            return None;
+        }
+        if damaged {
+            self.status.damaged_frames_forwarded =
+                self.status.damaged_frames_forwarded.saturating_add(1);
+        }
+        if is_keyframe && !has_decoder_config {
+            let mut prefixed = Vec::with_capacity(data.len() + self.cached_config_len(codec));
+            self.prepend_cached_config(&mut prefixed, codec);
+            prefixed.append(&mut data);
+            data = prefixed;
+        }
+        Some(DepacketizedFrame {
+            data,
+            timestamp,
+            is_keyframe,
+            codec,
+            payload_type,
+            sequence_number,
+            nal_type,
+            codec_config: self.codec_config(),
+            damaged,
+            damage,
+        })
+    }
+
+    fn flush_incomplete_fragment_on_timestamp(
+        &mut self,
+        codec: Codec,
+        next_timestamp: u32,
+    ) -> Result<Option<DepacketizedFrame>, RtpError> {
+        let should_flush = {
+            let state = match codec {
+                Codec::H264 => &self.h264,
+                Codec::H265 => &self.h265,
+            };
+            state.next_sequence.is_some()
+                && !state.data.is_empty()
+                && state.timestamp != next_timestamp
+        };
+        if !should_flush {
+            return Ok(None);
+        }
+
+        if !self.has_decoder_config(codec) {
+            self.reset_fragment(codec);
+            if codec == Codec::H265 {
+                self.h265_legacy_fu = false;
             }
-            state.corrupted = true;
-            state.data.clear();
+            self.status.config_wait_drops = self.status.config_wait_drops.saturating_add(1);
+            self.status.damaged_frames_dropped =
+                self.status.damaged_frames_dropped.saturating_add(1);
+            return Ok(None);
         }
-        state.next_sequence = Some(header.sequence_number.wrapping_add(1));
+
+        if self.damaged_frame_policy == DamagedFramePolicy::Drop {
+            self.reset_fragment(codec);
+            if codec == Codec::H265 {
+                self.h265_legacy_fu = false;
+            }
+            self.status.damaged_frames_dropped =
+                self.status.damaged_frames_dropped.saturating_add(1);
+            return Ok(None);
+        }
+
+        let (data, meta) = {
+            let state = match codec {
+                Codec::H264 => &mut self.h264,
+                Codec::H265 => &mut self.h265,
+            };
+            let data = std::mem::take(&mut state.data);
+            let meta = FrameMeta {
+                timestamp: state.timestamp,
+                is_keyframe: state.is_keyframe,
+                codec,
+                payload_type: state.payload_type,
+                sequence_number: state.sequence_number,
+                nal_type: state.nal_type,
+                damage: FrameDamage::TruncatedFragment,
+            };
+            (data, meta)
+        };
+        self.reset_fragment(codec);
+        if codec == Codec::H265 {
+            self.h265_legacy_fu = false;
+        }
+        self.push_complete_owned_annex_b(data, meta, true, false)
     }
 
     fn cached_config_len(&self, codec: Codec) -> usize {
@@ -1064,6 +1418,7 @@ fn reset_access_unit_state(state: &mut AccessUnitState) {
     state.timestamp = None;
     state.next_sequence = None;
     state.corrupted = false;
+    state.damage = FrameDamage::None;
     state.is_keyframe = false;
     state.has_decoder_config = false;
     state.nal_type = 0;
@@ -1074,6 +1429,63 @@ fn codec_from_payload_type(payload_type: u8) -> Option<Codec> {
         RTP_PAYLOAD_TYPE_H264 => Some(Codec::H264),
         RTP_PAYLOAD_TYPE_H265 => Some(Codec::H265),
         _ => None,
+    }
+}
+
+fn codec_parameter_set_signature(payload: &[u8]) -> Option<Codec> {
+    let first = *payload.first()?;
+    let h264_nal_type = first & 0x1f;
+    if matches!(h264_nal_type, 7 | 8) {
+        return Some(Codec::H264);
+    }
+    let h265_nal_type = (first >> 1) & 0x3f;
+    let valid_h265_header =
+        first & 0x01 == 0 && payload.get(1).is_some_and(|second| second & 0x07 != 0);
+    (valid_h265_header && matches!(h265_nal_type, 32..=34)).then_some(Codec::H265)
+}
+
+struct AnnexBNalus<'a> {
+    bytes: &'a [u8],
+    cursor: Option<usize>,
+}
+
+impl<'a> AnnexBNalus<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            cursor: annex_b_start_code_len(bytes, 0),
+        }
+    }
+}
+
+impl<'a> Iterator for AnnexBNalus<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let start = self.cursor?;
+        let mut next_start = None;
+        let mut index = start;
+        while index + 3 <= self.bytes.len() {
+            if let Some(length) = annex_b_start_code_len(self.bytes, index) {
+                next_start = Some((index, length));
+                break;
+            }
+            index += 1;
+        }
+        let end = next_start.map_or(self.bytes.len(), |(index, _)| index);
+        self.cursor = next_start.map(|(index, length)| index + length);
+        (end > start).then(|| &self.bytes[start..end])
+    }
+}
+
+fn annex_b_start_code_len(bytes: &[u8], offset: usize) -> Option<usize> {
+    let tail = bytes.get(offset..)?;
+    if tail.starts_with(&[0, 0, 0, 1]) {
+        Some(4)
+    } else if tail.starts_with(&[0, 0, 1]) {
+        Some(3)
+    } else {
+        None
     }
 }
 
@@ -1256,6 +1668,35 @@ mod tests {
             .push(&rtp(&[0x41, 0xcc], true, 6, 43))
             .unwrap()
             .is_some());
+    }
+
+    #[test]
+    fn forwards_damaged_access_unit_after_sequence_gap_in_fpv_mode() {
+        let mut depay = RtpDepacketizer::new();
+        depay.set_damaged_frame_policy(DamagedFramePolicy::Forward);
+        prime_h264(&mut depay);
+        assert!(depay
+            .push(&rtp(&[0x41, 0x80, 0xaa], false, 3, 42))
+            .unwrap()
+            .is_none());
+        let frame = depay
+            .push(&rtp(&[0x41, 0x40, 0xbb], true, 5, 42))
+            .unwrap()
+            .unwrap();
+
+        assert!(frame.damaged);
+        assert_eq!(frame.damage, FrameDamage::MissingSlice);
+        assert_eq!(frame.timestamp, 42);
+        assert_eq!(
+            frame.data,
+            [
+                &[0, 0, 0, 1, 0x41, 0x80, 0xaa][..],
+                &[0, 0, 0, 1, 0x41, 0x40, 0xbb][..],
+            ]
+            .concat()
+        );
+        assert_eq!(depay.status().damaged_frames_forwarded, 1);
+        assert_eq!(depay.status().damaged_frames_dropped, 0);
     }
 
     #[test]
@@ -1538,6 +1979,128 @@ mod tests {
     }
 
     #[test]
+    fn divinus_h265_payload_type_96_is_detected_from_parameter_sets() {
+        // Divinus uses PT 96 for both H.264 and H.265. Its VPS/SPS/PPS NAL
+        // units are nevertheless unambiguous and lock automatic detection.
+        let mut depay = RtpDepacketizer::new();
+        for (sequence, timestamp, payload) in [
+            (1, 1_000, &[0x40, 0x01, 0xaa][..]),
+            (2, 4_000, &[0x42, 0x01, 0xbb][..]),
+            (3, 7_000, &[0x44, 0x01, 0xcc][..]),
+        ] {
+            assert!(depay
+                .push(&rtp_with_payload_type(
+                    payload,
+                    RTP_PAYLOAD_TYPE_H264,
+                    false,
+                    sequence,
+                    timestamp,
+                ))
+                .unwrap()
+                .is_none());
+        }
+
+        let frame = depay
+            .push(&rtp_with_payload_type(
+                &[0x28, 0x01, 0xdd],
+                RTP_PAYLOAD_TYPE_H264,
+                true,
+                4,
+                10_000,
+            ))
+            .unwrap()
+            .unwrap();
+        assert_eq!(frame.codec, Codec::H265);
+        assert!(frame.is_keyframe);
+        assert!(frame.data.ends_with(&[0, 0, 0, 1, 0x28, 0x01, 0xdd]));
+    }
+
+    #[test]
+    fn divinus_annex_b_bundle_is_split_without_copying() {
+        let payload = [
+            &[0, 0, 0, 1, 0x40, 0x01, 0xaa][..],
+            &[0, 0, 0, 1, 0x42, 0x01, 0xbb][..],
+            &[0, 0, 0, 1, 0x44, 0x01, 0xcc][..],
+            &[0, 0, 0, 1, 0x26, 0x01, 0xdd][..],
+        ]
+        .concat();
+        let mut depay = RtpDepacketizer::new();
+        let frame = depay
+            .push(&rtp_with_payload_type(
+                &payload,
+                RTP_PAYLOAD_TYPE_H264,
+                true,
+                1,
+                3_000,
+            ))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(frame.codec, Codec::H265);
+        assert!(frame.is_keyframe);
+        assert_eq!(frame.data, payload);
+    }
+
+    #[test]
+    fn divinus_unmarked_picture_finishes_when_timestamp_advances() {
+        let mut depay = RtpDepacketizer::new();
+        prime_h264(&mut depay);
+        assert!(depay
+            .push(&rtp(&[0x61, 0xaa], false, 3, 3_000))
+            .unwrap()
+            .is_none());
+
+        let frame = depay
+            .push(&rtp(&[0x61, 0xbb], false, 4, 6_000))
+            .unwrap()
+            .unwrap();
+        assert_eq!(frame.codec, Codec::H264);
+        assert_eq!(frame.timestamp, 3_000);
+        assert_eq!(frame.data, [0, 0, 0, 1, 0x61, 0xaa]);
+    }
+
+    #[test]
+    fn divinus_legacy_two_byte_h265_fu_is_reassembled() {
+        let mut depay = RtpDepacketizer::new();
+        for (sequence, payload) in [
+            (1, &[0x40, 0x01, 0xaa][..]),
+            (2, &[0x42, 0x01, 0xbb][..]),
+            (3, &[0x44, 0x01, 0xcc][..]),
+        ] {
+            depay
+                .push(&rtp_with_payload_type(
+                    payload,
+                    RTP_PAYLOAD_TYPE_H264,
+                    false,
+                    sequence,
+                    10,
+                ))
+                .unwrap();
+        }
+
+        // Literal wire shape produced by Divinus stream.c for an HEVC type-19
+        // NAL beginning 26 01 aa bb cc dd. It omits the RFC 7798 layer/TID byte.
+        assert!(depay
+            .push(&rtp(&[0x62, 0xa6, 0xaa, 0xbb], false, 4, 3_000))
+            .unwrap()
+            .is_none());
+        assert!(depay
+            .push(&rtp(&[0x62, 0x66, 0xcc, 0xdd], false, 5, 3_000))
+            .unwrap()
+            .is_none());
+
+        let frame = depay
+            .push(&rtp(&[0x02, 0x01, 0xee], false, 6, 6_000))
+            .unwrap()
+            .unwrap();
+        assert_eq!(frame.codec, Codec::H265);
+        assert!(frame.is_keyframe);
+        assert!(frame
+            .data
+            .ends_with(&[0, 0, 0, 1, 0x26, 0x01, 0xaa, 0xbb, 0xcc, 0xdd]));
+    }
+
+    #[test]
     fn waybeam_hevc_fu_vector_round_trips() {
         let mut depay = RtpDepacketizer::new();
         for (sequence, payload) in [
@@ -1660,6 +2223,81 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(frame.data.ends_with(&[0, 0, 0, 1, 0x65, 5, 6, 7, 8]));
+    }
+
+    #[test]
+    fn forwards_partial_h264_fu_after_sequence_gap_in_fpv_mode() {
+        let mut depay = RtpDepacketizer::new();
+        depay.set_damaged_frame_policy(DamagedFramePolicy::Forward);
+        prime_h264(&mut depay);
+        assert!(depay
+            .push(&rtp(&[0x7c, 0x85, 1, 2], false, 10, 99))
+            .unwrap()
+            .is_none());
+        let frame = depay
+            .push(&rtp(&[0x7c, 0x45, 5, 6], true, 12, 99))
+            .unwrap()
+            .unwrap();
+
+        assert!(frame.damaged);
+        assert_eq!(frame.damage, FrameDamage::TruncatedFragment);
+        assert!(frame.data.ends_with(&[0, 0, 0, 1, 0x65, 1, 2]));
+        assert_eq!(depay.status().fragment_sequence_gaps, 1);
+        assert_eq!(depay.status().damaged_frames_forwarded, 1);
+    }
+
+    #[test]
+    fn forwards_partial_h265_fu_after_sequence_gap_in_fpv_mode() {
+        let mut depay = RtpDepacketizer::new();
+        depay.set_damaged_frame_policy(DamagedFramePolicy::Forward);
+        prime_h265(&mut depay);
+        assert!(depay
+            .push(&rtp_with_payload_type(
+                &[0x62, 0x01, 0x93, 0xaa, 0xbb],
+                RTP_PAYLOAD_TYPE_H265,
+                false,
+                10,
+                99,
+            ))
+            .unwrap()
+            .is_none());
+        let frame = depay
+            .push(&rtp_with_payload_type(
+                &[0x62, 0x01, 0x53, 0xee],
+                RTP_PAYLOAD_TYPE_H265,
+                true,
+                12,
+                99,
+            ))
+            .unwrap()
+            .unwrap();
+
+        assert!(frame.damaged);
+        assert_eq!(frame.damage, FrameDamage::TruncatedFragment);
+        assert!(frame.data.ends_with(&[0, 0, 0, 1, 0x26, 0x01, 0xaa, 0xbb]));
+        assert_eq!(depay.status().fragment_sequence_gaps, 1);
+        assert_eq!(depay.status().damaged_frames_forwarded, 1);
+    }
+
+    #[test]
+    fn timestamp_transition_flushes_incomplete_fu_in_fpv_mode() {
+        let mut depay = RtpDepacketizer::new();
+        depay.set_damaged_frame_policy(DamagedFramePolicy::Forward);
+        prime_h264(&mut depay);
+        assert!(depay
+            .push(&rtp(&[0x7c, 0x85, 1, 2], false, 3, 99))
+            .unwrap()
+            .is_none());
+
+        let frame = depay
+            .push(&rtp(&[0x41, 0xaa], true, 4, 100))
+            .unwrap()
+            .unwrap();
+        assert!(frame.damaged);
+        assert_eq!(frame.damage, FrameDamage::TruncatedFragment);
+        assert_eq!(frame.timestamp, 99);
+        assert!(frame.data.ends_with(&[0, 0, 0, 1, 0x65, 1, 2]));
+        assert_eq!(depay.status().damaged_frames_forwarded, 1);
     }
 
     #[test]

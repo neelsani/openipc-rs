@@ -65,6 +65,7 @@ struct DecodeRuntime {
     decode_pump_scheduled: bool,
     frame_in_flight: bool,
     pending_frame: Option<DecodedFrame<WebVideoFrame>>,
+    last_decode_errors: u64,
     last_stats_emit_ms: f64,
 }
 
@@ -82,6 +83,7 @@ impl DecodeRuntime {
             decode_pump_scheduled: false,
             frame_in_flight: false,
             pending_frame: None,
+            last_decode_errors: 0,
             last_stats_emit_ms: Date::now(),
         })
     }
@@ -128,8 +130,8 @@ impl DecodeRuntime {
     }
 
     fn push_access_unit(&mut self, unit: EncodedAccessUnit) -> bool {
-        let is_keyframe = unit.keyframe;
-        self.access_units.push(unit, is_keyframe);
+        let can_resynchronize = unit.can_resynchronize();
+        self.access_units.push(unit, can_resynchronize);
         self.arm_decode_pump()
     }
 
@@ -167,6 +169,10 @@ impl DecodeRuntime {
             Ok(_) => {}
             Err(error) => {
                 post_error(format!("decode submit failed: {error}"));
+                if let Err(reset_error) = self.decoder.flush() {
+                    post_error(format!("decoder recovery failed: {reset_error}"));
+                }
+                self.last_decode_errors = self.decoder.stats().decode_errors;
                 self.access_units.force_resync();
             }
         }
@@ -174,7 +180,17 @@ impl DecodeRuntime {
     }
 
     fn poll_decoder(&mut self) {
-        let Some(frame) = self.decoder.latest_frame() else {
+        let frame = self.decoder.latest_frame();
+        let decode_errors = self.decoder.stats().decode_errors;
+        if decode_errors > self.last_decode_errors {
+            self.last_decode_errors = decode_errors;
+            if let Err(error) = self.decoder.flush() {
+                post_error(format!("decoder recovery failed: {error}"));
+            }
+            self.access_units.force_resync();
+            return;
+        }
+        let Some(frame) = frame else {
             return;
         };
         if self.frame_in_flight {
@@ -261,6 +277,7 @@ fn parse_access_unit(message: &JsValue) -> Result<EncodedAccessUnit, String> {
         bool_field(message, "keyframe"),
     );
     unit.sequence_number = number_field(message, "sequence").map(|value| value as u16);
+    unit.damaged = bool_field(message, "damaged");
     Ok(unit)
 }
 

@@ -20,6 +20,8 @@ OpenIPC video without taking a dependency on a specific USB frontend.
 - Parse RTP and depacketize H.264/H.265 into Annex-B access units.
 - Accept Waybeam's H.265 payload-type 97 single-NAL/FU stream, separate
   parameter sets, and refPred `TRAIL_N` pictures.
+- Accept Divinus H.264/H.265 RTP, including its shared payload type 96,
+  marker-less picture boundaries, and legacy two-byte H.265 UDP fragments.
 - Expose RTP payload bytes for app-owned sinks such as UDP forwarding or Opus
   audio decoding.
 - Build adaptive-link feedback payloads and WFB uplink packets.
@@ -265,9 +267,14 @@ can also carry audio on a separate route such as `RadioPort::AudioRx`.
 `openipc-core` still does not own audio playback; it only provides recovered RTP
 packet bytes and metadata.
 
-`RtpDepacketizer` is also conservative about fragmented video. If a fragmented
-H.264/H.265 RTP access unit has a sequence gap, the partial frame is dropped and
-the depacketizer waits for the next clean fragment start.
+`RtpDepacketizer` defaults to `DamagedFramePolicy::Drop`, which discards an
+H.264/H.265 access unit after an RTP sequence gap. Low-latency FPV apps can set
+`DamagedFramePolicy::Forward` instead. That preserves every received slice or
+the contiguous FU prefix before a gap, classifies the emitted
+`DepacketizedFrame` with `FrameDamage`, and flushes it at the RTP marker or
+timestamp transition so the decoder can attempt error concealment. Fragments
+after an FU gap are discarded instead of being stitched across missing entropy
+data. A decoder may still reject damage that cannot be concealed.
 
 ## Crate Boundaries
 

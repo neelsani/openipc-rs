@@ -80,10 +80,19 @@ Rust Web Worker, while native builds keep the default in-process behavior.
 
 One recovered RTP packet may or may not complete a video access unit. The
 depacketizer may return `None` for several packets and then return one Annex-B
-frame when a marker/fragment boundary completes. Fragmented H.264/H.265 NAL
-units are dropped if their RTP sequence numbers have a gap, because feeding
-corrupted Annex-B into WebCodecs is worse than waiting for the next clean
-access unit.
+frame when the RTP marker identifies the end of a picture. Some OpenIPC
+senders omit markers on ordinary pictures, so an RTP timestamp transition is
+the fallback boundary: packets with one timestamp belong to one access unit.
+
+Boundary detection and damage policy are separate. The reusable core defaults
+to strict dropping with `DamagedFramePolicy::Drop`. Nebulus selects
+`DamagedFramePolicy::Forward` for FPV: sequence gaps retain the bytes that did
+arrive, an FU gap retains only its contiguous prefix, incomplete FU chains
+flush when the timestamp advances, and the resulting `DepacketizedFrame`
+records `MissingSlice` or `TruncatedFragment`. Native decoders and WebCodecs
+then get a chance to conceal the missing region. A damaged keyframe is never
+used to initialize or resynchronize a decoder. If submission fails, Nebulus
+resets that decoder and waits for the next clean keyframe.
 
 In a long-running receiver, handle per-frame WFB errors as drops and keep
 processing the rest of the USB aggregate. A malformed Realtek aggregate is a
@@ -132,6 +141,32 @@ not RTP, and is not accepted by the video route. Waybeam Opus uses payload type
 `5601` requires a separate VTX WFB sender and matching Nebulus audio route. The
 optional timing sidecar on port 5602 is metadata, not part of the video RTP
 stream.
+
+## Divinus Compatibility
+
+[OpenIPC Divinus](https://github.com/OpenIPC/divinus) has two RTP paths. Its
+RTSP server emits ordinary H.264/H.265 single-NAL packets and RFC 7798 H.265
+fragments. Its special `stream.dest: udp://...` output, commonly pointed at a
+WFB sender, has older wire behaviors covered by `openipc-core` tests
+reviewed against Divinus commit `fa379ca`:
+
+- H.264 and H.265 both use dynamic payload type 96;
+- the marker is set for keyframes rather than every completed picture, while
+  the timestamp advances at each NAL boundary; and
+- fragmented H.265 uses a two-byte legacy FU prefix that omits the HEVC
+  layer/temporal-id byte and stores the original first NAL-header byte in the
+  FU type field; and
+- HAL encoder packs containing several Annex-B NAL units are split in place
+  before parameter-set tracking and access-unit assembly.
+
+Automatic codec detection locks H.265 when it sees an unambiguous VPS, SPS, or
+PPS despite payload type 96. Nebulus's explicit **H.264** or **H.265** codec
+preference is also passed into the depacketizer, which is useful when joining a
+Divinus stream after its parameter sets. Complete unmarked pictures are emitted
+when the RTP timestamp advances. In Nebulus best-effort mode, incomplete FU
+chains are forwarded as damaged at that same transition. Both Divinus paths
+therefore produce the same Annex-B access-unit boundary used by the native and
+browser decoders.
 
 ## Annex-B Frames
 

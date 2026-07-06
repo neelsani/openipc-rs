@@ -296,7 +296,7 @@ impl VideoDecoder for WebDecoder {
                 received: frame.codec,
             });
         }
-        if self.waiting_for_keyframe && !frame.keyframe {
+        if self.waiting_for_keyframe && !frame.can_resynchronize() {
             self.stats.update(|stats| stats.waiting_drops += 1);
             return Ok(SubmitOutcome::WaitingForKeyframe);
         }

@@ -63,6 +63,14 @@ impl CodecPreference {
             )
     }
 
+    pub(crate) const fn codec_hint(self) -> Option<openipc_core::Codec> {
+        match self {
+            Self::Auto => None,
+            Self::H264 => Some(openipc_core::Codec::H264),
+            Self::H265 => Some(openipc_core::Codec::H265),
+        }
+    }
+
     #[cfg(debug_assertions)]
     pub(crate) const fn mock_codec(self) -> openipc_core::Codec {
         match self {

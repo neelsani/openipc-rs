@@ -145,7 +145,8 @@ boundaries:
   the FEC assembler;
 - WFB VDM Reed-Solomon FEC with the same primary/parity block semantics as
   wfb-ng;
-- video RTP payload types `96` for H.264 and `97` for H.265;
+- video RTP payload types `96` for H.264 and `97` for H.265, with Divinus
+  compatibility for its shared video payload type `96`;
 - Opus RTP payload type `98`, either mixed into the video route or carried by
   the optional audio profile route;
 - adaptive-link feedback on tunnel uplink port `0xa0`, wrapped as IPv4/UDP to

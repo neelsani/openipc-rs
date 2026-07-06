@@ -143,6 +143,15 @@ pub(super) fn run(
                 "decoder",
                 format!("decoder errors: {last_decode_errors}"),
             );
+            if let Err(error) = decoder.flush() {
+                log(
+                    events,
+                    context,
+                    LogLevel::Warn,
+                    "decoder",
+                    format!("decoder recovery failed: {error}"),
+                );
+            }
         }
         if let Some(metrics) = metrics_throttle.push(metrics) {
             send(events, context, RuntimeEvent::Batch(Box::new(metrics)));
@@ -237,6 +246,15 @@ fn process_packet(
                 "decoder",
                 format!("decode submit failed: {error}"),
             );
+            if let Err(reset_error) = decoder.flush() {
+                log(
+                    events,
+                    context,
+                    LogLevel::Warn,
+                    "decoder",
+                    format!("decoder recovery failed: {reset_error}"),
+                );
+            }
         }
     }
     let decode_submit_latency_ms = decode_submit_started.elapsed().as_secs_f64() * 1_000.0;

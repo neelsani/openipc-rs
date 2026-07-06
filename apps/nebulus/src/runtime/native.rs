@@ -1755,6 +1755,16 @@ mod worker {
                         "decoder",
                         format!("decode submit failed: {error}"),
                     );
+                    if let Err(reset_error) = decoder.flush() {
+                        log(
+                            events,
+                            context,
+                            LogLevel::Warn,
+                            "decoder",
+                            format!("decoder recovery failed: {reset_error}"),
+                        );
+                    }
+                    last_decode_errors = decoder.stats().decode_errors;
                 }
             }
             let decode_submit_latency_ms = decode_submit_start.elapsed().as_secs_f64() * 1000.0;
@@ -1850,6 +1860,15 @@ mod worker {
                     "decoder",
                     format!("decoder errors: {last_decode_errors}"),
                 );
+                if let Err(error) = decoder.flush() {
+                    log(
+                        events,
+                        context,
+                        LogLevel::Warn,
+                        "decoder",
+                        format!("decoder recovery failed: {error}"),
+                    );
+                }
             }
             let adaptive = link.feedback_due(now);
             if let (Some(uplink), Some(radio)) = (uplink.as_mut(), radio.as_ref()) {

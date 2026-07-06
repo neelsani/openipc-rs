@@ -72,6 +72,9 @@ const keypairBytes = new Uint8Array(
 );
 const telemetryChannelId = (channelId & 0xffffff00) | 0x10;
 const receiver = OpenIpcReceiver.withKeypairOnly(channelId, keypairBytes, 0n);
+
+// FPV best effort is the default. Use false for strict drop-on-loss behavior.
+receiver.setForwardDamagedFrames(true);
 receiver.setRxDescriptorKind(radio.rxDescriptorKind());
 receiver.addKeyedRoute(2, telemetryChannelId, keypairBytes, 0n);
 const jaguar3Power =

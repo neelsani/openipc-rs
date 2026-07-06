@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use openipc_core::{
-    ChannelId, PayloadRouteId, RadioPort, ReceiverBatchOptions, ReceiverRuntime, RtpPayloadTap,
-    WfbKeypair,
+    ChannelId, DamagedFramePolicy, PayloadRouteId, RadioPort, ReceiverBatchOptions,
+    ReceiverRuntime, RtpPayloadTap, WfbKeypair,
 };
 use web_time::Instant;
 
@@ -336,6 +336,12 @@ pub(super) fn configure_receiver(
     receiver: &mut ReceiverRuntime,
     request: &StartRequest,
 ) -> Result<ReceiverBatchOptions, String> {
+    receiver
+        .rtp_mut()
+        .set_codec_hint(request.codec_preference.codec_hint());
+    receiver
+        .rtp_mut()
+        .set_damaged_frame_policy(DamagedFramePolicy::Forward);
     let mut options = ReceiverBatchOptions::default();
     let mut ids = BTreeSet::new();
     for route in request.payload_routes.iter().filter(|route| route.enabled) {
@@ -388,6 +394,12 @@ pub(super) fn configure_direct_receiver(
     receiver: &mut ReceiverRuntime,
     request: &StartRequest,
 ) -> ReceiverBatchOptions {
+    receiver
+        .rtp_mut()
+        .set_codec_hint(request.codec_preference.codec_hint());
+    receiver
+        .rtp_mut()
+        .set_damaged_frame_policy(DamagedFramePolicy::Forward);
     let mut options = ReceiverBatchOptions::default();
     let channel_id = ChannelId::new(request.channel_id);
     for route in request

@@ -2,8 +2,8 @@ use std::cell::RefCell;
 
 use js_sys::{Array, Date, Object, Reflect, Uint8Array};
 use openipc_core::{
-    Codec, DepacketizedFrame, RtpDepacketizer, RtpDepacketizerStatus, RtpReorderBuffer,
-    RtpReorderStatus,
+    Codec, DamagedFramePolicy, DepacketizedFrame, FrameDamage, RtpDepacketizer,
+    RtpDepacketizerStatus, RtpReorderBuffer, RtpReorderStatus,
 };
 use wasm_bindgen::{closure::Closure, JsCast as _, JsValue};
 
@@ -85,8 +85,10 @@ struct RtpRuntime {
 
 impl RtpRuntime {
     fn new() -> Self {
+        let mut depacketizer = RtpDepacketizer::new();
+        depacketizer.set_damaged_frame_policy(DamagedFramePolicy::Forward);
         Self {
-            depacketizer: RtpDepacketizer::new(),
+            depacketizer,
             reorder: None,
             accept_h264: true,
             accept_h265: true,
@@ -103,6 +105,12 @@ impl RtpRuntime {
         self.reorder = bool_field(message, "reorder").then(RtpReorderBuffer::default);
         self.accept_h264 = bool_field(message, "acceptH264");
         self.accept_h265 = bool_field(message, "acceptH265");
+        self.depacketizer
+            .set_codec_hint(match (self.accept_h264, self.accept_h265) {
+                (true, false) => Some(Codec::H264),
+                (false, true) => Some(Codec::H265),
+                _ => None,
+            });
         let port = Reflect::get(message, &JsValue::from_str("port"))
             .map_err(|error| format!("RTP worker configure has no decoder port: {error:?}"))?
             .dyn_into::<web_sys::MessagePort>()
@@ -149,8 +157,8 @@ impl RtpRuntime {
             return;
         }
         self.encoded_bytes = self.encoded_bytes.saturating_add(frame.data.len() as u64);
-        let is_keyframe = frame.is_keyframe;
-        self.pending.push(frame, is_keyframe);
+        let can_resynchronize = frame.is_keyframe && !frame.damaged;
+        self.pending.push(frame, can_resynchronize);
         self.drain_pending();
     }
 
@@ -200,6 +208,16 @@ impl RtpRuntime {
         set_number(&message, "timestamp", frame.timestamp as f64);
         set_number(&message, "sequence", f64::from(frame.sequence_number));
         set_bool(&message, "keyframe", frame.is_keyframe);
+        set_bool(&message, "damaged", frame.damaged);
+        set_string(
+            &message,
+            "damageKind",
+            match frame.damage {
+                FrameDamage::None => "none",
+                FrameDamage::MissingSlice => "missing-slice",
+                FrameDamage::TruncatedFragment => "truncated-fragment",
+            },
+        );
         set_value(&message, "data", bytes.as_ref());
         let transfer = Array::new();
         transfer.push(bytes.buffer().as_ref());
@@ -251,6 +269,16 @@ fn write_rtp_status(object: &Object, status: RtpDepacketizerStatus) {
         object,
         "fragmentSequenceGaps",
         status.fragment_sequence_gaps as f64,
+    );
+    set_number(
+        object,
+        "damagedFramesForwarded",
+        status.damaged_frames_forwarded as f64,
+    );
+    set_number(
+        object,
+        "damagedFramesDropped",
+        status.damaged_frames_dropped as f64,
     );
     set_number(
         object,

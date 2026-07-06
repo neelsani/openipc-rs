@@ -12,8 +12,8 @@ use openipc_core::realtek::{
 };
 use openipc_core::realtek::{RxPacketAttrib, DEFAULT_RX_TRANSFER_SIZE};
 use openipc_core::{
-    AdaptiveLinkSender, ChannelId, FecCounters, FrameLayout, PayloadRouteId, RadioPort,
-    ReceiverBatchOptions, ReceiverRuntime, WfbKeypair, WfbTxKeypair,
+    AdaptiveLinkSender, ChannelId, DamagedFramePolicy, FecCounters, FrameLayout, PayloadRouteId,
+    RadioPort, ReceiverBatchOptions, ReceiverRuntime, WfbKeypair, WfbTxKeypair,
 };
 use openipc_rtl88xx::{
     list_devices, list_supported_devices, ChannelWidth, ChipFamily, DriverOptions,
@@ -355,14 +355,18 @@ impl RecvConfig {
 
     fn receiver_runtime(&self) -> Result<ReceiverRuntime, Box<dyn std::error::Error>> {
         let keypair = WfbKeypair::from_bytes(&fs::read(&self.key_path)?)?;
-        Ok(ReceiverRuntime::with_keyed_video_route(
+        let mut runtime = ReceiverRuntime::with_keyed_video_route(
             FrameLayout::WithFcs,
             VIDEO_ROUTE_ID,
             self.channel_id,
             DEFAULT_KEY_SLOT,
             keypair,
             self.minimum_epoch,
-        )?)
+        )?;
+        runtime
+            .rtp_mut()
+            .set_damaged_frame_policy(DamagedFramePolicy::Forward);
+        Ok(runtime)
     }
 
     fn sinks(&self) -> Result<StreamSinks, Box<dyn std::error::Error>> {

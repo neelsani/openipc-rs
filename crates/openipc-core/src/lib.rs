@@ -64,8 +64,8 @@ pub use routes::{
     PayloadRouteManager, PayloadRuntimeKey,
 };
 pub use rtp::{
-    Codec, CodecConfigState, DepacketizedFrame, RtpDepacketizer, RtpDepacketizerStatus, RtpHeader,
-    RtpReorderBuffer, RtpReorderStatus,
+    Codec, CodecConfigState, DamagedFramePolicy, DepacketizedFrame, FrameDamage, RtpDepacketizer,
+    RtpDepacketizerStatus, RtpHeader, RtpReorderBuffer, RtpReorderStatus,
 };
 pub use wfb::{
     FecCounters, PlainAssembler, WfbKeypair, WfbOutput, WfbPacket, WfbReceiver, WfbSession,

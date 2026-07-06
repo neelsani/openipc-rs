@@ -46,6 +46,8 @@ pub struct EncodedAccessUnit {
     pub keyframe: bool,
     /// Source packet sequence number when available.
     pub sequence_number: Option<u16>,
+    /// Whether packet loss left this access unit incomplete.
+    pub damaged: bool,
 }
 
 impl EncodedAccessUnit {
@@ -62,7 +64,35 @@ impl EncodedAccessUnit {
             timestamp,
             keyframe,
             sequence_number: None,
+            damaged: false,
         }
+    }
+
+    /// Return true when this access unit can safely establish decoder state.
+    pub const fn can_resynchronize(&self) -> bool {
+        self.keyframe && !self.damaged
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EncodedAccessUnit, VideoTimestamp};
+    use crate::VideoCodec;
+
+    #[test]
+    fn only_clean_keyframes_can_resynchronize_a_decoder() {
+        let mut frame = EncodedAccessUnit::new(
+            VideoCodec::H264,
+            vec![0, 0, 0, 1, 0x65],
+            VideoTimestamp::from_rtp(90_000),
+            true,
+        );
+        assert!(frame.can_resynchronize());
+        frame.damaged = true;
+        assert!(!frame.can_resynchronize());
+        frame.damaged = false;
+        frame.keyframe = false;
+        assert!(!frame.can_resynchronize());
     }
 }
 
@@ -74,6 +104,7 @@ impl From<openipc_core::DepacketizedFrame> for EncodedAccessUnit {
             timestamp: VideoTimestamp::from_rtp(value.timestamp),
             keyframe: value.is_keyframe,
             sequence_number: Some(value.sequence_number),
+            damaged: value.damaged,
         }
     }
 }

@@ -6,6 +6,7 @@ members = [
     "apps/wfb-rs",
     "crates/openipc-core",
     "crates/openipc-rtl88xx",
+    "crates/openipc-uplink",
     "crates/openipc-video",
     "crates/openipc-web",
     "apps/openipc-station/src-tauri",

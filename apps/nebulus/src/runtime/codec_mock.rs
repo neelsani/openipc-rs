@@ -1,6 +1,8 @@
 use std::ops::Range;
 
-use openipc_core::rtp::{RTP_PAYLOAD_TYPE_H264, RTP_PAYLOAD_TYPE_OPUS};
+use openipc_core::rtp::{
+    Codec, RTP_PAYLOAD_TYPE_H264, RTP_PAYLOAD_TYPE_H265, RTP_PAYLOAD_TYPE_OPUS,
+};
 
 pub(crate) const MOCK_FPS: u32 = 240;
 
@@ -12,6 +14,7 @@ const RTP_PAYLOAD_BYTES: usize = 1_100;
 const VIDEO_SSRC: u32 = 0x4f49_5043;
 const AUDIO_SSRC: u32 = 0x4f49_5041;
 const H264: &[u8] = include_bytes!("../../assets/mock.h264");
+const H265: &[u8] = include_bytes!("../../assets/mock.h265");
 const OPUS_OGG: &[u8] = include_bytes!("../../assets/mock.opus.ogg");
 
 pub(crate) struct MockRtpFrame {
@@ -26,7 +29,7 @@ pub(crate) struct MockRtpEvent {
 
 /// Interleaves the pre-encoded video and audio fixtures on their RTP clocks.
 pub(crate) struct MockAvStream {
-    video: MockH264Stream,
+    video: MockVideoStream,
     audio_packets: Vec<Vec<u8>>,
     audio_index: usize,
     audio_timestamp: u32,
@@ -36,7 +39,7 @@ pub(crate) struct MockAvStream {
 }
 
 impl MockAvStream {
-    pub(crate) fn new() -> Result<Self, String> {
+    pub(crate) fn new(codec: Codec) -> Result<Self, String> {
         let mut audio_packets = ogg_packets(OPUS_OGG)?;
         audio_packets
             .retain(|packet| !packet.starts_with(b"OpusHead") && !packet.starts_with(b"OpusTags"));
@@ -48,7 +51,7 @@ impl MockAvStream {
         }
         audio_packets.truncate(AUDIO_PACKETS_PER_LOOP);
         Ok(Self {
-            video: MockH264Stream::new()?,
+            video: MockVideoStream::new(codec)?,
             audio_packets,
             audio_index: 0,
             audio_timestamp: 0,
@@ -103,6 +106,27 @@ impl MockAvStream {
     }
 }
 
+pub(crate) enum MockVideoStream {
+    H264(MockH264Stream),
+    H265(MockH265Stream),
+}
+
+impl MockVideoStream {
+    pub(crate) fn new(codec: Codec) -> Result<Self, String> {
+        match codec {
+            Codec::H264 => MockH264Stream::new().map(Self::H264),
+            Codec::H265 => MockH265Stream::new().map(Self::H265),
+        }
+    }
+
+    pub(crate) fn next_frame(&mut self) -> MockRtpFrame {
+        match self {
+            Self::H264(stream) => stream.next_frame(),
+            Self::H265(stream) => stream.next_frame(),
+        }
+    }
+}
+
 /// Loops a pre-encoded Annex-B fixture and packetizes each access unit as RTP.
 pub(crate) struct MockH264Stream {
     access_units: Vec<Vec<Range<usize>>>,
@@ -137,10 +161,66 @@ impl MockH264Stream {
         for (index, range) in access_unit.iter().enumerate() {
             let nalu = &H264[range.clone()];
             let last_nalu = index + 1 == access_unit.len();
-            packetize_nalu(
+            packetize_h264_nalu(
                 nalu,
                 self.timestamp,
                 last_nalu,
+                &mut self.sequence,
+                &mut packets,
+            );
+        }
+        self.frame_index = (self.frame_index + 1) % self.access_units.len();
+        self.timestamp = self.timestamp.wrapping_add(CLOCK_RATE / MOCK_FPS);
+        MockRtpFrame { packets }
+    }
+}
+
+/// Loops a pre-encoded Annex-B HEVC fixture and packetizes it as RFC 7798 RTP.
+pub(crate) struct MockH265Stream {
+    access_units: Vec<Vec<Range<usize>>>,
+    frame_index: usize,
+    timestamp: u32,
+    sequence: u16,
+}
+
+impl MockH265Stream {
+    pub(crate) fn new() -> Result<Self, String> {
+        let access_units = h265_access_units(H265);
+        if access_units.is_empty() {
+            return Err("embedded H.265 mock contains no access units".to_owned());
+        }
+        let first = &access_units[0];
+        for (kind, label) in [(32, "VPS"), (33, "SPS"), (34, "PPS")] {
+            if !first
+                .iter()
+                .any(|range| h265_nal_type(&H265[range.clone()]) == kind)
+            {
+                return Err(format!("embedded H.265 mock does not begin with a {label}"));
+            }
+        }
+        if !first
+            .iter()
+            .any(|range| matches!(h265_nal_type(&H265[range.clone()]), 16..=23))
+        {
+            return Err("embedded H.265 mock does not begin with an IRAP picture".to_owned());
+        }
+        Ok(Self {
+            access_units,
+            frame_index: 0,
+            timestamp: 0,
+            sequence: 1,
+        })
+    }
+
+    pub(crate) fn next_frame(&mut self) -> MockRtpFrame {
+        let access_unit = &self.access_units[self.frame_index];
+        let mut packets = Vec::new();
+        for (index, range) in access_unit.iter().enumerate() {
+            let nalu = &H265[range.clone()];
+            packetize_h265_nalu(
+                nalu,
+                self.timestamp,
+                index + 1 == access_unit.len(),
                 &mut self.sequence,
                 &mut packets,
             );
@@ -174,6 +254,35 @@ fn access_units(data: &[u8]) -> Vec<Vec<Range<usize>>> {
         units.push(pending);
     }
     units
+}
+
+fn h265_access_units(data: &[u8]) -> Vec<Vec<Range<usize>>> {
+    let mut units = Vec::new();
+    let mut pending = Vec::new();
+    let mut has_video_slice = false;
+    for range in annex_b_nalus(data) {
+        let nalu = &data[range.clone()];
+        let kind = h265_nal_type(nalu);
+        let is_video_slice = kind <= 31;
+        let starts_picture = is_video_slice && h265_first_slice_segment(nalu);
+        let prefixes_picture = matches!(kind, 32..=35 | 39);
+        if has_video_slice && (starts_picture || prefixes_picture) {
+            units.push(std::mem::take(&mut pending));
+            has_video_slice = false;
+        }
+        pending.push(range);
+        if is_video_slice {
+            has_video_slice = true;
+        }
+    }
+    if has_video_slice {
+        units.push(pending);
+    }
+    units
+}
+
+fn h265_first_slice_segment(nalu: &[u8]) -> bool {
+    nalu.get(2).is_some_and(|byte| byte & 0x80 != 0)
 }
 
 fn first_mb_in_slice(nalu: &[u8]) -> Option<u32> {
@@ -251,7 +360,11 @@ fn nal_type(nalu: &[u8]) -> u8 {
     nalu.first().copied().unwrap_or_default() & 0x1f
 }
 
-fn packetize_nalu(
+fn h265_nal_type(nalu: &[u8]) -> u8 {
+    nalu.first().copied().unwrap_or_default() >> 1 & 0x3f
+}
+
+fn packetize_h264_nalu(
     nalu: &[u8],
     timestamp: u32,
     marker: bool,
@@ -289,6 +402,54 @@ fn packetize_nalu(
             *sequence,
             end && marker,
             RTP_PAYLOAD_TYPE_H264,
+            VIDEO_SSRC,
+        ));
+        *sequence = sequence.wrapping_add(1);
+        offset += chunk_len;
+        first = false;
+    }
+}
+
+fn packetize_h265_nalu(
+    nalu: &[u8],
+    timestamp: u32,
+    marker: bool,
+    sequence: &mut u16,
+    packets: &mut Vec<Vec<u8>>,
+) {
+    if nalu.len() < 2 {
+        return;
+    }
+    if nalu.len() <= RTP_PAYLOAD_BYTES {
+        packets.push(rtp_packet(
+            nalu,
+            timestamp,
+            *sequence,
+            marker,
+            RTP_PAYLOAD_TYPE_H265,
+            VIDEO_SSRC,
+        ));
+        *sequence = sequence.wrapping_add(1);
+        return;
+    }
+
+    let nal_type = h265_nal_type(nalu);
+    let fu_indicator = [(nalu[0] & 0x81) | (49 << 1), nalu[1]];
+    let mut offset = 2usize;
+    let mut first = true;
+    while offset < nalu.len() {
+        let chunk_len = (nalu.len() - offset).min(RTP_PAYLOAD_BYTES - 3);
+        let end = offset + chunk_len == nalu.len();
+        let mut payload = Vec::with_capacity(chunk_len + 3);
+        payload.extend_from_slice(&fu_indicator);
+        payload.push((u8::from(first) << 7) | (u8::from(end) << 6) | nal_type);
+        payload.extend_from_slice(&nalu[offset..offset + chunk_len]);
+        packets.push(rtp_packet(
+            &payload,
+            timestamp,
+            *sequence,
+            end && marker,
+            RTP_PAYLOAD_TYPE_H265,
             VIDEO_SSRC,
         ));
         *sequence = sequence.wrapping_add(1);
@@ -372,6 +533,69 @@ mod tests {
     }
 
     #[test]
+    fn h265_fixture_contains_parameter_sets_and_irap() {
+        let stream = MockH265Stream::new().unwrap();
+        assert_eq!(stream.access_units.len(), 150);
+        for kind in [32, 33, 34] {
+            assert!(stream.access_units[0]
+                .iter()
+                .any(|range| h265_nal_type(&H265[range.clone()]) == kind));
+        }
+        assert!(stream.access_units[0]
+            .iter()
+            .any(|range| matches!(h265_nal_type(&H265[range.clone()]), 16..=23)));
+    }
+
+    #[test]
+    fn h265_rtp_round_trips_through_production_depacketizer() {
+        let mut stream = MockH265Stream::new().unwrap();
+        let mut depacketizer = openipc_core::RtpDepacketizer::new();
+        let mut frame = None;
+        for packet in stream.next_frame().packets {
+            if let Some(output) = depacketizer.push(&packet).unwrap() {
+                frame = Some(output);
+            }
+        }
+        let frame = frame.expect("first H.265 access unit should be emitted");
+        assert_eq!(frame.codec, Codec::H265);
+        assert!(frame.is_keyframe);
+        assert!(depacketizer.codec_config().h265_vps);
+        assert!(depacketizer.codec_config().h265_sps);
+        assert!(depacketizer.codec_config().h265_pps);
+    }
+
+    #[test]
+    fn h265_mock_uses_waybeam_rtp_wire_shape() {
+        let mut stream = MockH265Stream::new().unwrap();
+        let packets = stream.next_frame().packets;
+        let mut saw_single_nalu = false;
+        let mut saw_fragmentation_unit = false;
+
+        for packet in &packets {
+            let header = openipc_core::RtpHeader::parse(packet).unwrap();
+            assert_eq!(header.payload_type, RTP_PAYLOAD_TYPE_H265);
+            assert_eq!(header.ssrc, VIDEO_SSRC);
+            assert!(header.payload_len <= RTP_PAYLOAD_BYTES);
+
+            let payload = &packet[header.header_len..header.header_len + header.payload_len];
+            let nal_type = h265_nal_type(payload);
+            assert_ne!(nal_type, 48, "Waybeam does not emit aggregation packets");
+            if nal_type == 49 {
+                saw_fragmentation_unit = true;
+            } else {
+                saw_single_nalu = true;
+            }
+        }
+
+        assert!(saw_single_nalu, "expected separate VPS/SPS/PPS packets");
+        assert!(saw_fragmentation_unit, "expected an RFC 7798 type-49 FU");
+        assert!(packets.last().is_some_and(|packet| packet[1] & 0x80 != 0));
+        assert!(packets[..packets.len() - 1]
+            .iter()
+            .all(|packet| packet[1] & 0x80 == 0));
+    }
+
+    #[test]
     fn loop_preserves_monotonic_rtp_timing_and_sequence() {
         let mut stream = MockH264Stream::new().unwrap();
         let first = stream.next_frame();
@@ -393,7 +617,7 @@ mod tests {
 
     #[test]
     fn av_fixture_interleaves_h264_and_opus_rtp() {
-        let mut stream = MockAvStream::new().unwrap();
+        let mut stream = MockAvStream::new(Codec::H264).unwrap();
         let first = stream.next_event();
         assert!(first
             .packets
@@ -410,8 +634,22 @@ mod tests {
     }
 
     #[test]
+    fn av_fixture_interleaves_h265_and_opus_rtp() {
+        let mut stream = MockAvStream::new(Codec::H265).unwrap();
+        let first = stream.next_event();
+        assert!(first
+            .packets
+            .iter()
+            .any(|packet| packet[1] & 0x7f == RTP_PAYLOAD_TYPE_H265));
+        assert!(first
+            .packets
+            .iter()
+            .any(|packet| packet[1] & 0x7f == RTP_PAYLOAD_TYPE_OPUS));
+    }
+
+    #[test]
     fn late_live_mock_rebases_without_changing_av_order() {
-        let mut stream = MockAvStream::new().unwrap();
+        let mut stream = MockAvStream::new(Codec::H265).unwrap();
         let first = stream.next_event();
         let before_gap = stream
             .next_audio_micros
@@ -433,7 +671,7 @@ mod tests {
 
     #[test]
     fn opus_fixture_has_audible_signal_level() {
-        let stream = MockAvStream::new().unwrap();
+        let stream = MockAvStream::new(Codec::H265).unwrap();
         let mut decoder = ropus::Decoder::new(48_000, ropus::Channels::Mono).unwrap();
         let mut pcm = vec![0.0; 5_760];
         let frames = decoder
@@ -462,46 +700,55 @@ mod tests {
         };
         use openipc_video::{DecoderOptions, PlatformDecoder, VideoDecoder as _};
 
-        let mut source = MockH264Stream::new().unwrap();
-        let mut receiver = ReceiverRuntime::with_mock_video_route(
-            FrameLayout::WithFcs,
-            PayloadRouteId::new(1),
-            ChannelId::default_video(),
-            0,
-        );
-        let runtime = receiver.video_runtime();
-        let options = ReceiverBatchOptions::default();
-        let mut decoder = PlatformDecoder::new(DecoderOptions::default()).unwrap();
-        let mut payload_sequence = 1u64;
+        for codec in [Codec::H264, Codec::H265] {
+            let mut source = MockVideoStream::new(codec).unwrap();
+            let mut receiver = ReceiverRuntime::with_mock_video_route(
+                FrameLayout::WithFcs,
+                PayloadRouteId::new(1),
+                ChannelId::default_video(),
+                0,
+            );
+            let runtime = receiver.video_runtime();
+            let options = ReceiverBatchOptions::default();
+            let mut decoder = PlatformDecoder::new(DecoderOptions::default()).unwrap();
+            let mut payload_sequence = 1u64;
+            let mut decoded = None;
 
-        for _ in 0..60 {
-            for packet in source.next_frame().packets {
-                let batch = receiver
-                    .push_mock_payload(runtime, payload_sequence, &packet, &options)
-                    .unwrap();
-                payload_sequence = payload_sequence.wrapping_add(1);
-                for frame in batch.frames {
-                    decoder.submit(frame.into()).unwrap();
+            for _ in 0..60 {
+                for packet in source.next_frame().packets {
+                    let batch = receiver
+                        .push_mock_payload(runtime, payload_sequence, &packet, &options)
+                        .unwrap();
+                    payload_sequence = payload_sequence.wrapping_add(1);
+                    for frame in batch.frames {
+                        decoder.submit(frame.into()).unwrap_or_else(|error| {
+                            panic!("VideoToolbox rejected the {codec:?} fixture: {error}")
+                        });
+                    }
+                }
+                for _ in 0..10 {
+                    if let Some(frame) = decoder.latest_frame() {
+                        decoded = Some(frame);
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                if decoded.is_some() {
+                    break;
                 }
             }
-            for _ in 0..10 {
-                if let Some(frame) = decoder.latest_frame() {
-                    let presented = crate::video::present_frame(frame, &decoder).unwrap();
-                    assert_eq!(
-                        presented.rgba.len(),
-                        presented.dimensions.width as usize
-                            * presented.dimensions.height as usize
-                            * 4
-                    );
-                    return;
-                }
-                thread::sleep(Duration::from_millis(5));
-            }
+
+            let frame = decoded.unwrap_or_else(|| {
+                panic!(
+                    "VideoToolbox returned no {codec:?} frame: {:?}",
+                    decoder.stats()
+                )
+            });
+            let presented = crate::video::present_frame(frame, &decoder).unwrap();
+            assert_eq!(
+                presented.rgba.len(),
+                presented.dimensions.width as usize * presented.dimensions.height as usize * 4
+            );
         }
-
-        panic!(
-            "VideoToolbox returned no decoded frame: {:?}",
-            decoder.stats()
-        );
     }
 }

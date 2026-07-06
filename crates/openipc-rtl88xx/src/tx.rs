@@ -383,8 +383,8 @@ mod tests {
     use super::*;
     use openipc_core::ieee80211::build_wfb_header_with_frame_type;
     use openipc_core::radiotap::{
-        build_radiotap_header, build_stream_radiotap, ChannelBandwidth, TxRadioParams,
-        FRAME_TYPE_RTS,
+        build_radiotap_header, build_stream_radiotap, build_stream_radiotap_on_channel,
+        ChannelBandwidth, TxRadioParams, FRAME_TYPE_RTS,
     };
     use openipc_core::ChannelId;
 
@@ -493,6 +493,22 @@ mod tests {
             &usb[TX_DESC_SIZE..TX_DESC_SIZE + 2],
             &[FRAME_TYPE_RTS, 0x01]
         );
+    }
+
+    #[test]
+    fn channel_radiotap_is_stripped_without_changing_the_payload() {
+        let mut packet =
+            build_stream_radiotap_on_channel(TxMode::ht(4), 44).expect("valid WiFi channel");
+        let frame = build_wfb_header_with_frame_type(
+            ChannelId::default_video(),
+            [0x10, 0x00],
+            FRAME_TYPE_RTS,
+        );
+        packet.extend_from_slice(&frame);
+
+        let usb = build_usb_tx_frame(&packet, RealtekTxOptions::default()).unwrap();
+
+        assert_eq!(&usb[TX_DESC_SIZE..], &frame);
     }
 
     #[test]

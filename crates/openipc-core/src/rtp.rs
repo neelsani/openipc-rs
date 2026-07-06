@@ -578,6 +578,7 @@ impl RtpDepacketizer {
         let nal_type = fu_header & 0x1f;
         if start {
             self.h264.data.clear();
+            self.h264.data.extend_from_slice(&[0, 0, 0, 1]);
             self.h264.timestamp = header.timestamp;
             self.h264.next_sequence = Some(header.sequence_number.wrapping_add(1));
             self.h264.corrupted = false;
@@ -610,7 +611,7 @@ impl RtpDepacketizer {
                 nal_type,
             };
             self.reset_fragment(Codec::H264);
-            self.push_complete_owned_nalu(data, meta, header.marker)
+            self.push_complete_owned_annex_b(data, meta, header.marker, false)
         } else {
             Ok(None)
         }
@@ -630,10 +631,11 @@ impl RtpDepacketizer {
         let nal_type = fu_header & 0x3f;
         if start {
             self.h265.data.clear();
+            self.h265.data.extend_from_slice(&[0, 0, 0, 1]);
             self.h265.timestamp = header.timestamp;
             self.h265.next_sequence = Some(header.sequence_number.wrapping_add(1));
             self.h265.corrupted = false;
-            self.h265.data.push((nal_type << 1) | (payload[0] & 0x01));
+            self.h265.data.push((payload[0] & 0x81) | (nal_type << 1));
             self.h265.data.push(payload[1]);
         } else if !self.accept_fragment_sequence(Codec::H265, header.sequence_number) {
             return Ok(None);
@@ -663,7 +665,7 @@ impl RtpDepacketizer {
                 nal_type,
             };
             self.reset_fragment(Codec::H265);
-            self.push_complete_owned_nalu(data, meta, header.marker)
+            self.push_complete_owned_annex_b(data, meta, header.marker, false)
         } else {
             Ok(None)
         }
@@ -850,20 +852,14 @@ impl RtpDepacketizer {
         meta: FrameMeta,
         marker: bool,
     ) -> Result<Option<DepacketizedFrame>, RtpError> {
-        let mut owned = Vec::with_capacity(nalu.len());
-        owned.extend_from_slice(nalu);
-        self.push_complete_owned_nalu(owned, meta, marker)
-    }
-
-    fn push_complete_owned_nalu(
-        &mut self,
-        nalu: Vec<u8>,
-        meta: FrameMeta,
-        marker: bool,
-    ) -> Result<Option<DepacketizedFrame>, RtpError> {
-        let mut data = Vec::with_capacity(nalu.len().saturating_add(4));
-        append_annex_b(&mut data, &nalu);
-        self.push_complete_owned_annex_b(data, meta, marker, false)
+        let annex_b_len = nalu.len().saturating_add(4);
+        if !self.prepare_access_unit_append(meta, marker, annex_b_len)? {
+            return Ok(None);
+        }
+        let state = self.access_unit_mut(meta.codec);
+        state.data.extend_from_slice(&[0, 0, 0, 1]);
+        state.data.extend_from_slice(nalu);
+        self.finish_access_unit(meta, marker, false)
     }
 
     fn push_complete_owned_annex_b(
@@ -873,24 +869,49 @@ impl RtpDepacketizer {
         marker: bool,
         has_decoder_config: bool,
     ) -> Result<Option<DepacketizedFrame>, RtpError> {
+        if !self.prepare_access_unit_append(meta, marker, annex_b.len())? {
+            return Ok(None);
+        }
+        let state = self.access_unit_mut(meta.codec);
+        if state.data.is_empty() {
+            state.data = annex_b;
+        } else {
+            state.data.extend_from_slice(&annex_b);
+        }
+        self.finish_access_unit(meta, marker, has_decoder_config)
+    }
+
+    fn prepare_access_unit_append(
+        &mut self,
+        meta: FrameMeta,
+        marker: bool,
+        additional_len: usize,
+    ) -> Result<bool, RtpError> {
         let max_fragment = self.max_fragment;
-        let state = match meta.codec {
-            Codec::H264 => &mut self.h264_access_unit,
-            Codec::H265 => &mut self.h265_access_unit,
-        };
+        let state = self.access_unit_mut(meta.codec);
         debug_assert_eq!(state.timestamp, Some(meta.timestamp));
         if state.corrupted {
             if marker {
                 reset_access_unit_state(state);
             }
-            return Ok(None);
+            return Ok(false);
         }
-        if state.data.len().saturating_add(annex_b.len()) > max_fragment {
+        if state.data.len().saturating_add(additional_len) > max_fragment {
             reset_access_unit_state(state);
             self.status.fragment_overflows = self.status.fragment_overflows.saturating_add(1);
             return Err(RtpError::FragmentOverflow);
         }
-        state.data.extend_from_slice(&annex_b);
+        state.data.reserve(additional_len);
+        Ok(true)
+    }
+
+    fn finish_access_unit(
+        &mut self,
+        meta: FrameMeta,
+        marker: bool,
+        has_decoder_config: bool,
+    ) -> Result<Option<DepacketizedFrame>, RtpError> {
+        let state = self.access_unit_mut(meta.codec);
         state.is_keyframe |= meta.is_keyframe;
         state.has_decoder_config |= has_decoder_config;
         state.nal_type = meta.nal_type;
@@ -919,6 +940,13 @@ impl RtpDepacketizer {
             nal_type,
             codec_config: self.codec_config(),
         }))
+    }
+
+    fn access_unit_mut(&mut self, codec: Codec) -> &mut AccessUnitState {
+        match codec {
+            Codec::H264 => &mut self.h264_access_unit,
+            Codec::H265 => &mut self.h265_access_unit,
+        }
     }
 
     fn observe_access_unit_packet(&mut self, codec: Codec, header: RtpHeader) {
@@ -1466,6 +1494,125 @@ mod tests {
         let status = depay.status();
         assert_eq!(status.keyframes_with_prepended_config, 1);
         assert_eq!(status.parameter_sets_prepended, 3);
+    }
+
+    #[test]
+    fn waybeam_separate_parameter_sets_bootstrap_an_idr() {
+        // Mirrors waybeam_venc's hevc_rtp test contract: PT 97, no type-48
+        // aggregation, separate VPS/SPS/PPS packets, and marker only on IDR.
+        let packets: [&[u8]; 4] = [
+            &[
+                0x80, 0x61, 0x01, 0x00, 0, 0, 0x10, 0, 0, 0, 0xde, 0xad, 0x40, 0x01, 0xaa,
+            ],
+            &[
+                0x80, 0x61, 0x01, 0x01, 0, 0, 0x10, 0, 0, 0, 0xde, 0xad, 0x42, 0x01, 0xbb,
+            ],
+            &[
+                0x80, 0x61, 0x01, 0x02, 0, 0, 0x10, 0, 0, 0, 0xde, 0xad, 0x44, 0x01, 0xcc,
+            ],
+            &[
+                0x80, 0xe1, 0x01, 0x03, 0, 0, 0x10, 0, 0, 0, 0xde, 0xad, 0x26, 0x01, 0xdd,
+            ],
+        ];
+        let mut depay = RtpDepacketizer::new();
+        let mut frame = None;
+        for packet in packets {
+            if let Some(output) = depay.push(packet).unwrap() {
+                frame = Some(output);
+            }
+        }
+
+        let frame = frame.expect("Waybeam IDR should produce an access unit");
+        assert_eq!(frame.codec, Codec::H265);
+        assert!(frame.is_keyframe);
+        assert_eq!(
+            frame.data,
+            [
+                &[0, 0, 0, 1, 0x40, 0x01, 0xaa][..],
+                &[0, 0, 0, 1, 0x42, 0x01, 0xbb][..],
+                &[0, 0, 0, 1, 0x44, 0x01, 0xcc][..],
+                &[0, 0, 0, 1, 0x26, 0x01, 0xdd][..],
+            ]
+            .concat()
+        );
+    }
+
+    #[test]
+    fn waybeam_hevc_fu_vector_round_trips() {
+        let mut depay = RtpDepacketizer::new();
+        for (sequence, payload) in [
+            (0x1ffd, &[0x40, 0x01, 0xaa][..]),
+            (0x1ffe, &[0x42, 0x01, 0xbb][..]),
+            (0x1fff, &[0x44, 0x01, 0xcc][..]),
+        ] {
+            depay
+                .push(&rtp_with_payload_type(
+                    payload,
+                    RTP_PAYLOAD_TYPE_H265,
+                    false,
+                    sequence,
+                    0x0101_0100,
+                ))
+                .unwrap();
+        }
+
+        // Literal output from Waybeam's max_payload=5 FU test for the NAL
+        // 26 01 aa bb cc dd ee. The final packet alone carries the marker.
+        let fragments: [&[u8]; 3] = [
+            &[
+                0x80, 0x61, 0x20, 0x00, 1, 1, 1, 1, 2, 2, 2, 2, 0x62, 0x01, 0x93, 0xaa, 0xbb,
+            ],
+            &[
+                0x80, 0x61, 0x20, 0x01, 1, 1, 1, 1, 2, 2, 2, 2, 0x62, 0x01, 0x13, 0xcc, 0xdd,
+            ],
+            &[
+                0x80, 0xe1, 0x20, 0x02, 1, 1, 1, 1, 2, 2, 2, 2, 0x62, 0x01, 0x53, 0xee,
+            ],
+        ];
+        let mut frame = None;
+        for packet in fragments {
+            if let Some(output) = depay.push(packet).unwrap() {
+                frame = Some(output);
+            }
+        }
+
+        let frame = frame.expect("Waybeam FU chain should produce an access unit");
+        assert_eq!(frame.codec, Codec::H265);
+        assert!(frame.is_keyframe);
+        assert!(frame
+            .data
+            .ends_with(&[0, 0, 0, 1, 0x26, 0x01, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]));
+    }
+
+    #[test]
+    fn waybeam_refpred_trail_n_fu_is_accepted() {
+        let mut depay = RtpDepacketizer::new();
+        prime_h265(&mut depay);
+        let fragments: [&[u8]; 2] = [
+            &[
+                0x80, 0x61, 0x07, 0x00, 0, 0, 0x70, 0, 0, 0, 0x43, 0x21, 0x62, 0x01, 0x80, 0x55,
+                0x66,
+            ],
+            &[
+                0x80, 0xe1, 0x07, 0x01, 0, 0, 0x70, 0, 0, 0, 0x43, 0x21, 0x62, 0x01, 0x40, 0x77,
+                0x88,
+            ],
+        ];
+        let mut frame = None;
+        for packet in fragments {
+            if let Some(output) = depay.push(packet).unwrap() {
+                frame = Some(output);
+            }
+        }
+
+        let frame = frame.expect("Waybeam TRAIL_N FU chain should be emitted");
+        assert_eq!(frame.codec, Codec::H265);
+        assert!(!frame.is_keyframe);
+        assert_eq!(frame.nal_type, 0);
+        assert_eq!(
+            frame.data,
+            &[0, 0, 0, 1, 0x00, 0x01, 0x55, 0x66, 0x77, 0x88]
+        );
     }
 
     #[test]

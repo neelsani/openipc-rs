@@ -122,9 +122,23 @@ impl PayloadPipeline {
         &mut self,
         payload: &[u8],
     ) -> Result<Vec<PayloadPipelineEvent>, WfbError> {
+        let mut events = Vec::new();
+        self.push_matched_payload_into(payload, &mut events)?;
+        Ok(events)
+    }
+
+    pub(crate) fn push_matched_payload_into(
+        &mut self,
+        payload: &[u8],
+        events: &mut Vec<PayloadPipelineEvent>,
+    ) -> Result<(), WfbError> {
+        events.clear();
         if let Some(receiver) = self.wfb_receiver.as_mut() {
-            let events = receiver.push_forwarder_packet(payload)?;
-            return Ok(self.map_wfb_events(events));
+            let channel_id = self.channel_id;
+            receiver.push_forwarder_packet_with(payload, &mut |event| {
+                events.push(map_wfb_event(channel_id, event));
+            })?;
+            return Ok(());
         }
 
         match parse_forwarder_packet(payload)? {
@@ -132,8 +146,22 @@ impl PayloadPipeline {
                 data_nonce,
                 encrypted_payload,
                 ..
-            } => self.push_decrypted_fragment(data_nonce, encrypted_payload),
-            WfbPacket::SessionKey { .. } => Ok(Vec::new()),
+            } => {
+                let channel_id = self.channel_id;
+                self.assembler.push_decrypted_fragment_with(
+                    data_nonce,
+                    encrypted_payload,
+                    &mut |payload| {
+                        events.push(PayloadPipelineEvent::Payload(RecoveredPayload {
+                            channel_id,
+                            packet_seq: payload.packet_seq,
+                            data: payload.payload,
+                        }));
+                    },
+                )?;
+                Ok(())
+            }
+            WfbPacket::SessionKey { .. } => Ok(()),
         }
     }
 
@@ -177,23 +205,20 @@ impl PayloadPipeline {
             })
             .collect())
     }
+}
 
-    fn map_wfb_events(&self, events: Vec<WfbEvent>) -> Vec<PayloadPipelineEvent> {
-        events
-            .into_iter()
-            .map(|event| match event {
-                WfbEvent::Session(session) => PayloadPipelineEvent::SessionEstablished {
-                    epoch: session.epoch,
-                    fec_k: session.fec_k,
-                    fec_n: session.fec_n,
-                },
-                WfbEvent::Payload(payload) => PayloadPipelineEvent::Payload(RecoveredPayload {
-                    channel_id: self.channel_id,
-                    packet_seq: payload.packet_seq,
-                    data: payload.payload,
-                }),
-            })
-            .collect()
+fn map_wfb_event(channel_id: ChannelId, event: WfbEvent) -> PayloadPipelineEvent {
+    match event {
+        WfbEvent::Session(session) => PayloadPipelineEvent::SessionEstablished {
+            epoch: session.epoch,
+            fec_k: session.fec_k,
+            fec_n: session.fec_n,
+        },
+        WfbEvent::Payload(payload) => PayloadPipelineEvent::Payload(RecoveredPayload {
+            channel_id,
+            packet_seq: payload.packet_seq,
+            data: payload.payload,
+        }),
     }
 }
 

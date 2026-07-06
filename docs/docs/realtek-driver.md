@@ -192,6 +192,14 @@ normal bulk RX/TX loop for the duration of the radio register sequence. Nebulus
 uses this boundary for its idle channel scanner and shuts monitor mode down
 when the survey ends.
 
+For hopping or spectrum surveys, `fast_retune` and `fast_retune_async` preserve
+the initialized width and primary-channel offset while running the lean
+generation-specific register sequence. The returned `RetuneReport` states
+whether the fast path ran. Band changes, RTL8814, and any family-specific
+unsupported case transparently use the full retune path. The device-owned TX
+APIs also honor a radiotap CHANNEL field before building the Realtek descriptor,
+which makes channel selection a per-packet input alongside RATE/MCS/VHT.
+
 Android is another transport boundary. Nebulus calls `UsbManager` through its
 small JNI module for discovery and permission, then wraps the already-open file
 descriptor with `nusb::Device::from_fd`. The legacy Station performs the same
@@ -333,13 +341,13 @@ Current status:
 - RTL8812 thermal power tracking, RTL8812 IQK, RTL8814 IQK, and the PHYDM
   false-alarm/DIG watchdog have Rust implementations. They are exposed natively
   and through WASM, but still need register-trace comparison on real adapters.
-- Jaguar2 support is audited through devourer `4df2a3b`.
+- Jaguar2 support is audited through devourer `3ec1ab1`.
   Both firmware images and their MAC/PHY/AGC/RF/TX-limit tables reproduce from
   checked-in importers. Both chips have their variant-specific software IQK
   state machines; RTL8821C uses its one-path BTG/WLG/WLA LOK/TXK/RXK flow.
   Live cold-plug/on-air validation is required.
 - RTL8812CU/EU and RTL8822CU/EU Jaguar3 support is audited through devourer
-  `4df2a3b`. The RTL8822E firmware and generated table arrays are
+  `3ec1ab1`. The RTL8822E firmware and generated table arrays are
   byte-for-byte equal to the reference commit. Chip-ID dispatch, V1 EFUSE,
   PA-bias, RFE defaults/pinmux, DACK, IQK, TXGAPK, DPK bypass, per-rate TXAGC,
   thermal tracking, descriptors, coex/H2C, and shutdown are implemented. This
@@ -354,6 +362,12 @@ Current status:
   RTL8812 TX-power EFUSE rereads with IC-default fallback, Jaguar3 DACK/IQK
   retries, persistent timeout-free RX submissions, and desktop
   topology-lock/claim-before-reset ownership.
+- Devourer `3ec1ab1` fast retuning is represented for Jaguar1, Jaguar2, and
+  Jaguar3, including automatic full fallback, per-packet radiotap CHANNEL
+  selection, shared channel/frequency and sweep-list grammar, write-only
+  Jaguar2/Jaguar3 compose caches, and the hardware-validated kickless Jaguar2
+  hop path. Per-stage timings are available through the
+  `openipc_rtl88xx::hop_prof` trace target or `DEVOURER_HOP_PROF=1` natively.
 - Newer devourer runtime TX-mode behavior is mirrored: radiotap RATE/MCS/VHT
   wins, a programmatic default can fill rate-less packets, 5 GHz CCK TX is
   clamped to OFDM, and the newer 8812/8821/8814 descriptor differences are

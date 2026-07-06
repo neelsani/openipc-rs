@@ -13,6 +13,7 @@ use std::sync::{Mutex, OnceLock};
 use crate::async_continuous_tx::ContinuousTxState;
 use crate::async_cw::CwToneState;
 use crate::async_efuse::EfuseInfo;
+use crate::retune_state::FastRetuneState;
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::regs::*;
@@ -58,6 +59,7 @@ pub struct RealtekDevice {
     pub(crate) h2c_box: AtomicU8,
     pub(crate) cw_tone: Mutex<CwToneState>,
     pub(crate) continuous_tx: Mutex<ContinuousTxState>,
+    pub(crate) retune_state: Mutex<FastRetuneState>,
     #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
     pub(crate) _usb_lock: Option<UsbDeviceLock>,
 }
@@ -321,6 +323,7 @@ impl RealtekDevice {
             h2c_box: AtomicU8::new(0),
             cw_tone: Mutex::new(CwToneState::default()),
             continuous_tx: Mutex::new(ContinuousTxState::default()),
+            retune_state: Mutex::new(FastRetuneState::default()),
             #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
             _usb_lock: usb_lock,
         })
@@ -395,6 +398,16 @@ impl RealtekDevice {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Lean same-band retune using the current channel width and offset.
+    pub fn fast_retune(
+        &self,
+        channel: u8,
+        cache_rf: bool,
+    ) -> Result<crate::RetuneReport, DriverError> {
+        block_on_ready(self.fast_retune_async(channel, cache_rf))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     /// Select the active Jaguar1 receive chains for diversity diagnostics.
     pub fn set_rx_path_mask(&self, mask: u8) -> Result<(), DriverError> {
         block_on_ready(self.set_rx_path_mask_async(mask))
@@ -444,9 +457,14 @@ impl RealtekDevice {
     pub fn send_packet_for_radio(
         &self,
         radiotap_packet: &[u8],
-        radio: crate::types::RadioConfig,
+        mut radio: crate::types::RadioConfig,
     ) -> Result<usize, DriverError> {
         let chip = self.probe_chip()?;
+        if let Some(channel) = openipc_core::parse_radiotap_tx_channel(radiotap_packet)
+            .map_err(|error| DriverError::TxBuild(error.into()))?
+        {
+            radio = self.fast_retune(channel, true)?.radio;
+        }
         let usb_frame = build_usb_tx_frame(
             radiotap_packet,
             RealtekTxOptions {

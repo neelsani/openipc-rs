@@ -14,7 +14,7 @@ use super::{
     worker_scope,
 };
 
-const MAX_QUEUED_ACCESS_UNITS: usize = 8;
+const MAX_QUEUED_ACCESS_UNITS: usize = 3;
 const DECODE_SUBMIT_HIGH_WATER: usize = 2;
 
 thread_local! {

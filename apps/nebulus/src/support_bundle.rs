@@ -92,6 +92,10 @@ pub(crate) fn build(app: &NebulusApp) -> Result<SupportBundle, String> {
                 "wfb_frames": result.wfb_frames,
                 "average_rssi_dbm": result.average_rssi_dbm,
                 "strongest_rssi_dbm": result.strongest_rssi_dbm,
+                "average_snr_db": result.average_snr_db,
+                "average_evm_db": result.average_evm_db,
+                "retune_us": result.retune_us,
+                "used_fast_retune": result.used_fast_retune,
                 "dwell_ms": result.dwell_ms,
             })
         })
@@ -338,6 +342,18 @@ pub(crate) fn build(app: &NebulusApp) -> Result<SupportBundle, String> {
             "uplink_packets": app.vpn.uplink_packets,
             "uplink_bytes": app.vpn.uplink_bytes,
             "errors": app.vpn.errors,
+        },
+        "vtx_control": {
+            "state": format!("{:?}", app.vtx_control.state),
+            "video_mode": app.vtx_control.video_mode,
+            "tunnel_packets_received": app.vtx_control.network.tunnel_packets_received,
+            "tunnel_bytes_received": app.vtx_control.network.tunnel_bytes_received,
+            "tunnel_packets_sent": app.vtx_control.network.tunnel_packets_sent,
+            "tunnel_bytes_sent": app.vtx_control.network.tunnel_bytes_sent,
+            "malformed_tunnel_packets": app.vtx_control.network.malformed_tunnel_packets,
+            "tcp_connections_opened": app.vtx_control.network.tcp_connections_opened,
+            "tcp_connection_failures": app.vtx_control.network.tcp_connection_failures,
+            "tcp_connections_active": app.vtx_control.network.tcp_connections_active,
         },
         "channel_scan": scan_results,
     });

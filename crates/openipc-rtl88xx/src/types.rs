@@ -390,6 +390,15 @@ impl Default for RadioConfig {
     }
 }
 
+/// Result of an initialized adapter channel retune.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetuneReport {
+    /// Radio configuration active after the operation.
+    pub radio: RadioConfig,
+    /// True when the lean same-band path was used instead of a full retune.
+    pub used_fast_path: bool,
+}
+
 /// Device open and endpoint selection options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DriverOptions {
@@ -605,6 +614,9 @@ pub enum DriverError {
     Nusb(String),
     /// Internal state lock was poisoned by a prior panic.
     DriverStatePoisoned,
+    /// A retune was requested before monitor-mode initialization established
+    /// the active channel width and primary-channel offset.
+    RadioNotInitialized,
     /// No matching supported adapter was found.
     DeviceNotFound,
     /// Another process owns the selected physical adapter.
@@ -647,6 +659,9 @@ impl fmt::Display for DriverError {
         match self {
             Self::Nusb(message) => write!(f, "{message}"),
             Self::DriverStatePoisoned => write!(f, "Realtek driver state lock was poisoned"),
+            Self::RadioNotInitialized => {
+                write!(f, "Realtek radio has not been initialized")
+            }
             Self::DeviceNotFound => write!(f, "no supported Realtek rtl88xx adapter found"),
             Self::DeviceBusy(device) => write!(f, "USB adapter {device} is already in use"),
             Self::EndpointNotFound(kind) => write!(f, "no {kind} endpoint found on interface 0"),

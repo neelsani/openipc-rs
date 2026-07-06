@@ -39,10 +39,11 @@ the general copying fallback.
 
 The decoder uses a small platform-bounded input queue. Decoded output is a
 single latest-frame slot: a newer native surface replaces an older surface that
-egui has not presented. Desktop targets upload NV12 or YUV planes to persistent
-GPU textures and perform color conversion in a shader. Android instead renders
-MediaCodec output directly into a SurfaceTexture external GLES texture, avoiding
-decoded-plane mapping and per-frame texture upload.
+egui has not presented. macOS imports VideoToolbox IOSurface planes directly
+into Metal/wgpu textures. Linux and Windows upload only the newest NV12 surface
+into persistent GPU textures and perform color conversion in a shader. Android
+renders MediaCodec output directly into a SurfaceTexture external GLES texture,
+avoiding decoded-plane mapping and per-frame texture upload.
 
 Desktop wgpu presentation requests a non-vsynced surface with one frame of
 surface latency. The exact present mode still depends on the graphics backend
@@ -81,7 +82,8 @@ ignored by the browser.
 
 ## Queue Policy
 
-- Four USB reads stay in flight.
+- Four USB reads stay in flight, while at most two completed transfers per
+  adapter wait for protocol processing.
 - RTP reordering is disabled by default; enable it only for measured
   out-of-order delivery.
 - Decoder input is bounded per platform. Overload discards stale work, resets
@@ -89,7 +91,7 @@ ignored by the browser.
 - Decoded output is latest-only.
 - Runtime metrics and counters are emitted at 20 Hz. Worker output transfer is
   paced by animation frames and remains independent of that throttle.
-- Native audio requests a 256-frame device buffer and caps queued PCM at 40 ms.
+- Native audio requests a 256-frame device buffer and caps queued PCM at 20 ms.
   Web Audio restarts near 5 ms and trims a schedule that exceeds 40 ms.
 
 After decoder reset or overload, playback waits for codec parameter sets and a
@@ -141,3 +143,32 @@ uses a direct MediaCodec surface on Android. Nebulus removes the former
 handoffs and uses the same direct-surface class of path as PixelPilot on
 Android, but performance claims still require the same adapter, VTX stream,
 display mode, and a synchronized glass-to-glass test.
+
+## Reproducible Microbenchmarks
+
+Run the Rust protocol benchmark without hardware:
+
+```sh
+cargo bench -p openipc-core --bench dataplane --locked
+```
+
+To compare the same WFB 8/12 recovery workload with PixelPilot's vendored
+`zfex.c`, keep a PixelPilot checkout next to `openipc-rs` and run:
+
+```sh
+./scripts/benchmark-reference-fec.sh
+```
+
+Pass another wfb-ng source directory as the first argument to test the zfex
+revision used by Aviateur or another receiver. On an Apple Silicon development
+machine, the July 2026 median results were:
+
+| WFB recovery workload                   | `openipc-core` | PixelPilot zfex |
+| --------------------------------------- | -------------: | --------------: |
+| One missing fragment, 3996 bytes        |       0.812 us |        0.935 us |
+| Four missing fragments, 3996 bytes each |       3.171 us |        3.349 us |
+
+These figures isolate FEC math and memory handling. They are machine-specific
+and do not establish glass-to-glass latency. Use the same adapter, encoded
+stream, decoder, display mode, and high-speed-camera test for an end-to-end
+comparison.

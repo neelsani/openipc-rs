@@ -99,6 +99,7 @@ impl RealtekDevice {
             continuous_tx: std::sync::Mutex::new(
                 crate::async_continuous_tx::ContinuousTxState::default(),
             ),
+            retune_state: std::sync::Mutex::new(crate::retune_state::FastRetuneState::default()),
         })
     }
 
@@ -144,6 +145,7 @@ impl RealtekDevice {
                 .await?;
             self.apply_interference_mitigation_async(chip, radio, options)
                 .await?;
+            self.note_full_tune(radio)?;
             return Ok(report);
         }
         let mut firmware_downloaded = false;
@@ -178,6 +180,7 @@ impl RealtekDevice {
                 .await?;
             self.apply_interference_mitigation_async(chip, radio, options)
                 .await?;
+            self.note_full_tune(radio)?;
             return Ok(report);
         }
 
@@ -270,6 +273,7 @@ impl RealtekDevice {
             report.status,
             report.firmware_downloaded
         );
+        self.note_full_tune(radio)?;
         Ok(report)
     }
 
@@ -292,16 +296,14 @@ impl RealtekDevice {
     pub async fn retune_async(&self, radio: RadioConfig) -> Result<(), DriverError> {
         let chip = self.probe_chip_async().await?;
         if chip.family.is_jaguar3() {
-            return self
-                .set_channel_bwmode_8822c_async(
-                    chip,
-                    radio.channel,
-                    radio.channel_offset,
-                    radio.channel_width,
-                )
-                .await;
-        }
-        if chip.family.is_jaguar2() {
+            self.set_channel_bwmode_8822c_async(
+                chip,
+                radio.channel,
+                radio.channel_offset,
+                radio.channel_width,
+            )
+            .await?;
+        } else if chip.family.is_jaguar2() {
             let efuse = if let Some(efuse) = self.efuse_info.get().copied() {
                 efuse
             } else {
@@ -309,19 +311,99 @@ impl RealtekDevice {
                 let _ = self.efuse_info.set(efuse);
                 efuse
             };
-            return self
-                .set_channel_bw_8822b_async(chip, radio, efuse.rfe_type)
-                .await;
-        }
-        let efuse = if let Some(efuse) = self.efuse_info.get().copied() {
-            efuse
+            self.set_channel_bw_8822b_async(chip, radio, efuse.rfe_type)
+                .await?;
         } else {
-            let efuse = self.read_efuse_info_async(chip).await?;
-            let _ = self.efuse_info.set(efuse);
-            efuse
+            let efuse = if let Some(efuse) = self.efuse_info.get().copied() {
+                efuse
+            } else {
+                let efuse = self.read_efuse_info_async(chip).await?;
+                let _ = self.efuse_info.set(efuse);
+                efuse
+            };
+            self.set_channel_with_options_async(chip, radio, efuse, false)
+                .await?;
+        }
+        self.note_full_tune(radio)
+    }
+
+    /// Return the radio configuration tracked after initialization or retuning.
+    pub fn current_radio_config(&self) -> Result<Option<RadioConfig>, DriverError> {
+        Ok(self
+            .retune_state
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)?
+            .radio)
+    }
+
+    /// Lean same-band retune using the current width and primary-channel offset.
+    ///
+    /// Band changes automatically use the full retune path. `cache_rf` controls
+    /// whether supported chips reuse their RF18 snapshots between hops.
+    pub async fn fast_retune_async(
+        &self,
+        channel: u8,
+        cache_rf: bool,
+    ) -> Result<crate::types::RetuneReport, DriverError> {
+        let current = self
+            .current_radio_config()?
+            .ok_or(DriverError::RadioNotInitialized)?;
+        let next = RadioConfig { channel, ..current };
+        if channel == current.channel {
+            return Ok(crate::types::RetuneReport {
+                radio: current,
+                used_fast_path: true,
+            });
+        }
+        let chip = self.probe_chip_async().await?;
+        let same_band = (current.channel <= 14) == (channel <= 14);
+        let used_fast_path = if !same_band {
+            false
+        } else {
+            match chip.family {
+                ChipFamily::Rtl8812 | ChipFamily::Rtl8821 => {
+                    self.fast_retune_jaguar1_async(chip, current, channel, cache_rf)
+                        .await?
+                }
+                ChipFamily::Rtl8814 => false,
+                ChipFamily::Rtl8822b | ChipFamily::Rtl8821c => {
+                    self.fast_retune_jaguar2_async(chip, current, channel, cache_rf)
+                        .await?
+                }
+                ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
+                    self.fast_retune_jaguar3_async(chip, current, channel, cache_rf)
+                        .await?
+                }
+            }
         };
-        self.set_channel_with_options_async(chip, radio, efuse, false)
-            .await
+        if used_fast_path {
+            self.retune_state
+                .lock()
+                .map_err(|_| DriverError::DriverStatePoisoned)?
+                .radio = Some(next);
+        } else {
+            self.retune_async(next).await?;
+        }
+        Ok(crate::types::RetuneReport {
+            radio: next,
+            used_fast_path,
+        })
+    }
+
+    fn note_full_tune(&self, radio: RadioConfig) -> Result<(), DriverError> {
+        self.retune_state
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)?
+            .note_full_tune(radio);
+        Ok(())
+    }
+
+    pub(crate) fn invalidate_jaguar3_fast_cache(&self) -> Result<(), DriverError> {
+        self.retune_state
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)?
+            .invalidate_jaguar3();
+        Ok(())
     }
 
     /// Select the active Jaguar1 receive chains.
@@ -637,8 +719,15 @@ impl RealtekDevice {
     pub async fn send_packet_async(
         &self,
         radiotap_packet: &[u8],
-        options: RealtekTxOptions,
+        mut options: RealtekTxOptions,
     ) -> Result<usize, DriverError> {
+        if let Some(channel) = openipc_core::parse_radiotap_tx_channel(radiotap_packet)
+            .map_err(|error| DriverError::TxBuild(error.into()))?
+        {
+            let report = self.fast_retune_async(channel, true).await?;
+            options.current_channel = report.radio.channel;
+            options.configured_channel_width = report.radio.channel_width;
+        }
         let usb_frame =
             build_usb_tx_frame(radiotap_packet, options).map_err(DriverError::TxBuild)?;
         self.write_tx_transfer_async(&usb_frame).await

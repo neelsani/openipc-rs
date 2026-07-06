@@ -196,6 +196,165 @@ const POWER_OFF_8821C_USB: &[PowerStep] = &[
 ];
 
 impl RealtekDevice {
+    pub(crate) async fn fast_retune_jaguar2_async(
+        &self,
+        chip: ChipInfo,
+        current: RadioConfig,
+        channel: u8,
+        cache_rf: bool,
+    ) -> Result<bool, DriverError> {
+        let width = match current.channel_width {
+            ChannelWidth::Mhz20 => 0,
+            ChannelWidth::Mhz40 => 1,
+            ChannelWidth::Mhz80 => 2,
+            ChannelWidth::Mhz5 | ChannelWidth::Mhz10 => return Ok(false),
+        };
+        let center = center_channel_8822b(channel, width, current.channel_offset);
+        let is_2g = center <= 14;
+        let is_8821c = chip.family == ChipFamily::Rtl8821c;
+        let mut profiler = crate::hop_prof::HopProfiler::new("j2", channel);
+        let mut state = self
+            .retune_state
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)?
+            .jaguar2
+            .clone();
+        if !cache_rf || !state.compose_primed {
+            state.rf18 = Some(self.query_rf_reg_async(chip, RfPath::A, 0x18).await?);
+            state.compose_agc = self
+                .read_u32_async(if is_8821c { 0x0c1c } else { 0x0958 })
+                .await?;
+            state.compose_fc = self.read_u32_async(0x0860).await?;
+            if !is_8821c {
+                state.compose_rf_be = self.query_rf_reg_async(chip, RfPath::A, 0xbe).await?;
+            }
+            state.compose_primed = true;
+        }
+        profiler.mark("prime");
+        let mut rf18 = state.rf18.expect("RF18 cache was primed") & !(BIT18 | BIT17 | 0xff);
+        rf18 |= u32::from(center);
+
+        let agc_bucket = match center {
+            1..=14 => Some(0),
+            36..=64 => Some(1),
+            100..=144 => Some(2),
+            149..=u8::MAX => Some(3),
+            _ => None,
+        };
+        if let Some(bucket) = agc_bucket {
+            if state.last_agc_bucket != Some(bucket) {
+                if is_8821c {
+                    state.compose_agc =
+                        (state.compose_agc & !0x0000_0f00) | (u32::from(bucket) << 8);
+                    self.write_u32_async(0x0c1c, state.compose_agc).await?;
+                } else {
+                    state.compose_agc = (state.compose_agc & !0x1f) | u32::from(bucket);
+                    self.write_u32_async(0x0958, state.compose_agc).await?;
+                }
+                state.last_agc_bucket = Some(bucket);
+            }
+        }
+        let fc = match center {
+            1..=14 => Some(0x96a),
+            36..=48 => Some(0x494),
+            52..=64 => Some(0x453),
+            100..=116 => Some(0x452),
+            118..=177 => Some(0x412),
+            _ => None,
+        };
+        if let Some(fc) = fc {
+            if state.last_fc != Some(fc) {
+                state.compose_fc = (state.compose_fc & !0x1ffe_0000) | (fc << 17);
+                self.write_u32_async(0x0860, state.compose_fc).await?;
+                state.last_fc = Some(fc);
+            }
+        }
+
+        if is_8821c {
+            if !is_2g {
+                if (100..=140).contains(&center) {
+                    rf18 |= BIT17;
+                } else if center > 140 {
+                    rf18 |= BIT18;
+                }
+            } else {
+                let channel14 = center == 14;
+                if state.last_cck_key != Some(channel14) {
+                    let defaults = [
+                        self.read_u32_async(0x0a24).await.unwrap_or(0),
+                        self.read_u32_async(0x0a28).await.unwrap_or(0),
+                        self.read_u32_async(0x0aac).await.unwrap_or(0),
+                    ];
+                    let defaults = *self.cck_filter_8821c.get_or_init(|| defaults);
+                    if channel14 {
+                        self.write_u32_async(0x0a24, 0x0000_b81c).await?;
+                        self.set_bb_reg_async(0x0a28, 0xffff, 0).await?;
+                        self.write_u32_async(0x0aac, 0x0000_3667).await?;
+                    } else {
+                        self.write_u32_async(0x0a24, defaults[0]).await?;
+                        self.set_bb_reg_async(0x0a28, 0xffff, defaults[1] & 0xffff)
+                            .await?;
+                        self.write_u32_async(0x0aac, defaults[2]).await?;
+                    }
+                    state.last_cck_key = Some(channel14);
+                }
+            }
+        } else {
+            if let Some(rf_be) = rf_be_8822b(center) {
+                if state.last_rf_be != Some(rf_be) {
+                    state.compose_rf_be =
+                        (state.compose_rf_be & !0x0003_8000) | (u32::from(rf_be) << 15);
+                    self.set_rf_reg_async(chip, RfPath::A, 0xbe, RF_MASK, state.compose_rf_be)
+                        .await?;
+                    state.last_rf_be = Some(rf_be);
+                }
+            }
+            let df18 = center == 144;
+            if state.last_df18 != Some(df18) {
+                self.set_rf_reg_async(chip, RfPath::A, 0xdf, BIT18, u32::from(df18))
+                    .await?;
+                state.last_df18 = Some(df18);
+            }
+            if center == 144 {
+                rf18 |= BIT17;
+            } else if center > 144 {
+                rf18 |= BIT18;
+            } else if center >= 80 {
+                rf18 |= BIT17;
+            }
+            if is_2g {
+                let channel14 = center == 14;
+                if state.last_cck_key != Some(channel14) {
+                    if channel14 {
+                        self.write_u32_async(0x0a24, 0x0000_6577).await?;
+                        self.set_bb_reg_async(0x0a28, 0xffff, 0).await?;
+                    } else {
+                        self.write_u32_async(0x0a24, 0x384f_6577).await?;
+                        self.set_bb_reg_async(0x0a28, 0xffff, 0x1525).await?;
+                    }
+                    state.last_cck_key = Some(channel14);
+                }
+                rf18 &= 0x0006_0cff;
+            }
+        }
+
+        profiler.mark("consts");
+        self.set_rf_reg_async(chip, RfPath::A, 0x18, RF_MASK, rf18)
+            .await?;
+        if !is_8821c && chip.total_rf_paths() > 1 {
+            self.set_rf_reg_async(chip, RfPath::B, 0x18, RF_MASK, rf18)
+                .await?;
+        }
+        state.rf18 = Some(rf18);
+        profiler.mark("rf18");
+        self.retune_state
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)?
+            .jaguar2 = state;
+        log::debug!(target: "openipc_rtl88xx::retune", "Jaguar2 fast retune channel={} center={} rf18=0x{:05x}", channel, center, rf18);
+        Ok(true)
+    }
+
     pub(crate) async fn initialize_monitor_jaguar2_async(
         &self,
         initial_chip: ChipInfo,

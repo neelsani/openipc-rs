@@ -35,6 +35,10 @@ OpenIPC/devourer 0a7b9eb Frame-free RX energy and NHM sensing
 OpenIPC/devourer 40f2656 Modulated continuous TX and active-link primitives
 OpenIPC/devourer 7a5123e MCS-headroom probe, thermal overlay, and rendezvous beacon
 OpenIPC/devourer 4df2a3b Adaptive-link sensing and interference-control documentation
+OpenIPC/devourer 57cec5d Animated NHM documentation
+OpenIPC/devourer b27da75/df98688 Visual RF, TX, sounding, diversity, and hopping documentation
+OpenIPC/devourer bd44411 FastRetune on all generations and active two-ended sounding sweep
+OpenIPC/devourer 3ec1ab1 Write-only compose caches and kickless FHSS retuning
 ```
 
 ## Audit Plan
@@ -43,19 +47,19 @@ The risky parts of this rewrite are the places where small byte/register
 differences do not fail at compile time. This is the checklist used for each
 chip family:
 
-| Area                 | What to compare                                                                   | Rust location                                            | Failure mode                                   |
-| -------------------- | --------------------------------------------------------------------------------- | -------------------------------------------------------- | ---------------------------------------------- |
-| USB discovery        | VID/PID table, interface claim, endpoint selection, endpoint override             | `openipc-rtl88xx::SUPPORTED_DEVICES`, `RealtekDevice`    | wrong adapter, wrong bulk OUT endpoint, no TX  |
-| Control transfer ABI | Realtek vendor request, register width, endian order                              | `async_driver.rs`, `device.rs`                           | reads look plausible but write wrong registers |
-| Firmware load        | power-on state, chunking, reserved-page/DDMA flow, firmware-ready polls           | `async_firmware*.rs`, `async_jaguar2.rs`, `async_jaguar3.rs` | warm-start works, cold-plug fails           |
-| MAC setup            | queue/FIFO, DMA, RX engine, WMAC options                                          | `async_mac.rs`, `async_jaguar3.rs`                       | no bulk-IN frames or FIFO stalls               |
-| EFUSE/RFE            | logical-map decoding, RFE pinmux/table choices, TX power data                     | `async_efuse.rs`, `async_tables.rs`, `async_tx_power.rs` | works on one dongle revision, fails on another |
-| PHY/RF tables        | table data, conditional opcodes, pseudo-delay entries, write order                | `rtl_data.rs`, `data/*`, table loaders                   | no RX sensitivity, wrong band, unstable TX     |
-| Channel/BW           | RF18 band bits, SCO, DFIR, 5/10 MHz reclock, 40/80 primary index and DATA_SC      | `async_radio.rs`, `async_jaguar2.rs`, `async_jaguar3.rs` | tuned to the wrong channel or sample rate      |
-| RX descriptors       | field offsets, packet/C2H split, drvinfo/shift offset, 8-byte aggregate alignment | `openipc-core::realtek`                                  | corrupted 802.11 frames or missed C2H reports  |
-| TX descriptors       | radiotap RATE/MCS/VHT parsing, 5 GHz CCK clamp, descriptor checksum               | `openipc-rtl88xx::tx`                                    | bulk OUT succeeds but nothing goes on-air      |
-| Runtime polling      | coex keepalive, thermal power tracking, PHYDM/watchdog hooks                      | app-owned RX loop plus explicit driver APIs              | sustained TX degrades or stops                 |
-| Shutdown             | stop TRX, close RX filter, power-off sequence                                     | `shutdown_monitor*`                                      | adapter wedges until unplug/replug             |
+| Area                 | What to compare                                                                   | Rust location                                                | Failure mode                                   |
+| -------------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------ | ---------------------------------------------- |
+| USB discovery        | VID/PID table, interface claim, endpoint selection, endpoint override             | `openipc-rtl88xx::SUPPORTED_DEVICES`, `RealtekDevice`        | wrong adapter, wrong bulk OUT endpoint, no TX  |
+| Control transfer ABI | Realtek vendor request, register width, endian order                              | `async_driver.rs`, `device.rs`                               | reads look plausible but write wrong registers |
+| Firmware load        | power-on state, chunking, reserved-page/DDMA flow, firmware-ready polls           | `async_firmware*.rs`, `async_jaguar2.rs`, `async_jaguar3.rs` | warm-start works, cold-plug fails              |
+| MAC setup            | queue/FIFO, DMA, RX engine, WMAC options                                          | `async_mac.rs`, `async_jaguar3.rs`                           | no bulk-IN frames or FIFO stalls               |
+| EFUSE/RFE            | logical-map decoding, RFE pinmux/table choices, TX power data                     | `async_efuse.rs`, `async_tables.rs`, `async_tx_power.rs`     | works on one dongle revision, fails on another |
+| PHY/RF tables        | table data, conditional opcodes, pseudo-delay entries, write order                | `rtl_data.rs`, `data/*`, table loaders                       | no RX sensitivity, wrong band, unstable TX     |
+| Channel/BW           | RF18 band bits, SCO, DFIR, 5/10 MHz reclock, 40/80 primary index and DATA_SC      | `async_radio.rs`, `async_jaguar2.rs`, `async_jaguar3.rs`     | tuned to the wrong channel or sample rate      |
+| RX descriptors       | field offsets, packet/C2H split, drvinfo/shift offset, 8-byte aggregate alignment | `openipc-core::realtek`                                      | corrupted 802.11 frames or missed C2H reports  |
+| TX descriptors       | radiotap RATE/MCS/VHT parsing, 5 GHz CCK clamp, descriptor checksum               | `openipc-rtl88xx::tx`                                        | bulk OUT succeeds but nothing goes on-air      |
+| Runtime polling      | coex keepalive, thermal power tracking, PHYDM/watchdog hooks                      | app-owned RX loop plus explicit driver APIs                  | sustained TX degrades or stops                 |
+| Shutdown             | stop TRX, close RX filter, power-off sequence                                     | `shutdown_monitor*`                                          | adapter wedges until unplug/replug             |
 
 ## Current Mapping
 
@@ -229,6 +233,28 @@ limited to demo environment variables:
   packets at a configurable dwell interval. It also supports periodic thermal
   markers, matching the useful behavior of devourer's MCS-headroom probe while
   retaining the Rust per-packet radiotap TX path.
+- `fast_retune[_async]` mirrors Devourer's generation-specific lean hop path
+  through `3ec1ab1`.
+  Jaguar1 caches per-path RF18 and channel buckets; Jaguar2 also applies its
+  RF-BE/DF channel constants while omitting the hardware-validated unnecessary
+  per-hop RX/IGI kick; Jaguar3 preserves the RF18/RXBB ordering,
+  anapar update, AGC/SCO/DFIR buckets, and per-hop BB reset. Same-band hops keep
+  the active width and primary offset. Band changes and RTL8814 automatically
+  use the full retune path.
+- Jaguar2 and Jaguar3 use lazily primed full-dword compose caches for registers
+  that would otherwise require a USB read-modify-write. Steady hops are
+  write-only except for channel-bucket transitions. The Rust driver invalidates
+  those caches after full tuning, bandwidth changes, and Jaguar3 TX-power
+  programming. `openipc_rtl88xx::hop_prof` trace logs expose per-stage and total
+  hop time; native builds also accept `DEVOURER_HOP_PROF=1`.
+- `openipc-core` owns the shared channel/frequency conversion and sweep grammar.
+  Its radiotap CHANNEL builder/parser lets `RealtekDevice` retune before USB TX
+  descriptor construction, matching Devourer's per-packet hopping boundary.
+- Nebulus uses the fast path for idle channel scans and records SNR, EVM,
+  retune duration, and fast/full-path selection in scan results and support
+  bundles. Active two-ended sounding remains application policy: callers
+  combine these primitives with their own probe traffic and dwell schedule
+  instead of starting a hidden driver thread.
 
 The July 4 USB hardening is also mirrored. Desktop open helpers take a
 topology-keyed process lock before opening the adapter, claim interface 0 before

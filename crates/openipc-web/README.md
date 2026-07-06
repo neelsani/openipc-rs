@@ -18,6 +18,8 @@ JavaScript:
   `mavlinkPayloads`
 - Adaptive-link feedback helpers
 - WebUSB Realtek device access
+- Full and generation-specific fast retuning, including radiotap CHANNEL-driven
+  per-packet hopping
 - Jaguar2 RTL8811CU/RTL8821CU/RTL8812BU/RTL8822BU and Jaguar3
   RTL8812CU/EU/RTL8822CU/EU detection
   and shared Rust HAL
@@ -83,6 +85,8 @@ const initReport = await radio.initializeMonitorWithOptions(
   false,
 );
 console.log(initReport.chip, initReport.status);
+const hop = await radio.fastRetune(165, true);
+console.log(hop.channel, hop.usedFastPath);
 let nextJaguar3Maintenance = 0;
 
 try {

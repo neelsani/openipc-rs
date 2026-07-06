@@ -9,7 +9,9 @@ use wasm_bindgen::{closure::Closure, JsCast as _, JsValue};
 use super::{queue_event, RuntimeEvent};
 use crate::{model::LogLevel, settings::CodecPreference};
 
-const MAX_RTP_BATCHES_IN_FLIGHT: usize = 8;
+// Keep transport buffering below one typical frame interval. Worker overload
+// must drop and resynchronize instead of displaying an old queue.
+const MAX_RTP_BATCHES_IN_FLIGHT: usize = 3;
 
 /// Latest cumulative state reported by the RTP and WebCodecs workers.
 #[derive(Debug, Clone, Copy, Default)]
@@ -53,6 +55,7 @@ pub(super) struct WebDecodeWorker {
     decoder_worker: web_sys::Worker,
     snapshot: Rc<RefCell<DecodeWorkerSnapshot>>,
     rtp_transfer: Rc<RefCell<RtpTransferState>>,
+    rtp_payload: RefCell<Vec<u8>>,
     ready: RefCell<Option<oneshot::Receiver<Result<(), String>>>>,
     _rtp_onmessage: Closure<dyn FnMut(web_sys::MessageEvent)>,
     _decoder_onmessage: Closure<dyn FnMut(web_sys::MessageEvent)>,
@@ -223,6 +226,7 @@ impl WebDecodeWorker {
             decoder_worker,
             snapshot,
             rtp_transfer,
+            rtp_payload: RefCell::new(Vec::with_capacity(16 * 1024)),
             ready: RefCell::new(Some(ready_receiver)),
             _rtp_onmessage: rtp_onmessage,
             _decoder_onmessage: decoder_onmessage,
@@ -247,7 +251,8 @@ impl WebDecodeWorker {
         &self,
         packets: impl IntoIterator<Item = &'a [u8]>,
     ) -> Result<(), String> {
-        let mut payload = Vec::new();
+        let mut payload = self.rtp_payload.borrow_mut();
+        payload.clear();
         let mut count = 0u32;
         for packet in packets {
             let length = u32::try_from(packet.len()).map_err(|_| "RTP packet is too large")?;

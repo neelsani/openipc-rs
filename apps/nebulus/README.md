@@ -94,9 +94,10 @@ entries are verified before preview. See the
 schema under `apps/nebulus/presets`.
 
 **Scan channels** opens an idle-only survey. The Rust driver initializes the
-adapter once, retunes it across the selected channels, and reports traffic,
-WFB frames, RSSI, and observed bitrate. The adapter is shut down after the
-survey. A scan and normal RX never run at the same time.
+adapter once, fast-retunes it across same-band channels, and reports traffic,
+WFB frames, RSSI, SNR, EVM, observed bitrate, measured retune time, and whether
+each hop used the fast path or a full fallback. The adapter is shut down after
+the survey. A scan and normal RX never run at the same time.
 
 ## Run In A Browser
 
@@ -254,12 +255,12 @@ latency. Loss and recovery use deltas from each sampling window rather than
 lifetime counters, so old link damage does not distort the current graph.
 
 On macOS, Linux, and Windows, Nebulus keeps decoder-native frames in a
-latest-only queue, uploads NV12 Y and UV planes into persistent wgpu textures,
-and converts to RGB in the GPU shader. This avoids CPU color conversion and
-reduces a 1080p upload from about 8.3 MB of RGBA to 3.1 MB of NV12. Linux maps
-the newest VA-API DMA surface and Windows reads the newest D3D11 surface only
-after stale frames have been discarded. Direct IOSurface, DMA-BUF, and D3D11
-texture import remain optional future zero-copy optimizations.
+latest-only queue and converts NV12 to RGB in the GPU shader. macOS imports
+VideoToolbox IOSurface planes directly into Metal/wgpu without a per-frame
+pixel upload. Linux maps the newest VA-API DMA surface and Windows reads the
+newest D3D11 surface only after stale frames have been discarded, then uploads
+NV12 into persistent textures. Direct DMA-BUF and D3D11 texture import remain
+platform-specific future optimizations.
 
 Android sends MediaCodec output directly to a `SurfaceTexture` backed by an
 external OpenGL ES texture. The egui Glow paint callback latches the newest
@@ -274,7 +275,7 @@ egui vsync, raises the receive thread priority, and configures MediaCodec for
 low latency. Physical Android devices retain a three-frame decoder bound; the
 SDK emulator alone gets a larger allowance for Goldfish's delayed software
 codec. Native audio requests a 256-frame output buffer and keeps no more than
-40 ms of queued PCM.
+20 ms of queued PCM.
 
 ## Included Controls
 
@@ -335,10 +336,12 @@ DLL under `%LOCALAPPDATA%\Nebulus\wintun\0.14.1`. The installer runs outside
 the receiver thread. Adaptive-link feedback injects WFB packets directly
 through the Realtek driver and does not require Wintun or an enabled VPN route.
 
-Debug native and WASM builds also show **Codec mock**. It loops embedded,
-pre-recorded 1920x1080 H.264 and 48 kHz Opus fixtures, packetizes both tracks
-as RTP, and interleaves them on their media clocks. Native debug builds can
-start it automatically for profiling:
+Debug native and WASM builds also show **H.264 mock** or **H.265 mock**, based
+on the codec preference under Setup → Media. `Auto` selects H.265 to match the
+usual OpenIPC stream. The mock loops embedded, pre-recorded 1920x1080 video and
+48 kHz Opus fixtures, packetizes both tracks as RTP, and interleaves them on
+their media clocks. Native debug builds can start it automatically for
+profiling:
 
 ```sh
 NEBULUS_CODEC_MOCK=1 cargo run -p nebulus --bin nebulus

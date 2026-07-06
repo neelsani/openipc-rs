@@ -363,18 +363,25 @@ fn dynamic_y_bounds(
     non_negative: bool,
     minimum_span: f64,
 ) -> std::ops::RangeInclusive<f64> {
-    let values = points
+    let mut count = 0usize;
+    let mut sum = 0.0;
+    let mut minimum = f64::INFINITY;
+    let mut maximum = f64::NEG_INFINITY;
+    for value in points
         .iter()
         .map(|point| point[1])
         .filter(|value| value.is_finite())
-        .collect::<Vec<_>>();
-    if values.is_empty() {
+    {
+        count += 1;
+        sum += value;
+        minimum = minimum.min(value);
+        maximum = maximum.max(value);
+    }
+    if count == 0 {
         return 0.0..=minimum_span;
     }
 
-    let minimum = values.iter().copied().fold(f64::INFINITY, f64::min);
-    let maximum = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let average = values.iter().sum::<f64>() / values.len() as f64;
+    let average = sum / count as f64;
     let observed_span = maximum - minimum;
 
     let (mut lower, mut upper) = if observed_span >= minimum_span {

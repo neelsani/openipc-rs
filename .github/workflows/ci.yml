@@ -129,6 +129,7 @@ jobs:
       - name: Check browser crates
         run: |
           cargo check -p openipc-web --target wasm32-unknown-unknown --locked
+          cargo clippy -p openipc-uplink --target wasm32-unknown-unknown --all-targets --no-deps --locked -- -D warnings
           cargo clippy -p openipc-video --target wasm32-unknown-unknown --all-targets --no-deps --locked -- -D warnings
           cargo clippy -p nebulus --target wasm32-unknown-unknown --all-targets --features web-decode-worker --no-deps --locked -- -D warnings
 
@@ -371,6 +372,9 @@ jobs:
           yes | sdkmanager --licenses >/dev/null
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
           echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          NDK_BIN="$ANDROID_HOME/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "CC_aarch64_linux_android=$NDK_BIN/aarch64-linux-android26-clang" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$NDK_BIN/llvm-ar" >> "$GITHUB_ENV"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

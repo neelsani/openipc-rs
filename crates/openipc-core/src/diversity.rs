@@ -132,8 +132,23 @@ impl DiversityCombiner {
         frame: &[u8],
         layout: FrameLayout,
     ) -> DiversityDecision {
+        let Ok(frame) = WifiFrame::parse(frame, layout) else {
+            self.source_mut(source).observed += 1;
+            self.stats.passthrough += 1;
+            self.source_mut(source).passthrough += 1;
+            return DiversityDecision::Passthrough;
+        };
+        self.observe_wifi_frame(source, frame)
+    }
+
+    /// Examine an already-validated WiFi frame without parsing it again.
+    pub fn observe_wifi_frame(
+        &mut self,
+        source: DiversitySourceId,
+        frame: WifiFrame<'_>,
+    ) -> DiversityDecision {
         self.source_mut(source).observed += 1;
-        let Some(identity) = self.packet_identity(frame, layout) else {
+        let Some(identity) = self.packet_identity(frame) else {
             self.stats.passthrough += 1;
             self.source_mut(source).passthrough += 1;
             return DiversityDecision::Passthrough;
@@ -184,8 +199,7 @@ impl DiversityCombiner {
         self.stats = DiversityStats::default();
     }
 
-    fn packet_identity(&self, frame: &[u8], layout: FrameLayout) -> Option<PacketIdentity> {
-        let frame = WifiFrame::parse(frame, layout).ok()?;
+    fn packet_identity(&self, frame: WifiFrame<'_>) -> Option<PacketIdentity> {
         let channel_id = frame.channel_id()?;
         match parse_forwarder_packet(frame.payload()).ok()? {
             WfbPacket::Data { data_nonce, .. } => Some(PacketIdentity::Data {

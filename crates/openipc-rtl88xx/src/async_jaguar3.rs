@@ -108,6 +108,179 @@ const QSEL_BEACON: u32 = 0x10;
 const RSV_PG_BOUNDARY_8822C: u16 = 1938;
 
 impl RealtekDevice {
+    pub(crate) async fn fast_retune_jaguar3_async(
+        &self,
+        chip: ChipInfo,
+        current: RadioConfig,
+        channel: u8,
+        cache_rf: bool,
+    ) -> Result<bool, DriverError> {
+        let plan = jaguar3_channel_plan(channel, current.channel_offset, current.channel_width);
+        let central = plan.central_channel;
+        let is_8822c = chip.family == ChipFamily::Rtl8822c;
+        let mut profiler = crate::hop_prof::HopProfiler::new("j3", channel);
+        let mut state = self
+            .retune_state
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)?
+            .jaguar3
+            .clone();
+        if !cache_rf || !state.compose_primed {
+            state.compose_1c90 = self.read_u32_async(0x1c90).await?;
+            state.compose_1830 = self.read_u32_async(0x1830).await?;
+            state.compose_4130 = self.read_u32_async(0x4130).await?;
+            state.compose_r0 = self.read_u32_async(0x0000).await?;
+            state.compose_c30 = self.read_u32_async(0x0c30).await?;
+            state.compose_808 = self.read_u32_async(0x0808).await?;
+            state.compose_rfwin_a = self.read_u32_async(0x3c00 + (0x18 << 2)).await?;
+            state.compose_rfwin_b = self.read_u32_async(0x4c00 + (0x18 << 2)).await?;
+            state.compose_primed = true;
+        }
+        let previous = if is_8822c {
+            state.compose_rfwin_a & 0x000f_ffff
+        } else {
+            0
+        };
+        let rf18 = jaguar3_rf18(previous, central, is_8822c, current.channel_width);
+        let rfwin_a = (state.compose_rfwin_a & 0xfff0_0000) | rf18;
+        let rfwin_b = (state.compose_rfwin_b & 0xfff0_0000) | rf18;
+        profiler.mark("prime");
+
+        self.write_u32_async(0x1c90, state.compose_1c90 & !BIT8)
+            .await?;
+        if is_8822c && !state.rxbb_asserted {
+            self.apply_rxbb_fast_jaguar3_async(chip, current.channel_width)
+                .await?;
+        }
+        self.write_u32_async(0x3c00 + (0x18 << 2), rfwin_a).await?;
+        self.write_u32_async(0x4c00 + (0x18 << 2), rfwin_b).await?;
+        if !is_8822c && !state.rxbb_asserted {
+            self.apply_rxbb_fast_jaguar3_async(chip, current.channel_width)
+                .await?;
+        }
+        state.rxbb_asserted = true;
+        state.compose_1c90 |= BIT8;
+        state.compose_1830 |= BIT29;
+        state.compose_4130 |= BIT29;
+        state.compose_rfwin_a = rfwin_a;
+        state.compose_rfwin_b = rfwin_b;
+        self.write_u32_async(0x1c90, state.compose_1c90).await?;
+        self.write_u32_async(0x1830, state.compose_1830).await?;
+        self.write_u32_async(0x4130, state.compose_4130).await?;
+        profiler.mark("bracket");
+
+        let bw20 = matches!(
+            current.channel_width,
+            ChannelWidth::Mhz5 | ChannelWidth::Mhz10 | ChannelWidth::Mhz20
+        );
+        let agc_key = (match central {
+            1..=14 => 0,
+            15..=79 => 1,
+            80..=144 => 2,
+            _ => 3,
+        }) | if bw20 { 0x10 } else { 0 };
+        if state.last_agc_key != Some(agc_key) {
+            if let Some((cck_table, ofdm_table)) =
+                jaguar3_agc_tables(central, current.channel_width, is_8822c)
+            {
+                if let Some(table) = cck_table {
+                    self.set_bb_reg_async(0x18ac, 0xf000, table).await?;
+                    self.set_bb_reg_async(0x41ac, 0xf000, table).await?;
+                }
+                self.set_bb_reg_async(0x18ac, 0x1f0, ofdm_table).await?;
+                self.set_bb_reg_async(0x41ac, 0x1f0, ofdm_table).await?;
+                self.set_bb_reg_async(0x0828, 0xf8, 0x0d).await?;
+            }
+            state.last_agc_key = Some(agc_key);
+        }
+
+        let sco = sco_value_8822c(central);
+        if state.last_sco != Some(sco) {
+            state.compose_c30 = (state.compose_c30 & !0x0fff) | sco;
+            self.write_u32_async(0x0c30, state.compose_c30).await?;
+            state.last_sco = Some(sco);
+        }
+        let narrow = matches!(
+            current.channel_width,
+            ChannelWidth::Mhz5 | ChannelWidth::Mhz10
+        );
+        let dfir_msb = if central <= 14 && central == 11 { 3 } else { 1 };
+        let dfir_lsb = if narrow && !is_8822c {
+            1
+        } else if central <= 14 {
+            if central == 13 {
+                3
+            } else {
+                1
+            }
+        } else {
+            3
+        };
+        let dfir = (dfir_msb << 8) | dfir_lsb;
+        if state.last_dfir != Some(dfir) {
+            state.compose_808 =
+                (state.compose_808 & !0x0070_0070) | (dfir_msb << 20) | (dfir_lsb << 4);
+            self.write_u32_async(0x0808, state.compose_808).await?;
+            state.last_dfir = Some(dfir);
+        }
+        profiler.mark("consts");
+        self.write_u32_async(0x0000, state.compose_r0 | BIT16)
+            .await?;
+        self.write_u32_async(0x0000, state.compose_r0 & !BIT16)
+            .await?;
+        state.compose_r0 |= BIT16;
+        self.write_u32_async(0x0000, state.compose_r0).await?;
+        profiler.mark("bbrst");
+        self.retune_state
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)?
+            .jaguar3 = state;
+        log::debug!(target: "openipc_rtl88xx::retune", "Jaguar3 fast retune channel={} center={} rf18=0x{:05x}", channel, central, rf18);
+        Ok(true)
+    }
+
+    async fn apply_rxbb_fast_jaguar3_async(
+        &self,
+        chip: ChipInfo,
+        width: ChannelWidth,
+    ) -> Result<(), DriverError> {
+        let is_40 = width == ChannelWidth::Mhz40;
+        let is_80 = width == ChannelWidth::Mhz80;
+        if chip.family == ChipFamily::Rtl8822c {
+            let rxbb = if is_80 {
+                0x08
+            } else if is_40 {
+                0x10
+            } else {
+                0x18
+            };
+            for base in [0x3c00, 0x4c00] {
+                self.set_bb_reg_async(base + (0xee << 2), 0x4, 1).await?;
+                self.set_bb_reg_async(base + (0x33 << 2), 0x1f, 0x12)
+                    .await?;
+                self.write_rf_direct_8822c_async(base, 0x3f, rxbb).await?;
+                self.set_bb_reg_async(base + (0xee << 2), 0x4, 0).await?;
+            }
+        } else {
+            let bandwidth = if is_80 {
+                BIT13 | BIT10
+            } else if is_40 {
+                BIT12 | BIT11
+            } else {
+                BIT11 | BIT10
+            };
+            for base in [0x3c00, 0x4c00] {
+                let mut rf1a = self.read_u32_async(base + (0x1a << 2)).await? & 0x000f_ffff;
+                rf1a = (rf1a & !0x7c00) | bandwidth;
+                if is_40 {
+                    rf1a = (rf1a | BIT0) & !BIT16;
+                }
+                self.write_rf_direct_8822c_async(base, 0x1a, rf1a).await?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) async fn initialize_monitor_jaguar3_async(
         &self,
         chip: ChipInfo,
@@ -1009,6 +1182,7 @@ impl RealtekDevice {
         width: ChannelWidth,
         channel: u8,
     ) -> Result<(), DriverError> {
+        self.invalidate_jaguar3_fast_cache()?;
         let (small_bw, dac, adc, dfir) = match width {
             ChannelWidth::Mhz10 => (0x2, 0x6, 0x5, 0x2ab),
             ChannelWidth::Mhz5 => (0x1, 0x4, 0x4, 0x2ab),
@@ -1252,6 +1426,7 @@ impl RealtekDevice {
         zero_diffs: bool,
         skip_path_b_ofdm_ref: bool,
     ) -> Result<(), DriverError> {
+        self.invalidate_jaguar3_fast_cache()?;
         for (register, mask, value) in [
             (0x18e8, 0x0001_fc00, ref_a),
             (0x41e8, 0x0001_fc00, ref_b),

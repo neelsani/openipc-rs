@@ -1,0 +1,27 @@
+[package]
+name = "openipc-uplink"
+version = "0.1.31"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Userspace OpenIPC WFB tunnel, TCP, and VTX control"
+publish = true
+readme = "README.md"
+
+[dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9.34"
+smoltcp = { version = "0.13.1", default-features = false, features = [
+    "alloc",
+    "medium-ip",
+    "proto-ipv4",
+    "socket-tcp",
+] }
+tokio = { version = "1", default-features = false, features = ["io-util", "sync", "time"] }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+russh = { version = "=0.50.2", default-features = false }
+
+[target.'cfg(target_os = "android")'.dependencies]
+russh = { version = "=0.62.1", default-features = false, features = ["ring", "rsa"] }

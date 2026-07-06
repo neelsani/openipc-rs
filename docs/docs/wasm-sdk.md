@@ -81,6 +81,8 @@ const jaguar3Power =
 
 const initReport = await radio.initializeMonitor(36, 20, 0);
 console.log(initReport.chip, initReport.status);
+const hop = await radio.fastRetune(44, true);
+console.log(hop.channel, hop.usedFastPath);
 let nextJaguar3Maintenance = 0;
 
 try {
@@ -225,6 +227,10 @@ the WebUSB object:
 ```ts
 // Preserve Jaguar3's configured RF width when building the TX descriptor.
 await radio.sendPacketForRadio(radiotapFrame, 149, 80, false);
+
+// Lean same-band hop; band changes automatically run the full retune path.
+const hop = await radio.fastRetune(161, true);
+console.log(hop.usedFastPath);
 
 // Receive-side suppression for a dirty upper slice or one narrow interferer.
 await radio.applyCsiMask(149, 80, 0, 5795, 5815, 7);

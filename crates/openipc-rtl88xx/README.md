@@ -251,6 +251,16 @@ normal bulk RX/TX must be paused while the register sequence runs. Jaguar1
 reuses the cached EFUSE-derived power data, while Jaguar3 reuses its initialized
 channel/bandwidth path. Nebulus uses this API for its channel scanner.
 
+`fast_retune` and `fast_retune_async` provide Devourer's lean hop path while
+preserving the initialized width and primary-channel offset. Same-band hops use
+generation-specific cached RF18 writes and the required channel-keyed BB/RF
+updates. Jaguar2 and Jaguar3 lazily prime full register dwords so steady hops
+are write-only instead of USB read-modify-write operations. Band changes and unsupported cases automatically fall back to
+`retune[_async]`; `RetuneReport::used_fast_path` tells the caller which path ran.
+RTL8814 always uses the full path. A CHANNEL field in a packet's radiotap
+header drives this behavior automatically in the device-owned send APIs, so
+rate and channel can both be selected per packet.
+
 USB control transfers now pass through an internal fakeable transport boundary
 on native builds. That lets tests exercise register retry behavior without a
 physical adapter. Normal control transfers and regular bulk RX/TX retry
@@ -282,10 +292,16 @@ using devourer, aviateur, and openipc-zig as references. The cold-start path now
 includes EFUSE-backed RFE selection and devourer-style band switching for
 RTL8812/RTL8821/RTL8814, plus the newer devourer TX power, PHYDM, power
 tracking, IQK, C2H, TX-status, RTL8814 firmware controls, and the complete
-`rtl8822e` Jaguar3 path through devourer `4df2a3b`. This audit also includes
+`rtl8822e` Jaguar3 path through devourer `3ec1ab1`. This audit also includes
 RTL8822B Jaguar2, Jaguar3 40/80 MHz and 40-in-80, RX CSI/NBI masking,
 beamforming self-sounding, concurrent TX/RX behavior, Jaguar1's unified
 in-flight USB RX queue, all-generation CW control, EFUSE/calibration retries,
-infinite RX submissions, and exclusive claim-before-reset ownership. Hardware bring-up still
+infinite RX submissions, exclusive claim-before-reset ownership, all-generation
+fast retuning, and radiotap-driven per-packet hopping. Hardware bring-up still
 needs live adapter testing and register-trace comparison per chip family before
 the support matrix should be treated as final.
+
+Set `DEVOURER_HOP_PROF=1` or `OPENIPC_HOP_PROF=1` on native builds to emit one
+machine-readable `openipc_rtl88xx::hop_prof` log record per fast hop. Trace
+logging for that target enables the same records on every target, including
+WASM, without an environment variable.

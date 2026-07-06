@@ -1,5 +1,5 @@
 use crate::channel::ChannelId;
-use crate::ieee80211::FrameLayout;
+use crate::ieee80211::{FrameLayout, WifiFrame};
 use crate::realtek::{
     parse_rx_aggregate, parse_rx_aggregate_with_kind, AggregateError, RealtekRxPacket,
     RxDescriptorKind, RxPacketType,
@@ -388,32 +388,77 @@ impl ReceiverRuntime {
         options: &ReceiverBatchOptions,
     ) -> ReceiverBatch {
         let mut batch = self.empty_batch();
+        let mut route_events = Vec::new();
 
         for packet in packets {
-            batch.counters.packets += 1;
-            if packet.attrib.crc_err && !options.accept_corrupted {
-                batch.counters.crc_dropped += 1;
-                continue;
-            }
-            if packet.attrib.icv_err && !options.accept_corrupted {
-                batch.counters.icv_dropped += 1;
-                continue;
-            }
-            if packet.attrib.pkt_rpt_type != RxPacketType::NormalRx {
-                batch.counters.report_dropped += 1;
-                continue;
-            }
-
-            batch.counters.accepted_packets += 1;
-            match self.routes.push_80211_frame(packet.data) {
-                Ok(events) => self.apply_route_events(events, options, &mut batch),
-                Err(_) => {
-                    batch.counters.ignored_frames += 1;
-                    batch.counters.route_errors += 1;
-                }
-            }
+            let parsed = if packet.attrib.crc_err
+                || packet.attrib.icv_err
+                || packet.attrib.pkt_rpt_type != RxPacketType::NormalRx
+            {
+                None
+            } else {
+                WifiFrame::parse(packet.data, self.routes.frame_layout()).ok()
+            };
+            self.push_rx_packet(packet, parsed, options, &mut route_events, &mut batch);
         }
 
+        self.finish_rx_batch(batch)
+    }
+
+    /// Process RX packets accompanied by an already-validated WiFi view.
+    ///
+    /// This avoids reparsing frames that an application already inspected for
+    /// diversity selection or signal accounting.
+    pub fn push_parsed_rx_packets<'a>(
+        &mut self,
+        packets: impl IntoIterator<Item = (RealtekRxPacket<'a>, Option<WifiFrame<'a>>)>,
+        options: &ReceiverBatchOptions,
+    ) -> ReceiverBatch {
+        let mut batch = self.empty_batch();
+        let mut route_events = Vec::new();
+        for (packet, parsed) in packets {
+            self.push_rx_packet(packet, parsed, options, &mut route_events, &mut batch);
+        }
+        self.finish_rx_batch(batch)
+    }
+
+    fn push_rx_packet(
+        &mut self,
+        packet: RealtekRxPacket<'_>,
+        parsed: Option<WifiFrame<'_>>,
+        options: &ReceiverBatchOptions,
+        route_events: &mut Vec<PayloadRouteEvent>,
+        batch: &mut ReceiverBatch,
+    ) {
+        batch.counters.packets += 1;
+        if packet.attrib.crc_err && !options.accept_corrupted {
+            batch.counters.crc_dropped += 1;
+            return;
+        }
+        if packet.attrib.icv_err && !options.accept_corrupted {
+            batch.counters.icv_dropped += 1;
+            return;
+        }
+        if packet.attrib.pkt_rpt_type != RxPacketType::NormalRx {
+            batch.counters.report_dropped += 1;
+            return;
+        }
+
+        batch.counters.accepted_packets += 1;
+        let Some(parsed) = parsed else {
+            batch.counters.ignored_frames += 1;
+            return;
+        };
+        match self.routes.push_wifi_frame_into(parsed, route_events) {
+            Ok(()) => self.apply_route_events(route_events.drain(..), options, batch),
+            Err(_) => {
+                batch.counters.ignored_frames += 1;
+                batch.counters.route_errors += 1;
+            }
+        }
+    }
+
+    fn finish_rx_batch(&self, mut batch: ReceiverBatch) -> ReceiverBatch {
         batch.counters.dropped_packets =
             batch.counters.crc_dropped + batch.counters.icv_dropped + batch.counters.report_dropped;
         batch.fec_counters = self.video_fec_counters();
@@ -476,11 +521,25 @@ impl ReceiverRuntime {
         options: &ReceiverBatchOptions,
     ) -> Result<ReceiverBatch, PayloadRouteError> {
         let mut batch = self.empty_batch();
-        let events = self
+        let (route_ids, direct) = self
             .routes
-            .push_direct_payload(runtime, packet_seq, payload)?;
-        self.apply_route_events(events, options, &mut batch);
+            .route_membership(runtime)
+            .ok_or(PayloadRouteError::UnknownRuntime(runtime))?;
+        if direct {
+            self.apply_recovered_payload(
+                &route_ids,
+                runtime.channel_id(),
+                packet_seq,
+                payload,
+                options,
+                &mut batch,
+            );
+        } else {
+            batch.counters.ignored_frames += 1;
+        }
         batch.fec_counters = self.video_fec_counters();
+        batch.rtp_status = self.rtp_status();
+        batch.rtp_reorder_status = self.rtp_reorder_status();
         Ok(batch)
     }
 
@@ -510,7 +569,7 @@ impl ReceiverRuntime {
 
     fn apply_route_events(
         &mut self,
-        events: Vec<PayloadRouteEvent>,
+        events: impl IntoIterator<Item = PayloadRouteEvent>,
         options: &ReceiverBatchOptions,
         batch: &mut ReceiverBatch,
     ) {
@@ -521,60 +580,165 @@ impl ReceiverRuntime {
                 PayloadRouteEvent::Payload {
                     route_ids, payload, ..
                 } => {
-                    if route_ids.contains(&self.video_route_id) {
-                        batch.counters.wfb_payloads += 1;
-                        batch.counters.rtp_packets += 1;
-                        if options.depacketize_video {
-                            if let Ok(frames) =
-                                self.push_video_payload_into(&payload.data, &mut batch.frames)
-                            {
-                                batch.counters.video_frames += frames;
-                            }
-                        }
-                    }
-
-                    for &route_id in &route_ids {
-                        if !options.raw_payload_routes.contains(&route_id) {
-                            continue;
-                        }
-                        copy_raw_payload(route_id, &payload, batch);
-                    }
-
-                    if options.rtp_payload_taps.is_empty() {
-                        continue;
-                    }
-                    let Ok(header) = RtpHeader::parse(&payload.data) else {
-                        continue;
-                    };
-                    for tap in &options.rtp_payload_taps {
-                        if header.payload_type != tap.payload_type {
-                            continue;
-                        }
-                        if !route_ids.contains(&tap.route_id) {
-                            continue;
-                        }
-                        copy_raw_payload(tap.route_id, &payload, batch);
-                    }
+                    self.apply_owned_recovered_payload(
+                        &route_ids,
+                        payload.channel_id,
+                        payload.packet_seq,
+                        payload.data,
+                        options,
+                        batch,
+                    );
                 }
             }
         }
         batch.rtp_status = self.rtp_status();
         batch.rtp_reorder_status = self.rtp_reorder_status();
     }
+
+    fn apply_recovered_payload(
+        &mut self,
+        route_ids: &[PayloadRouteId],
+        channel_id: ChannelId,
+        packet_seq: u64,
+        data: &[u8],
+        options: &ReceiverBatchOptions,
+        batch: &mut ReceiverBatch,
+    ) {
+        self.apply_video_payload(route_ids, data, options, batch);
+
+        for &route_id in route_ids {
+            if options.raw_payload_routes.contains(&route_id) {
+                copy_raw_payload(route_id, channel_id, packet_seq, data, batch);
+            }
+        }
+
+        if options.rtp_payload_taps.is_empty() {
+            return;
+        }
+        let Ok(header) = RtpHeader::parse(data) else {
+            return;
+        };
+        for tap in &options.rtp_payload_taps {
+            if header.payload_type == tap.payload_type && route_ids.contains(&tap.route_id) {
+                copy_raw_payload(tap.route_id, channel_id, packet_seq, data, batch);
+            }
+        }
+    }
+
+    fn apply_owned_recovered_payload(
+        &mut self,
+        route_ids: &[PayloadRouteId],
+        channel_id: ChannelId,
+        packet_seq: u64,
+        data: Vec<u8>,
+        options: &ReceiverBatchOptions,
+        batch: &mut ReceiverBatch,
+    ) {
+        self.apply_video_payload(route_ids, &data, options, batch);
+
+        let payload_type = (!options.rtp_payload_taps.is_empty())
+            .then(|| {
+                RtpHeader::parse(&data)
+                    .ok()
+                    .map(|header| header.payload_type)
+            })
+            .flatten();
+        let mut remaining = route_ids
+            .iter()
+            .filter(|route_id| options.raw_payload_routes.contains(route_id))
+            .count()
+            + options
+                .rtp_payload_taps
+                .iter()
+                .filter(|tap| {
+                    payload_type == Some(tap.payload_type) && route_ids.contains(&tap.route_id)
+                })
+                .count();
+        if remaining == 0 {
+            return;
+        }
+
+        let mut data = Some(data);
+        for &route_id in route_ids {
+            if options.raw_payload_routes.contains(&route_id) {
+                remaining -= 1;
+                push_raw_payload(
+                    route_id,
+                    channel_id,
+                    packet_seq,
+                    take_or_clone_payload(&mut data, remaining),
+                    batch,
+                );
+            }
+        }
+        for tap in &options.rtp_payload_taps {
+            if payload_type == Some(tap.payload_type) && route_ids.contains(&tap.route_id) {
+                remaining -= 1;
+                push_raw_payload(
+                    tap.route_id,
+                    channel_id,
+                    packet_seq,
+                    take_or_clone_payload(&mut data, remaining),
+                    batch,
+                );
+            }
+        }
+    }
+
+    fn apply_video_payload(
+        &mut self,
+        route_ids: &[PayloadRouteId],
+        data: &[u8],
+        options: &ReceiverBatchOptions,
+        batch: &mut ReceiverBatch,
+    ) {
+        if route_ids.contains(&self.video_route_id) {
+            batch.counters.wfb_payloads += 1;
+            batch.counters.rtp_packets += 1;
+            if options.depacketize_video {
+                if let Ok(frames) = self.push_video_payload_into(data, &mut batch.frames) {
+                    batch.counters.video_frames += frames;
+                }
+            }
+        }
+    }
+}
+
+fn take_or_clone_payload(data: &mut Option<Vec<u8>>, remaining: usize) -> Vec<u8> {
+    if remaining == 0 {
+        data.take()
+            .expect("the final raw route must own the recovered payload")
+    } else {
+        data.as_ref()
+            .expect("raw route payload must remain available")
+            .clone()
+    }
 }
 
 fn copy_raw_payload(
     route_id: PayloadRouteId,
-    payload: &crate::pipeline::RecoveredPayload,
+    channel_id: ChannelId,
+    packet_seq: u64,
+    data: &[u8],
+    batch: &mut ReceiverBatch,
+) {
+    push_raw_payload(route_id, channel_id, packet_seq, data.to_vec(), batch);
+}
+
+fn push_raw_payload(
+    route_id: PayloadRouteId,
+    channel_id: ChannelId,
+    packet_seq: u64,
+    data: Vec<u8>,
     batch: &mut ReceiverBatch,
 ) {
     batch.counters.raw_payload_count += 1;
-    batch.counters.raw_payload_bytes += payload.data.len();
+    batch.counters.raw_payload_bytes += data.len();
     batch.raw_payloads.push(RoutePayload {
         route_id,
-        channel_id: payload.channel_id,
-        packet_seq: payload.packet_seq,
-        data: payload.data.clone(),
+        channel_id,
+        packet_seq,
+        data,
     });
 }
 

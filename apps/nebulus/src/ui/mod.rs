@@ -49,6 +49,7 @@ pub(crate) enum SettingsPage {
     Media,
     Profiles,
     Network,
+    Vtx,
 }
 
 pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
@@ -91,10 +92,49 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
         .show(ui, |ui| video::show(app, ui));
 
     about_dialog(app, ui.ctx());
+    vtx_confirmation_dialog(app, ui.ctx());
     gui::osd_editor(app, ui.ctx());
     preflight_dialog(app, ui.ctx());
     scanner::dialog(app, ui.ctx());
     presets::dialog(app, ui.ctx());
+}
+
+fn vtx_confirmation_dialog(app: &mut NebulusApp, context: &egui::Context) {
+    let Some(pending) = app.pending_vtx_confirmation.clone() else {
+        return;
+    };
+    let width = (context.content_rect().width() - 32.0).clamp(280.0, 430.0);
+    let mut confirmed = false;
+    let response =
+        egui::Modal::new(egui::Id::new("nebulus-vtx-confirmation")).show(context, |ui| {
+            ui.set_width(width);
+            ui.label(egui::RichText::new(&pending.title).strong().size(19.0));
+            ui.add_space(6.0);
+            ui.label(&pending.message);
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    ui.close();
+                }
+                if ui
+                    .button(
+                        egui::RichText::new(&pending.confirm_label)
+                            .strong()
+                            .color(ui.visuals().warn_fg_color),
+                    )
+                    .clicked()
+                {
+                    confirmed = true;
+                    ui.close();
+                }
+            });
+        });
+    if confirmed {
+        app.pending_vtx_confirmation = None;
+        app.request_vtx(pending.request);
+    } else if response.should_close() {
+        app.pending_vtx_confirmation = None;
+    }
 }
 
 fn preflight_dialog(app: &mut NebulusApp, context: &egui::Context) {
@@ -439,7 +479,17 @@ fn receiver_buttons(app: &mut NebulusApp, ui: &mut egui::Ui) {
                 app.start_receiver(ui.ctx());
             }
             #[cfg(debug_assertions)]
-            if action_button(ui, "Codec mock", ActionTone::Neutral).clicked() {
+            if action_button(
+                ui,
+                match app.settings.codec_preference.mock_codec() {
+                    openipc_core::Codec::H264 => "H.264 mock",
+                    openipc_core::Codec::H265 => "H.265 mock",
+                },
+                ActionTone::Neutral,
+            )
+            .on_hover_text("Uses the codec preference under Setup > Media")
+            .clicked()
+            {
                 app.start_codec_mock(ui.ctx());
             }
         }
@@ -582,6 +632,7 @@ fn secondary_navigation(app: &mut NebulusApp, ui: &mut egui::Ui) {
                     (SettingsPage::Media, "Media"),
                     (SettingsPage::Profiles, "Profiles"),
                     (SettingsPage::Network, "Network"),
+                    (SettingsPage::Vtx, "VTX"),
                 ] {
                     ui.selectable_value(&mut app.settings_page, page, label);
                 }

@@ -17,6 +17,7 @@ const IEEE80211_RADIOTAP_VHT_FLAG_SGI: u8 = 0x04;
 const IEEE80211_RADIOTAP_VHT_CODING_LDPC_USER0: u8 = 0x01;
 
 const RADIOTAP_PRESENT_RATE: u32 = 1 << 2;
+const RADIOTAP_PRESENT_CHANNEL: u32 = 1 << 3;
 const RADIOTAP_PRESENT_TX_FLAGS: u32 = 1 << 15;
 const RADIOTAP_PRESENT_MCS: u32 = 1 << 19;
 const RADIOTAP_PRESENT_VHT: u32 = 1 << 21;
@@ -228,6 +229,15 @@ pub struct RadiotapTxInfo {
     pub ldpc: bool,
 }
 
+/// TX metadata decoded from the supported radiotap fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RadiotapTxMetadata {
+    /// Per-packet TX mode, when a RATE, MCS, or VHT field was present.
+    pub mode: Option<TxMode>,
+    /// Requested center frequency from the radiotap CHANNEL field.
+    pub frequency_mhz: Option<u16>,
+}
+
 /// Error returned while parsing a radiotap TX header.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RadiotapError {
@@ -284,6 +294,77 @@ pub fn build_stream_radiotap(mode: TxMode) -> Vec<u8> {
             ..TxRadioParams::default()
         }),
     }
+}
+
+/// Build a stream radiotap header with a per-packet WiFi channel request.
+///
+/// Realtek drivers that support fast retuning treat the CHANNEL frequency as
+/// authoritative and retune before constructing the USB TX descriptor.
+pub fn build_stream_radiotap_on_channel(mode: TxMode, channel: u8) -> Option<Vec<u8>> {
+    let frequency = crate::wifi::channel_to_frequency(channel)?;
+    let (present, mut fields) = match mode.kind {
+        TxModeKind::Legacy => {
+            let mut fields = vec![mode.legacy_rate_500kbps, 0];
+            fields.extend_from_slice(&frequency.to_le_bytes());
+            fields.extend_from_slice(&0u16.to_le_bytes());
+            fields.extend_from_slice(&RADIOTAP_TX_FLAGS_NO_ACK.to_le_bytes());
+            (
+                RADIOTAP_PRESENT_RATE | RADIOTAP_PRESENT_CHANNEL | RADIOTAP_PRESENT_TX_FLAGS,
+                fields,
+            )
+        }
+        TxModeKind::Ht => {
+            let params = TxRadioParams {
+                mcs_index: mode.ht_mcs,
+                bandwidth: mode.bandwidth,
+                short_gi: mode.short_gi,
+                stbc: u8::from(mode.stbc),
+                ldpc: mode.ldpc,
+                vht: false,
+                ..TxRadioParams::default()
+            };
+            let base = build_ht_radiotap_header(params);
+            let mut fields = Vec::with_capacity(9);
+            fields.extend_from_slice(&frequency.to_le_bytes());
+            fields.extend_from_slice(&0u16.to_le_bytes());
+            fields.extend_from_slice(&RADIOTAP_TX_FLAGS_NO_ACK.to_le_bytes());
+            fields.extend_from_slice(&base[10..13]);
+            (
+                RADIOTAP_PRESENT_CHANNEL | RADIOTAP_PRESENT_TX_FLAGS | RADIOTAP_PRESENT_MCS,
+                fields,
+            )
+        }
+        TxModeKind::Vht => {
+            let params = TxRadioParams {
+                mcs_index: mode.vht_mcs,
+                nss: mode.vht_nss,
+                bandwidth: mode.bandwidth,
+                short_gi: mode.short_gi,
+                stbc: u8::from(mode.stbc),
+                ldpc: mode.ldpc,
+                vht: true,
+                ..TxRadioParams::default()
+            };
+            let base = build_vht_radiotap_header(params);
+            let mut fields = Vec::with_capacity(18);
+            fields.extend_from_slice(&frequency.to_le_bytes());
+            fields.extend_from_slice(&0u16.to_le_bytes());
+            fields.extend_from_slice(&RADIOTAP_TX_FLAGS_NO_ACK.to_le_bytes());
+            fields.extend_from_slice(&base[10..22]);
+            (
+                RADIOTAP_PRESENT_CHANNEL | RADIOTAP_PRESENT_TX_FLAGS | RADIOTAP_PRESENT_VHT,
+                fields,
+            )
+        }
+    };
+    let length = 8usize.checked_add(fields.len())?;
+    let length = u16::try_from(length).ok()?;
+    let mut header = Vec::with_capacity(length as usize);
+    header.extend_from_slice(&[0, 0]);
+    header.extend_from_slice(&length.to_le_bytes());
+    header.extend_from_slice(&present.to_le_bytes());
+    header.append(&mut fields);
+    Some(header)
 }
 
 /// Build a legacy-rate radiotap header.
@@ -440,6 +521,18 @@ fn parse_tx_mode_str_impl(spec: &str, reject_unknown_modifier: bool) -> Option<T
 
 /// Parse supported radiotap TX fields into a `TxMode`.
 pub fn parse_radiotap_tx_mode(packet: &[u8]) -> Result<Option<TxMode>, RadiotapError> {
+    Ok(parse_radiotap_tx_metadata(packet)?.mode)
+}
+
+/// Parse the radiotap CHANNEL field into a supported WiFi channel number.
+pub fn parse_radiotap_tx_channel(packet: &[u8]) -> Result<Option<u8>, RadiotapError> {
+    Ok(parse_radiotap_tx_metadata(packet)?
+        .frequency_mhz
+        .and_then(crate::wifi::frequency_to_channel))
+}
+
+/// Parse the supported RATE, CHANNEL, TX_FLAGS, MCS, and VHT fields.
+pub fn parse_radiotap_tx_metadata(packet: &[u8]) -> Result<RadiotapTxMetadata, RadiotapError> {
     let len = radiotap_len(packet)?;
     if len < 8 || packet.len() < len {
         return Err(RadiotapError::InvalidLength);
@@ -448,14 +541,30 @@ pub fn parse_radiotap_tx_mode(packet: &[u8]) -> Result<Option<TxMode>, RadiotapE
     if present & (1 << 31) != 0 {
         return Err(RadiotapError::UnsupportedHeader);
     }
+    let supported = RADIOTAP_PRESENT_RATE
+        | RADIOTAP_PRESENT_CHANNEL
+        | RADIOTAP_PRESENT_TX_FLAGS
+        | RADIOTAP_PRESENT_MCS
+        | RADIOTAP_PRESENT_VHT;
+    if present & !supported != 0 {
+        return Err(RadiotapError::UnsupportedHeader);
+    }
 
     let mut offset = 8usize;
     let mut mode = None;
+    let mut frequency_mhz = None;
 
     if present & RADIOTAP_PRESENT_RATE != 0 {
         require_field(packet, len, offset, 1)?;
         mode = Some(TxMode::legacy(packet[offset]));
         offset += 1;
+    }
+
+    if present & RADIOTAP_PRESENT_CHANNEL != 0 {
+        offset = align(offset, 2);
+        require_field(packet, len, offset, 4)?;
+        frequency_mhz = Some(u16::from_le_bytes([packet[offset], packet[offset + 1]]));
+        offset += 4;
     }
 
     if present & RADIOTAP_PRESENT_TX_FLAGS != 0 {
@@ -511,7 +620,10 @@ pub fn parse_radiotap_tx_mode(packet: &[u8]) -> Result<Option<TxMode>, RadiotapE
         mode = Some(vht);
     }
 
-    Ok(mode)
+    Ok(RadiotapTxMetadata {
+        mode,
+        frequency_mhz,
+    })
 }
 
 /// Parse supported radiotap TX fields into compact adaptive-link TX info.
@@ -653,5 +765,29 @@ mod tests {
         let parsed = parse_radiotap_tx_mode(&packet).unwrap().unwrap();
         assert_eq!(parsed.kind, TxModeKind::Legacy);
         assert_eq!(parsed.legacy_rate_500kbps, 12);
+    }
+
+    #[test]
+    fn channel_headers_roundtrip_for_every_rate_family() {
+        for mode in [TxMode::legacy_6m(), TxMode::ht(4), TxMode::vht(1, 7)] {
+            let mut packet = build_stream_radiotap_on_channel(mode, 36).unwrap();
+            packet.extend_from_slice(&[0u8; 24]);
+            let metadata = parse_radiotap_tx_metadata(&packet).unwrap();
+            assert_eq!(metadata.mode, Some(mode));
+            assert_eq!(metadata.frequency_mhz, Some(5180));
+            assert_eq!(parse_radiotap_tx_channel(&packet).unwrap(), Some(36));
+        }
+    }
+
+    #[test]
+    fn ignores_out_of_band_channel_frequency_without_losing_rate() {
+        let mut packet = build_stream_radiotap_on_channel(TxMode::ht(2), 36).unwrap();
+        packet[8..10].copy_from_slice(&4_900u16.to_le_bytes());
+        packet.extend_from_slice(&[0u8; 24]);
+        assert_eq!(parse_radiotap_tx_channel(&packet).unwrap(), None);
+        assert_eq!(
+            parse_radiotap_tx_mode(&packet).unwrap(),
+            Some(TxMode::ht(2))
+        );
     }
 }

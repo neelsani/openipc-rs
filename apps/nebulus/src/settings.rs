@@ -62,6 +62,14 @@ impl CodecPreference {
                 (Self::H264, openipc_core::Codec::H264) | (Self::H265, openipc_core::Codec::H265)
             )
     }
+
+    #[cfg(debug_assertions)]
+    pub(crate) const fn mock_codec(self) -> openipc_core::Codec {
+        match self {
+            Self::H264 => openipc_core::Codec::H264,
+            Self::Auto | Self::H265 => openipc_core::Codec::H265,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -553,6 +561,7 @@ pub(crate) struct ReceiverProfile {
     pub(crate) telemetry: TelemetrySettings,
     pub(crate) transfer_size: usize,
     pub(crate) vpn_enabled: bool,
+    pub(crate) vtx_control_enabled: bool,
     pub(crate) key_bytes: Vec<u8>,
     pub(crate) osd_profile_id: Option<u64>,
     pub(crate) route_preset_source: Option<PresetSource>,
@@ -584,6 +593,7 @@ impl ReceiverProfile {
             telemetry: settings.telemetry.clone(),
             transfer_size: settings.transfer_size,
             vpn_enabled: settings.vpn_enabled,
+            vtx_control_enabled: settings.vtx_control_enabled,
             key_bytes: settings.key_bytes.clone(),
             osd_profile_id: settings.active_osd_profile_id,
             route_preset_source: settings.route_preset_source.clone(),
@@ -614,6 +624,7 @@ impl ReceiverProfile {
         settings.telemetry.clone_from(&self.telemetry);
         settings.transfer_size = self.transfer_size;
         settings.vpn_enabled = self.vpn_enabled;
+        settings.vtx_control_enabled = self.vtx_control_enabled;
         settings.key_bytes.clone_from(&self.key_bytes);
         settings.route_preset_source = self.route_preset_source.clone();
         settings.telemetry_preset_source = self.telemetry_preset_source.clone();
@@ -649,6 +660,7 @@ impl Default for ReceiverProfile {
             telemetry: TelemetrySettings::default(),
             transfer_size: openipc_core::realtek::DEFAULT_RX_TRANSFER_SIZE,
             vpn_enabled: false,
+            vtx_control_enabled: false,
             key_bytes: DEFAULT_KEY_BYTES.to_vec(),
             osd_profile_id: Some(1),
             route_preset_source: None,
@@ -718,6 +730,136 @@ fn normalize_payload_routes(routes: &mut [PayloadRouteSettings]) {
     }
 }
 
+/// Persisted values used by the VTX control panel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct VtxSettings {
+    pub(crate) mcs_index: u8,
+    pub(crate) stbc: bool,
+    pub(crate) ldpc: bool,
+    pub(crate) fec_k: u16,
+    pub(crate) fec_n: u16,
+    pub(crate) multi_link: u16,
+    pub(crate) mirror: bool,
+    pub(crate) flip: bool,
+    pub(crate) contrast: i16,
+    pub(crate) hue: i16,
+    pub(crate) saturation: i16,
+    pub(crate) luminance: i16,
+    pub(crate) resolution: String,
+    pub(crate) fps: u16,
+    pub(crate) bitrate_kbps: u32,
+    pub(crate) codec: String,
+    pub(crate) gop_size: u16,
+    pub(crate) rate_control: String,
+    pub(crate) simple_video_mode: String,
+    pub(crate) recording_enabled: bool,
+    pub(crate) recording_split_seconds: u32,
+    pub(crate) recording_max_usage: u8,
+    pub(crate) exposure: u32,
+    pub(crate) anti_flicker: String,
+    pub(crate) sensor_config: String,
+    pub(crate) fpv_enabled: bool,
+    pub(crate) noise_level: u8,
+    pub(crate) telemetry_serial: String,
+    pub(crate) telemetry_router: String,
+    pub(crate) telemetry_osd_fps: u16,
+    pub(crate) telemetry_gs_rendering: bool,
+    pub(crate) adaptive_service_enabled: bool,
+    pub(crate) adaptive_variable: String,
+    pub(crate) adaptive_value: String,
+    pub(crate) tx_profiles: String,
+}
+
+impl VtxSettings {
+    pub(crate) fn apply_snapshot(&mut self, snapshot: openipc_uplink::VtxConfigSnapshot) {
+        macro_rules! apply {
+            ($field:ident) => {
+                if let Some(value) = snapshot.$field {
+                    self.$field = value;
+                }
+            };
+        }
+        apply!(mcs_index);
+        apply!(stbc);
+        apply!(ldpc);
+        apply!(fec_k);
+        apply!(fec_n);
+        apply!(multi_link);
+        apply!(mirror);
+        apply!(flip);
+        apply!(contrast);
+        apply!(hue);
+        apply!(saturation);
+        apply!(luminance);
+        apply!(resolution);
+        apply!(fps);
+        apply!(bitrate_kbps);
+        apply!(codec);
+        apply!(gop_size);
+        apply!(rate_control);
+        apply!(recording_enabled);
+        apply!(recording_split_seconds);
+        apply!(recording_max_usage);
+        apply!(exposure);
+        apply!(anti_flicker);
+        apply!(sensor_config);
+        apply!(fpv_enabled);
+        apply!(noise_level);
+        apply!(telemetry_serial);
+        apply!(telemetry_router);
+        apply!(telemetry_osd_fps);
+        if let Some(value) = snapshot.telemetry_ground_station_rendering {
+            self.telemetry_gs_rendering = value;
+        }
+        if let Some(value) = snapshot.adaptive_link_enabled {
+            self.adaptive_service_enabled = value;
+        }
+    }
+}
+
+impl Default for VtxSettings {
+    fn default() -> Self {
+        Self {
+            mcs_index: 1,
+            stbc: false,
+            ldpc: true,
+            fec_k: 8,
+            fec_n: 12,
+            multi_link: 1_500,
+            mirror: false,
+            flip: false,
+            contrast: 50,
+            hue: 50,
+            saturation: 50,
+            luminance: 50,
+            resolution: "1920x1080".to_owned(),
+            fps: 60,
+            bitrate_kbps: 8_000,
+            codec: "h264".to_owned(),
+            gop_size: 1,
+            rate_control: "cbr".to_owned(),
+            simple_video_mode: "16:9 1080p 60".to_owned(),
+            recording_enabled: false,
+            recording_split_seconds: 300,
+            recording_max_usage: 80,
+            exposure: 5,
+            anti_flicker: "disabled".to_owned(),
+            sensor_config: String::new(),
+            fpv_enabled: true,
+            noise_level: 0,
+            telemetry_serial: "ttyS2".to_owned(),
+            telemetry_router: "mavfwd".to_owned(),
+            telemetry_osd_fps: 20,
+            telemetry_gs_rendering: false,
+            adaptive_service_enabled: false,
+            adaptive_variable: "min_profile".to_owned(),
+            adaptive_value: "0".to_owned(),
+            tx_profiles: String::new(),
+        }
+    }
+}
+
 /// User settings persisted by eframe on desktop and web.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -750,6 +892,11 @@ pub(crate) struct Settings {
     pub(crate) transfer_size: usize,
     pub(crate) diagnostic_verbosity: DiagnosticVerbosity,
     pub(crate) vpn_enabled: bool,
+    pub(crate) vtx_control_enabled: bool,
+    pub(crate) vtx_ssh_username: String,
+    pub(crate) vtx_ssh_password: String,
+    pub(crate) vtx_host_key_sha256: String,
+    pub(crate) vtx: VtxSettings,
     pub(crate) key_bytes: Vec<u8>,
     #[serde(default)]
     pub(crate) profiles: Vec<ReceiverProfile>,
@@ -959,6 +1106,11 @@ impl Default for Settings {
             transfer_size: openipc_core::realtek::DEFAULT_RX_TRANSFER_SIZE,
             diagnostic_verbosity: DiagnosticVerbosity::Normal,
             vpn_enabled: false,
+            vtx_control_enabled: false,
+            vtx_ssh_username: openipc_uplink::DEFAULT_SSH_USERNAME.to_owned(),
+            vtx_ssh_password: openipc_uplink::DEFAULT_SSH_PASSWORD.to_owned(),
+            vtx_host_key_sha256: String::new(),
+            vtx: VtxSettings::default(),
             key_bytes: DEFAULT_KEY_BYTES.to_vec(),
             profiles: vec![ReceiverProfile::default()],
             active_profile_id: Some(1),
@@ -1010,9 +1162,25 @@ mod tests {
     use crate::telemetry::MavlinkSigningPolicy;
 
     use super::{
-        GuiTheme, HudMetric, OsdProfile, PayloadRouteSettings, ReceiverProfile, ReceiverSource,
-        RouteAction, Settings, DEFAULT_UDP_RTP_PORT,
+        CodecPreference, GuiTheme, HudMetric, OsdProfile, PayloadRouteSettings, ReceiverProfile,
+        ReceiverSource, RouteAction, Settings, DEFAULT_UDP_RTP_PORT,
     };
+
+    #[test]
+    fn codec_mock_uses_h265_for_auto_and_honors_explicit_h264() {
+        assert_eq!(
+            CodecPreference::Auto.mock_codec(),
+            openipc_core::Codec::H265
+        );
+        assert_eq!(
+            CodecPreference::H265.mock_codec(),
+            openipc_core::Codec::H265
+        );
+        assert_eq!(
+            CodecPreference::H264.mock_codec(),
+            openipc_core::Codec::H264
+        );
+    }
 
     #[test]
     fn profile_restores_receiver_fields_without_replacing_gui_preferences() {

@@ -19,6 +19,7 @@ CARGO_MANIFESTS = (
     "apps/wfb-rs/Cargo.toml",
     "crates/openipc-core/Cargo.toml",
     "crates/openipc-rtl88xx/Cargo.toml",
+    "crates/openipc-uplink/Cargo.toml",
     "crates/openipc-video/Cargo.toml",
     "crates/openipc-web/Cargo.toml",
     "apps/openipc-station/src-tauri/Cargo.toml",

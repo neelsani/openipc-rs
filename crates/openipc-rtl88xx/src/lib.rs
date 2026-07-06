@@ -30,9 +30,11 @@ mod async_tx_power;
 mod beamforming;
 mod device;
 mod firmware;
+mod hop_prof;
 mod phy;
 mod power;
 mod regs;
+mod retune_state;
 mod rtl_data;
 mod time;
 mod tone_mask;
@@ -63,8 +65,8 @@ pub use tx::{
 pub use types::{
     is_supported_id, list_devices, list_supported_devices, supported_device, supported_family_hint,
     ChannelWidth, ChipFamily, ChipInfo, DriverError, DriverOptions, Firmware8814Mode, InitReport,
-    InitStatus, MonitorOptions, RadioConfig, RfType, SupportedDevice, UsbDeviceSummary,
-    SUPPORTED_DEVICES,
+    InitStatus, MonitorOptions, RadioConfig, RetuneReport, RfType, SupportedDevice,
+    UsbDeviceSummary, SUPPORTED_DEVICES,
 };
 
 /// Default native USB bulk-IN transfer size used for RX reads.

@@ -10,6 +10,33 @@ use crate::{
     telemetry::{TelemetrySettings, TelemetryUpdate},
 };
 
+/// User action sent to the asynchronous VTX controller.
+#[derive(Debug, Clone)]
+pub(crate) enum VtxControlRequest {
+    Connect,
+    Refresh,
+    SetWfbBatch(Vec<openipc_uplink::WfbSetting>),
+    SetCameraBatch(Vec<openipc_uplink::CameraSetting>),
+    SetTelemetryBatch(Vec<openipc_uplink::TelemetrySetting>),
+    SetAdaptiveLink(openipc_uplink::AdaptiveLinkSetting),
+    GetVideoMode,
+    SetVideoMode(String),
+    Reboot,
+    Disconnect,
+}
+
+/// VTX controller state update delivered to the UI.
+#[derive(Debug, Clone)]
+pub(crate) enum VtxControlEvent {
+    Connecting,
+    Connected,
+    Config(openipc_uplink::ConfigBundle),
+    VideoMode(String),
+    Applied(&'static str),
+    Disconnected,
+    Failed(String),
+}
+
 /// Physical or synthetic transport behind a connected receiver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReceiverTransport {
@@ -105,12 +132,16 @@ impl ReceiverInfo {
     }
 
     #[cfg(debug_assertions)]
-    pub(crate) fn codec_mock() -> Self {
+    pub(crate) fn codec_mock(codec: openipc_core::Codec) -> Self {
+        let codec = match codec {
+            openipc_core::Codec::H264 => "H.264",
+            openipc_core::Codec::H265 => "H.265",
+        };
         Self {
             transport: ReceiverTransport::Synthetic,
             id: "codec-mock".to_owned(),
             source_id: 0,
-            label: "Pre-recorded 1080p H.264 + Opus".to_owned(),
+            label: format!("Pre-recorded 1080p {codec} + Opus"),
             vendor_id: None,
             product_id: None,
             chip: "Synthetic A/V RTP".to_owned(),
@@ -171,6 +202,8 @@ pub(crate) struct StartRequest {
     pub(crate) key_bytes: Vec<u8>,
     pub(crate) audio_volume: u8,
     pub(crate) vpn_enabled: bool,
+    pub(crate) vtx_control_enabled: bool,
+    pub(crate) vtx_credentials: openipc_uplink::SshCredentials,
     pub(crate) payload_routes: Vec<PayloadRouteSettings>,
     pub(crate) telemetry: TelemetrySettings,
 }
@@ -195,6 +228,10 @@ pub(crate) struct ChannelScanResult {
     pub(crate) wfb_frames: u64,
     pub(crate) average_rssi_dbm: [i32; 2],
     pub(crate) strongest_rssi_dbm: [i32; 2],
+    pub(crate) average_snr_db: [i32; 2],
+    pub(crate) average_evm_db: [i32; 2],
+    pub(crate) retune_us: u64,
+    pub(crate) used_fast_retune: bool,
     pub(crate) dwell_ms: u64,
 }
 
@@ -271,6 +308,7 @@ pub(crate) struct BatchMetrics {
     pub(crate) counters: ReceiverBatchCounters,
     pub(crate) rtp: RtpDepacketizerStatus,
     pub(crate) reorder: RtpReorderStatus,
+    pub(crate) uplink: openipc_uplink::NetworkMetrics,
     pub(crate) vpn: VpnMetrics,
     pub(crate) routes: Vec<RouteMetricDelta>,
     pub(crate) telemetry: Option<TelemetryUpdate>,
@@ -304,6 +342,7 @@ impl BatchMetrics {
         merge_counters(&mut self.counters, newer.counters);
         self.rtp = newer.rtp;
         self.reorder = newer.reorder;
+        self.uplink = newer.uplink;
         self.vpn = newer.vpn;
         for update in newer.routes {
             if let Some(current) = self
@@ -506,6 +545,7 @@ pub(crate) enum RuntimeEvent {
         bytes: u64,
     },
     RecordingFailed(String),
+    VtxControl(VtxControlEvent),
     Stopped,
     Failed(String),
 }

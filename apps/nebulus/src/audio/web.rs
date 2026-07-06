@@ -47,7 +47,7 @@ impl AudioPlayer {
             stats: AudioStats {
                 enabled: true,
                 supported: true,
-                decoder_name: "ropus / Web Audio".to_owned(),
+                decoder_name: "ropus / Web Audio",
                 ..AudioStats::default()
             },
         })
@@ -105,7 +105,7 @@ impl AudioPlayer {
     }
 
     pub(crate) fn stats(&self) -> AudioStats {
-        let mut stats = self.stats.clone();
+        let mut stats = self.stats;
         stats.queued_ms = (self.next_start - self.context.current_time()).max(0.0) * 1_000.0;
         stats
     }

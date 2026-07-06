@@ -9,7 +9,7 @@ use openipc_rtl88xx::{
     FalseAlarmCounters, Firmware8814Mode, InitReport, InitStatus, IqkReport,
     Jaguar3PowerTrackingReport, Jaguar3PowerTrackingState, MonitorOptions, PhydmDigState,
     PhydmWatchdogReport, PowerTrackingReport, PowerTrackingState, RadioConfig, RealtekDevice,
-    RealtekTxDescriptor, RealtekTxOptions, RxEnergy, ThermalBucket, ThermalStatus,
+    RealtekTxDescriptor, RealtekTxOptions, RetuneReport, RxEnergy, ThermalBucket, ThermalStatus,
 };
 use wasm_bindgen::prelude::*;
 
@@ -60,6 +60,34 @@ impl WebInitReport {
     #[wasm_bindgen(getter, js_name = firmwareDownloaded)]
     pub fn firmware_downloaded(&self) -> bool {
         self.report.firmware_downloaded
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Channel-retune result returned to JavaScript.
+pub struct WebRetuneReport {
+    report: RetuneReport,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl From<RetuneReport> for WebRetuneReport {
+    fn from(report: RetuneReport) -> Self {
+        Self { report }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+impl WebRetuneReport {
+    #[wasm_bindgen(getter)]
+    pub fn channel(&self) -> u8 {
+        self.report.radio.channel
+    }
+
+    #[wasm_bindgen(getter, js_name = usedFastPath)]
+    pub fn used_fast_path(&self) -> bool {
+        self.report.used_fast_path
     }
 }
 
@@ -707,6 +735,38 @@ impl WebUsbRealtekDevice {
             .await
             .map_err(driver_error)?;
         Ok(report.into())
+    }
+
+    #[wasm_bindgen(js_name = retune)]
+    /// Fully retune an initialized adapter while preserving firmware state.
+    pub async fn retune(
+        &self,
+        channel: u8,
+        channel_width_mhz: u16,
+        channel_offset: u8,
+    ) -> Result<(), JsValue> {
+        self.driver
+            .retune_async(RadioConfig {
+                channel,
+                channel_offset,
+                channel_width: parse_channel_width(channel_width_mhz)?,
+            })
+            .await
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = fastRetune)]
+    /// Lean same-band retune with automatic full-retune fallback.
+    pub async fn fast_retune(
+        &self,
+        channel: u8,
+        cache_rf: bool,
+    ) -> Result<WebRetuneReport, JsValue> {
+        self.driver
+            .fast_retune_async(channel, cache_rf)
+            .await
+            .map(WebRetuneReport::from)
+            .map_err(driver_error)
     }
 
     #[wasm_bindgen(js_name = shutdownMonitor)]

@@ -104,17 +104,17 @@ pub(crate) fn dialog(app: &mut NebulusApp, context: &egui::Context) {
                         .color(ui.visuals().weak_text_color()),
                 );
             } else {
-                egui::ScrollArea::vertical()
+                egui::ScrollArea::both()
                     .id_salt("channel-scan-results")
                     .show(ui, |ui| {
                         egui::Grid::new("channel-scan-grid")
-                            .num_columns(8)
+                            .num_columns(11)
                             .striped(true)
                             .spacing([14.0, 7.0])
                             .show(ui, |ui| {
                                 for heading in [
                                     "Channel", "MHz", "Packets", "WFB", "RSSI A", "RSSI B",
-                                    "Traffic", "",
+                                    "SNR", "EVM", "Retune", "Traffic", "",
                                 ] {
                                     ui.strong(heading);
                                 }
@@ -127,6 +127,18 @@ pub(crate) fn dialog(app: &mut NebulusApp, context: &egui::Context) {
                                     ui.monospace(result.wfb_frames.to_string());
                                     ui.monospace(rssi_label(result.average_rssi_dbm[0]));
                                     ui.monospace(rssi_label(result.average_rssi_dbm[1]));
+                                    ui.monospace(path_pair_label(result.average_snr_db, "dB"));
+                                    ui.monospace(path_pair_label(result.average_evm_db, "dB"));
+                                    let retune = if result.retune_us == 0 {
+                                        "initial".to_owned()
+                                    } else {
+                                        format!(
+                                            "{:.2} ms {}",
+                                            result.retune_us as f64 / 1_000.0,
+                                            if result.used_fast_retune { "fast" } else { "full" }
+                                        )
+                                    };
+                                    ui.monospace(retune);
                                     let mbps = if result.dwell_ms == 0 {
                                         0.0
                                     } else {
@@ -146,10 +158,14 @@ pub(crate) fn dialog(app: &mut NebulusApp, context: &egui::Context) {
 }
 
 fn frequency_mhz(channel: u8) -> u16 {
-    match channel {
-        14 => 2_484,
-        1..=13 => 2_407 + u16::from(channel) * 5,
-        _ => 5_000 + u16::from(channel) * 5,
+    openipc_core::channel_to_frequency(channel).unwrap_or_default()
+}
+
+fn path_pair_label(paths: [i32; 2], unit: &str) -> String {
+    if paths == [0, 0] {
+        "n/a".to_owned()
+    } else {
+        format!("{}/{} {unit}", paths[0], paths[1])
     }
 }
 

@@ -14,6 +14,7 @@ flowchart LR
         Core["openipc-core<br/>WFB, FEC, RTP, Annex-B, raw payloads"]
         Rtl["openipc-rtl88xx<br/>Realtek USB HAL"]
         Video["openipc-video<br/>platform H.264/H.265 decode"]
+        Uplink["openipc-uplink<br/>userspace IPv4/TCP and SSH"]
     end
 
     Nebulus["Nebulus<br/>egui native, Android, or WASM"] --> Rtl
@@ -22,6 +23,8 @@ flowchart LR
     Browser["Browser UI<br/>React + WebUSB permission"] --> Wasm["openipc-web<br/>wasm-bindgen"]
     Wasm --> Rtl
     Rtl --> Core
+    Core --> Uplink
+    Uplink --> Rtl
     Core --> Output["Annex-B frames<br/>raw payload bytes<br/>metrics<br/>adaptive feedback"]
     Output --> Video
     Output --> Players["UDP/file output<br/>recording"]
@@ -43,6 +46,8 @@ flowchart LR
   returns bytes and packet sequence metadata; application crates decide whether
   those bytes are MAVLink, MSP, CRSF, IP, or something else.
 - Adaptive-link quality windows and feedback packet construction.
+- WFB tunnel framing, userspace IPv4/TCP, virtual async streams, SSH, and typed
+  VTX control in `openipc-uplink`.
 - WFB uplink encryption, FEC parity generation, radiotap headers, and 802.11
   wrapping.
 
@@ -80,6 +85,9 @@ protocol details, then let each target own the APIs that make sense there.
 - Its persistent bounded WebUSB OUT queue and separately cancellable Jaguar3
   maintenance task allow the receive future to continue while those promises
   are pending.
+- Browser VTX control uses no browser socket. Rust/WASM feeds recovered tunnel
+  packets into smoltcp; Russh consumes the virtual TCP stream, and outbound IP
+  packets return through WebUSB bulk OUT.
 
 ### Desktop Applications
 
@@ -150,3 +158,7 @@ flowchart TD
     E --> F["Realtek TX descriptor"]
     F --> G["USB bulk OUT"]
 ```
+
+Nebulus uses one WFB tunnel TX session for adaptive feedback, internal VTX
+TCP/SSH traffic, and optional native TUN traffic. One transmitter per link and
+radio port avoids competing session epochs on port `0xa0`.

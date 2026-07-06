@@ -1,7 +1,7 @@
 use std::{
     collections::VecDeque,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex,
     },
 };
@@ -25,6 +25,7 @@ pub(crate) struct AudioPlayer {
     decoded: Vec<f32>,
     mixed: Vec<f32>,
     queue: Arc<Mutex<VecDeque<f32>>>,
+    queued_samples: Arc<AtomicUsize>,
     stream_errors: Arc<AtomicU64>,
     stats: AudioStats,
     _stream: Stream,
@@ -53,6 +54,7 @@ impl AudioPlayer {
         // fixed callback size also avoids oversized host defaults.
         config.buffer_size = BufferSize::Fixed(requested_frames);
         let queue = Arc::new(Mutex::new(VecDeque::new()));
+        let queued_samples = Arc::new(AtomicUsize::new(0));
         let stream_errors = Arc::new(AtomicU64::new(0));
         let sample_format = supported.sample_format();
         let stream = build_stream_for_format(
@@ -60,6 +62,7 @@ impl AudioPlayer {
             &config,
             sample_format,
             &queue,
+            &queued_samples,
             &stream_errors,
         )
         .or_else(|low_latency_error| {
@@ -69,6 +72,7 @@ impl AudioPlayer {
                 &config,
                 sample_format,
                 &queue,
+                &queued_samples,
                 &stream_errors,
             )
             .map_err(|fallback_error| {
@@ -91,11 +95,12 @@ impl AudioPlayer {
             decoded: Vec::new(),
             mixed: Vec::new(),
             queue,
+            queued_samples,
             stream_errors,
             stats: AudioStats {
                 enabled: true,
                 supported: true,
-                decoder_name: "ropus / CPAL".to_owned(),
+                decoder_name: "ropus / CPAL",
                 ..AudioStats::default()
             },
             _stream: stream,
@@ -125,7 +130,7 @@ impl AudioPlayer {
             &mut self.mixed,
         );
         let mut queue = self.queue.lock().map_err(|_| "audio queue poisoned")?;
-        let max_samples = self.output_rate as usize * self.output_channels * 40 / 1_000;
+        let max_samples = self.output_rate as usize * self.output_channels * 20 / 1_000;
         let overflow = queue
             .len()
             .saturating_add(self.mixed.len())
@@ -135,6 +140,7 @@ impl AudioPlayer {
             queue.drain(..drop_count);
         }
         queue.extend(self.mixed.iter().copied());
+        self.queued_samples.store(queue.len(), Ordering::Relaxed);
         self.stats.decoded_frames = self.stats.decoded_frames.saturating_add(1);
         self.stats.queued_ms =
             queue.len() as f64 * 1_000.0 / (self.output_rate as f64 * self.output_channels as f64);
@@ -150,14 +156,12 @@ impl AudioPlayer {
     }
 
     pub(crate) fn stats(&self) -> AudioStats {
-        let mut stats = self.stats.clone();
+        let mut stats = self.stats;
         stats.errors = stats
             .errors
             .saturating_add(self.stream_errors.load(Ordering::Relaxed));
-        if let Ok(queue) = self.queue.lock() {
-            stats.queued_ms = queue.len() as f64 * 1_000.0
-                / (self.output_rate as f64 * self.output_channels as f64);
-        }
+        stats.queued_ms = self.queued_samples.load(Ordering::Relaxed) as f64 * 1_000.0
+            / (self.output_rate as f64 * self.output_channels as f64);
         stats
     }
 }
@@ -167,20 +171,23 @@ fn build_stream_for_format(
     config: &StreamConfig,
     format: SampleFormat,
     queue: &Arc<Mutex<VecDeque<f32>>>,
+    queued_samples: &Arc<AtomicUsize>,
     errors: &Arc<AtomicU64>,
 ) -> Result<Stream, String> {
     match format {
-        SampleFormat::I8 => build_stream::<i8>(device, config, queue, errors),
-        SampleFormat::I16 => build_stream::<i16>(device, config, queue, errors),
-        SampleFormat::I24 => build_stream::<cpal::I24>(device, config, queue, errors),
-        SampleFormat::I32 => build_stream::<i32>(device, config, queue, errors),
-        SampleFormat::I64 => build_stream::<i64>(device, config, queue, errors),
-        SampleFormat::U8 => build_stream::<u8>(device, config, queue, errors),
-        SampleFormat::U16 => build_stream::<u16>(device, config, queue, errors),
-        SampleFormat::U32 => build_stream::<u32>(device, config, queue, errors),
-        SampleFormat::U64 => build_stream::<u64>(device, config, queue, errors),
-        SampleFormat::F32 => build_stream::<f32>(device, config, queue, errors),
-        SampleFormat::F64 => build_stream::<f64>(device, config, queue, errors),
+        SampleFormat::I8 => build_stream::<i8>(device, config, queue, queued_samples, errors),
+        SampleFormat::I16 => build_stream::<i16>(device, config, queue, queued_samples, errors),
+        SampleFormat::I24 => {
+            build_stream::<cpal::I24>(device, config, queue, queued_samples, errors)
+        }
+        SampleFormat::I32 => build_stream::<i32>(device, config, queue, queued_samples, errors),
+        SampleFormat::I64 => build_stream::<i64>(device, config, queue, queued_samples, errors),
+        SampleFormat::U8 => build_stream::<u8>(device, config, queue, queued_samples, errors),
+        SampleFormat::U16 => build_stream::<u16>(device, config, queue, queued_samples, errors),
+        SampleFormat::U32 => build_stream::<u32>(device, config, queue, queued_samples, errors),
+        SampleFormat::U64 => build_stream::<u64>(device, config, queue, queued_samples, errors),
+        SampleFormat::F32 => build_stream::<f32>(device, config, queue, queued_samples, errors),
+        SampleFormat::F64 => build_stream::<f64>(device, config, queue, queued_samples, errors),
         format => Err(format!("unsupported audio sample format {format}")),
     }
 }
@@ -189,12 +196,14 @@ fn build_stream<T>(
     device: &cpal::Device,
     config: &StreamConfig,
     queue: &Arc<Mutex<VecDeque<f32>>>,
+    queued_samples: &Arc<AtomicUsize>,
     errors: &Arc<AtomicU64>,
 ) -> Result<Stream, String>
 where
     T: SizedSample + FromSample<f32>,
 {
     let queue = Arc::clone(queue);
+    let queued_samples = Arc::clone(queued_samples);
     let errors_for_stream = Arc::clone(errors);
     device
         .build_output_stream(
@@ -204,6 +213,7 @@ where
                     for sample in output {
                         *sample = T::from_sample(queue.pop_front().unwrap_or(0.0));
                     }
+                    queued_samples.store(queue.len(), Ordering::Relaxed);
                 } else {
                     output.fill_with(|| T::from_sample(0.0));
                 }

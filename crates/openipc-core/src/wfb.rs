@@ -334,6 +334,16 @@ impl WfbReceiver {
 
     /// Push one WFB forwarder packet payload.
     pub fn push_forwarder_packet(&mut self, buf: &[u8]) -> Result<Vec<WfbEvent>, WfbError> {
+        let mut events = Vec::new();
+        self.push_forwarder_packet_with(buf, &mut |event| events.push(event))?;
+        Ok(events)
+    }
+
+    pub(crate) fn push_forwarder_packet_with(
+        &mut self,
+        buf: &[u8],
+        emit: &mut impl FnMut(WfbEvent),
+    ) -> Result<(), WfbError> {
         log::trace!(target: "openipc_core::wfb", "received WFB forwarder packet bytes={}", buf.len());
         match parse_forwarder_packet(buf)? {
             WfbPacket::SessionKey {
@@ -359,10 +369,9 @@ impl WfbReceiver {
                     );
                     self.assembler = Some(PlainAssembler::new(session.fec_k, session.fec_n)?);
                     self.session = Some(session.clone());
-                    Ok(vec![WfbEvent::Session(session)])
-                } else {
-                    Ok(Vec::new())
+                    emit(WfbEvent::Session(session));
                 }
+                Ok(())
             }
             WfbPacket::Data {
                 data_nonce,
@@ -382,18 +391,22 @@ impl WfbReceiver {
                 )
                 .map_err(|_| WfbError::DataDecryptFailed)?;
                 let assembler = self.assembler.as_mut().ok_or(WfbError::MissingSession)?;
-                let payloads: Vec<_> = assembler
-                    .push_decrypted_fragment(data_nonce, &self.decrypt_scratch)?
-                    .into_iter()
-                    .map(WfbEvent::Payload)
-                    .collect();
+                let mut payload_count = 0usize;
+                assembler.push_decrypted_fragment_with(
+                    data_nonce,
+                    &self.decrypt_scratch,
+                    &mut |payload| {
+                        payload_count += 1;
+                        emit(WfbEvent::Payload(payload));
+                    },
+                )?;
                 log::trace!(
                     target: "openipc_core::wfb",
                     "processed encrypted WFB data fragment nonce={} payloads={}",
                     data_nonce,
-                    payloads.len()
+                    payload_count
                 );
-                Ok(payloads)
+                Ok(())
             }
         }
     }
@@ -467,7 +480,8 @@ pub struct WfbOutput {
 
 #[derive(Debug, Clone)]
 struct Block {
-    fragments: Vec<Option<Vec<u8>>>,
+    fragments: Vec<u8>,
+    present: Vec<bool>,
     received: usize,
     next_fragment: usize,
 }
@@ -475,10 +489,17 @@ struct Block {
 impl Block {
     fn new(n: usize) -> Self {
         Self {
-            fragments: vec![None; n],
+            fragments: vec![0; n * MAX_FEC_PAYLOAD],
+            present: vec![false; n],
             received: 0,
             next_fragment: 0,
         }
+    }
+
+    fn reset(&mut self) {
+        self.present.fill(false);
+        self.received = 0;
+        self.next_fragment = 0;
     }
 }
 
@@ -493,6 +514,7 @@ pub struct PlainAssembler {
     fec_n: usize,
     fec: FecCode,
     blocks: BTreeMap<u64, Block>,
+    spare_blocks: Vec<Block>,
     next_block: Option<u64>,
     /// Total fragments observed.
     pub total_packets: u64,
@@ -516,6 +538,7 @@ impl PlainAssembler {
             fec_n,
             fec,
             blocks: BTreeMap::new(),
+            spare_blocks: Vec::with_capacity(2),
             next_block: None,
             total_packets: 0,
             lost_packets: 0,
@@ -556,6 +579,19 @@ impl PlainAssembler {
         data_nonce: u64,
         fragment: &[u8],
     ) -> Result<Vec<WfbOutput>, WfbError> {
+        let mut outputs = Vec::new();
+        self.push_decrypted_fragment_with(data_nonce, fragment, &mut |output| {
+            outputs.push(output);
+        })?;
+        Ok(outputs)
+    }
+
+    pub(crate) fn push_decrypted_fragment_with(
+        &mut self,
+        data_nonce: u64,
+        fragment: &[u8],
+        emit: &mut impl FnMut(WfbOutput),
+    ) -> Result<(), WfbError> {
         let block_idx = data_nonce >> 8;
         let fragment_idx = (data_nonce & 0xff) as usize;
 
@@ -575,26 +611,36 @@ impl PlainAssembler {
             .map(|next_block| block_idx < next_block)
             .unwrap_or(false)
         {
-            return Ok(Vec::new());
+            return Ok(());
         }
 
+        if !self.blocks.contains_key(&block_idx) {
+            let mut block = self
+                .spare_blocks
+                .pop()
+                .unwrap_or_else(|| Block::new(self.fec_n));
+            block.reset();
+            self.blocks.insert(block_idx, block);
+        }
         let block = self
             .blocks
-            .entry(block_idx)
-            .or_insert_with(|| Block::new(self.fec_n));
-        if block.fragments[fragment_idx].is_none() {
-            let mut padded = vec![0; MAX_FEC_PAYLOAD];
+            .get_mut(&block_idx)
+            .expect("block was inserted above");
+        if !block.present[fragment_idx] {
             let len = fragment.len().min(MAX_FEC_PAYLOAD);
-            padded[..len].copy_from_slice(&fragment[..len]);
-            block.fragments[fragment_idx] = Some(padded);
+            let start = fragment_idx * MAX_FEC_PAYLOAD;
+            let slot = &mut block.fragments[start..start + MAX_FEC_PAYLOAD];
+            slot.fill(0);
+            slot[..len].copy_from_slice(&fragment[..len]);
+            block.present[fragment_idx] = true;
             block.received += 1;
         }
 
-        Ok(self.drain_ready_blocks())
+        self.drain_ready_blocks(emit);
+        Ok(())
     }
 
-    fn drain_ready_blocks(&mut self) -> Vec<WfbOutput> {
-        let mut out = Vec::new();
+    fn drain_ready_blocks(&mut self, emit: &mut impl FnMut(WfbOutput)) {
         while let Some(block_idx) = self.next_block {
             if !self.blocks.contains_key(&block_idx) {
                 if self.should_skip_missing_block(block_idx) {
@@ -605,14 +651,16 @@ impl PlainAssembler {
                 break;
             }
 
-            self.emit_contiguous_primary(block_idx, &mut out);
+            self.emit_contiguous_primary(block_idx, emit);
             let complete = self
                 .blocks
                 .get(&block_idx)
                 .map(|block| block.next_fragment == self.fec_k)
                 .unwrap_or(false);
             if complete {
-                self.blocks.remove(&block_idx);
+                if let Some(block) = self.blocks.remove(&block_idx) {
+                    self.recycle_block(block);
+                }
                 self.next_block = Some(block_idx + 1);
                 continue;
             }
@@ -624,10 +672,11 @@ impl PlainAssembler {
                 .unwrap_or(false);
             if can_recover {
                 if let Some(block) = self.blocks.get_mut(&block_idx) {
-                    match self
-                        .fec
-                        .recover_primary(&mut block.fragments, MAX_FEC_PAYLOAD)
-                    {
+                    match self.fec.recover_primary_into(
+                        &mut block.fragments,
+                        &mut block.present,
+                        MAX_FEC_PAYLOAD,
+                    ) {
                         Ok(recovered) => {
                             if recovered > 0 {
                                 log::debug!(
@@ -645,25 +694,26 @@ impl PlainAssembler {
                                 "FEC recovery failed block={block_idx}: {error}"
                             );
                             self.bad_packets += 1;
-                            self.force_flush_block(block_idx, &mut out);
+                            self.force_flush_block(block_idx, emit);
                             continue;
                         }
                     }
                 }
-                self.emit_contiguous_primary(block_idx, &mut out);
-                self.blocks.remove(&block_idx);
+                self.emit_contiguous_primary(block_idx, emit);
+                if let Some(block) = self.blocks.remove(&block_idx) {
+                    self.recycle_block(block);
+                }
                 self.next_block = Some(block_idx + 1);
                 continue;
             }
 
             if self.should_force_flush(block_idx) {
-                self.force_flush_block(block_idx, &mut out);
+                self.force_flush_block(block_idx, emit);
                 continue;
             }
 
             break;
         }
-        out
     }
 
     fn should_skip_missing_block(&self, block_idx: u64) -> bool {
@@ -676,18 +726,20 @@ impl PlainAssembler {
             || next_present_block.saturating_sub(block_idx) >= 40
     }
 
-    fn emit_contiguous_primary(&mut self, block_idx: u64, out: &mut Vec<WfbOutput>) {
+    fn emit_contiguous_primary(&mut self, block_idx: u64, emit: &mut impl FnMut(WfbOutput)) {
         let Some(block) = self.blocks.get_mut(&block_idx) else {
             return;
         };
         while block.next_fragment < self.fec_k {
             let fragment_idx = block.next_fragment;
-            let Some(fragment) = block.fragments[fragment_idx].as_deref() else {
+            if !block.present[fragment_idx] {
                 break;
-            };
+            }
+            let start = fragment_idx * MAX_FEC_PAYLOAD;
+            let fragment = &block.fragments[start..start + MAX_FEC_PAYLOAD];
             let packet_seq = block_idx * self.fec_k as u64 + fragment_idx as u64;
             match parse_plain_packet(fragment) {
-                Ok(Some(payload)) => out.push(WfbOutput {
+                Ok(Some(payload)) => emit(WfbOutput {
                     packet_seq,
                     payload: payload.to_vec(),
                 }),
@@ -709,27 +761,39 @@ impl PlainAssembler {
             .any(|(_, block)| block.received >= self.fec_k)
     }
 
-    fn force_flush_block(&mut self, block_idx: u64, out: &mut Vec<WfbOutput>) {
+    fn force_flush_block(&mut self, block_idx: u64, emit: &mut impl FnMut(WfbOutput)) {
         if let Some(block) = self.blocks.remove(&block_idx) {
             for fragment_idx in block.next_fragment..self.fec_k {
                 let packet_seq = block_idx * self.fec_k as u64 + fragment_idx as u64;
-                match block.fragments[fragment_idx].as_deref() {
-                    Some(fragment) => match parse_plain_packet(fragment) {
-                        Ok(Some(payload)) => out.push(WfbOutput {
-                            packet_seq,
-                            payload: payload.to_vec(),
-                        }),
-                        Ok(None) => {}
-                        Err(_) => {
-                            self.bad_packets += 1;
+                match block.present[fragment_idx] {
+                    true => {
+                        let start = fragment_idx * MAX_FEC_PAYLOAD;
+                        match parse_plain_packet(&block.fragments[start..start + MAX_FEC_PAYLOAD]) {
+                            Ok(Some(payload)) => emit(WfbOutput {
+                                packet_seq,
+                                payload: payload.to_vec(),
+                            }),
+                            Ok(None) => {}
+                            Err(_) => {
+                                self.bad_packets += 1;
+                            }
                         }
-                    },
-                    None => {
+                    }
+                    false => {
                         self.lost_packets += 1;
                     }
                 }
             }
             self.next_block = Some(block_idx + 1);
+            self.recycle_block(block);
+        }
+    }
+
+    fn recycle_block(&mut self, mut block: Block) {
+        const MAX_SPARE_BLOCKS: usize = 4;
+        if self.spare_blocks.len() < MAX_SPARE_BLOCKS {
+            block.reset();
+            self.spare_blocks.push(block);
         }
     }
 }
@@ -819,6 +883,26 @@ mod tests {
             .unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].payload, b"second");
+    }
+
+    #[test]
+    fn reuses_completed_fec_block_storage() {
+        let mut assembler = PlainAssembler::new(1, 1).unwrap();
+        let first = padded(&plain(b"first"));
+        assert_eq!(
+            assembler.push_decrypted_fragment(0, &first).unwrap()[0].payload,
+            b"first"
+        );
+        assert_eq!(assembler.spare_blocks.len(), 1);
+
+        let allocation = assembler.spare_blocks[0].fragments.as_ptr();
+        let second = plain(b"second");
+        assert_eq!(
+            assembler.push_decrypted_fragment(1 << 8, &second).unwrap()[0].payload,
+            b"second"
+        );
+        assert_eq!(assembler.spare_blocks.len(), 1);
+        assert_eq!(assembler.spare_blocks[0].fragments.as_ptr(), allocation);
     }
 
     #[test]

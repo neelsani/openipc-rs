@@ -7,6 +7,23 @@ use wasm_bindgen_futures::JsFuture;
 
 pub(crate) struct DateNow;
 
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn monotonic_micros() -> u64 {
+    web_sys::window()
+        .and_then(|window| window.performance())
+        .map_or(0, |performance| (performance.now() * 1_000.0) as u64)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn monotonic_micros() -> u64 {
+    static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    STARTED
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_micros()
+        .min(u128::from(u64::MAX)) as u64
+}
+
 impl DateNow {
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn now() -> f64 {

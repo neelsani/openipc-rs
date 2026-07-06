@@ -14,8 +14,8 @@ use super::{
     set_value, string_field, worker_scope,
 };
 
-const MAX_ACCESS_UNITS_IN_FLIGHT: usize = 8;
-const MAX_QUEUED_ACCESS_UNITS: usize = 8;
+const MAX_ACCESS_UNITS_IN_FLIGHT: usize = 3;
+const MAX_QUEUED_ACCESS_UNITS: usize = 3;
 
 thread_local! {
     static RUNTIME: RefCell<Option<RtpRuntime>> = const { RefCell::new(None) };
@@ -37,15 +37,19 @@ pub(super) fn handle_message(message: JsValue) -> Result<(), String> {
             let data = Reflect::get(&message, &JsValue::from_str("data"))
                 .map_err(|error| format!("RTP worker batch has no data: {error:?}"))?;
             let view = Uint8Array::new(&data);
-            let mut payload = vec![0; view.length() as usize];
-            view.copy_to(&mut payload);
             RUNTIME.with(|slot| -> Result<(), String> {
                 let mut slot = slot.borrow_mut();
                 let runtime = slot
                     .as_mut()
                     .ok_or_else(|| "RTP worker is not initialized".to_owned())?;
-                visit_rtp_batch(&payload, |packet| runtime.push_rtp(packet))
-                    .map_err(str::to_owned)?;
+                let mut payload = std::mem::take(&mut runtime.batch_scratch);
+                payload.resize(view.length() as usize, 0);
+                view.copy_to(&mut payload);
+                let result = visit_rtp_batch(&payload, |packet| runtime.push_rtp(packet))
+                    .map_err(str::to_owned);
+                payload.clear();
+                runtime.batch_scratch = payload;
+                result?;
                 runtime.finish_batch();
                 Ok(())
             })?;
@@ -76,6 +80,7 @@ struct RtpRuntime {
     access_units_in_flight: usize,
     encoded_bytes: u64,
     last_stats_emit_ms: f64,
+    batch_scratch: Vec<u8>,
 }
 
 impl RtpRuntime {
@@ -90,6 +95,7 @@ impl RtpRuntime {
             access_units_in_flight: 0,
             encoded_bytes: 0,
             last_stats_emit_ms: Date::now(),
+            batch_scratch: Vec::with_capacity(16 * 1024),
         }
     }
 

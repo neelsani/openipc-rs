@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::{borrow::Cow, collections::HashMap, sync::Arc, sync::OnceLock};
 
 const GF_SIZE: usize = 255;
 const GF_BITS: usize = 8;
@@ -41,6 +41,7 @@ pub struct FecCode {
     k: usize,
     n: usize,
     enc_matrix: Vec<u8>,
+    decode_cache: Arc<HashMap<u128, Box<[u8]>>>,
 }
 
 impl FecCode {
@@ -76,7 +77,14 @@ impl FecCode {
             enc_matrix[col * k + col] = 1;
         }
 
-        Ok(Self { k, n, enc_matrix })
+        let mut code = Self {
+            k,
+            n,
+            enc_matrix,
+            decode_cache: Arc::new(HashMap::new()),
+        };
+        code.decode_cache = Arc::new(code.precompute_decode_matrices()?);
+        Ok(code)
     }
 
     /// Return the number of primary fragments.
@@ -120,7 +128,6 @@ impl FecCode {
         }
 
         let mut indexes = Vec::with_capacity(self.k);
-        let mut inputs = Vec::with_capacity(self.k);
         let mut parity_cursor = self.k;
 
         for primary_idx in 0..self.k {
@@ -129,7 +136,6 @@ impl FecCode {
                     return Err(FecError::InvalidParameters);
                 }
                 indexes.push(primary_idx);
-                inputs.push(fragment.clone());
             } else {
                 while parity_cursor < self.n && fragments[parity_cursor].is_none() {
                     parity_cursor += 1;
@@ -144,7 +150,6 @@ impl FecCode {
                     return Err(FecError::InvalidParameters);
                 }
                 indexes.push(parity_cursor);
-                inputs.push(fragment.clone());
                 parity_cursor += 1;
             }
         }
@@ -157,16 +162,86 @@ impl FecCode {
             if indexes[row] >= self.k {
                 let mut out = vec![0; block_size];
                 for col in 0..self.k {
-                    addmul(
-                        &mut out,
-                        &inputs[col],
-                        dec_matrix[row * self.k + col],
-                        block_size,
-                    );
+                    let input = fragments[indexes[col]]
+                        .as_deref()
+                        .expect("selected fragment exists");
+                    addmul(&mut out, input, dec_matrix[row * self.k + col], block_size);
                 }
                 fragments[row] = Some(out);
                 recovered += 1;
             }
+        }
+
+        Ok(recovered)
+    }
+
+    /// Recover missing primary fragments into caller-owned reusable buffers.
+    ///
+    /// `present` identifies received fragments. `fragments` contains exactly
+    /// `n * block_size` contiguous bytes in fragment-index order. This avoids
+    /// allocating recovered fragments in the packet-processing hot path.
+    pub fn recover_primary_into(
+        &self,
+        fragments: &mut [u8],
+        present: &mut [bool],
+        block_size: usize,
+    ) -> Result<usize, FecError> {
+        if fragments.len() != self.n * block_size || present.len() != self.n {
+            return Err(FecError::InvalidParameters);
+        }
+        if present[..self.k].iter().all(|is_present| *is_present) {
+            return Ok(0);
+        }
+
+        // WFB uses k=8. Keep its per-damaged-block index selection on the
+        // stack while preserving support for larger custom FEC codes.
+        let mut stack_indexes = [0usize; 16];
+        let mut heap_indexes = if self.k > stack_indexes.len() {
+            vec![0; self.k]
+        } else {
+            Vec::new()
+        };
+        let indexes = if self.k <= stack_indexes.len() {
+            &mut stack_indexes[..self.k]
+        } else {
+            heap_indexes.as_mut_slice()
+        };
+        let mut parity_cursor = self.k;
+        for primary_idx in 0..self.k {
+            if present[primary_idx] {
+                indexes[primary_idx] = primary_idx;
+            } else {
+                while parity_cursor < self.n && !present[parity_cursor] {
+                    parity_cursor += 1;
+                }
+                if parity_cursor >= self.n {
+                    return Err(FecError::NotEnoughFragments);
+                }
+                indexes[primary_idx] = parity_cursor;
+                parity_cursor += 1;
+            }
+        }
+
+        self.validate_indexes(indexes)?;
+        let dec_matrix = self.decode_matrix(indexes)?;
+        let mut recovered = 0;
+        for row in 0..self.k {
+            if indexes[row] < self.k {
+                continue;
+            }
+
+            fragment_mut(fragments, row, block_size).fill(0);
+            for col in 0..self.k {
+                addmul_distinct_contiguous(
+                    fragments,
+                    row,
+                    indexes[col],
+                    dec_matrix[row * self.k + col],
+                    block_size,
+                );
+            }
+            present[row] = true;
+            recovered += 1;
         }
 
         Ok(recovered)
@@ -187,7 +262,16 @@ impl FecCode {
         Ok(())
     }
 
-    fn decode_matrix(&self, indexes: &[usize]) -> Result<Vec<u8>, FecError> {
+    fn decode_matrix(&self, indexes: &[usize]) -> Result<Cow<'_, [u8]>, FecError> {
+        if let Some(key) = index_key(indexes) {
+            if let Some(matrix) = self.decode_cache.get(&key) {
+                return Ok(Cow::Borrowed(matrix));
+            }
+        }
+        Ok(Cow::Owned(self.decode_matrix_uncached(indexes)?))
+    }
+
+    fn decode_matrix_uncached(&self, indexes: &[usize]) -> Result<Vec<u8>, FecError> {
         let mut matrix = vec![0; self.k * self.k];
         for (row, &idx) in indexes.iter().enumerate() {
             let row_start = row * self.k;
@@ -201,6 +285,84 @@ impl FecCode {
         invert_mat(&mut matrix, self.k)?;
         Ok(matrix)
     }
+
+    fn precompute_decode_matrices(&self) -> Result<HashMap<u128, Box<[u8]>>, FecError> {
+        const MAX_CACHED_MATRICES: usize = 4_096;
+
+        // Exhaustively caching larger codes can consume substantial memory and
+        // delay session setup. WFB's normal 8/12 code has only 494 recoverable
+        // primary/parity loss patterns and fits comfortably within this bound.
+        let parity_count = self.n - self.k;
+        if self.k > 12
+            || parity_count > 12
+            || self.k >= usize::BITS as usize
+            || parity_count >= usize::BITS as usize
+        {
+            return Ok(HashMap::new());
+        }
+
+        let pattern_count = (1..=self.k.min(parity_count)).fold(0usize, |total, missing| {
+            total.saturating_add(
+                binomial(self.k, missing).saturating_mul(binomial(parity_count, missing)),
+            )
+        });
+        if pattern_count > MAX_CACHED_MATRICES {
+            return Ok(HashMap::new());
+        }
+
+        let mut cache = HashMap::with_capacity(pattern_count);
+        for primary_mask in 1usize..(1usize << self.k) {
+            let missing = primary_mask.count_ones() as usize;
+            if missing > parity_count {
+                continue;
+            }
+
+            for parity_mask in 1usize..(1usize << parity_count) {
+                if parity_mask.count_ones() as usize != missing {
+                    continue;
+                }
+
+                let mut selected_parity = (0..parity_count)
+                    .filter(|parity| parity_mask & (1usize << parity) != 0)
+                    .map(|parity| self.k + parity);
+                let indexes: Vec<usize> = (0..self.k)
+                    .map(|primary| {
+                        if primary_mask & (1usize << primary) == 0 {
+                            primary
+                        } else {
+                            selected_parity.next().expect("matching parity count")
+                        }
+                    })
+                    .collect();
+                let matrix = self.decode_matrix_uncached(&indexes)?.into_boxed_slice();
+                cache.insert(
+                    index_key(&indexes).expect("cached FEC indexes fit u128"),
+                    matrix,
+                );
+            }
+        }
+        Ok(cache)
+    }
+}
+
+fn binomial(n: usize, k: usize) -> usize {
+    let k = k.min(n - k);
+    (0..k).fold(1usize, |result, index| result * (n - index) / (index + 1))
+}
+
+fn index_key(indexes: &[usize]) -> Option<u128> {
+    if indexes.len() > 16 || indexes.iter().any(|&index| index > u8::MAX as usize) {
+        return None;
+    }
+
+    Some(
+        indexes
+            .iter()
+            .enumerate()
+            .fold(0u128, |key, (offset, &index)| {
+                key | (index as u128) << (offset * 8)
+            }),
+    )
 }
 
 #[derive(Clone)]
@@ -208,6 +370,8 @@ struct GfTables {
     gf_exp: [u8; 510],
     inverse: [u8; 256],
     gf_mul: Box<[[u8; 256]; 256]>,
+    gf_mul_low: Box<[[u8; 16]; 256]>,
+    gf_mul_high: Box<[[u8; 16]; 256]>,
 }
 
 fn tables() -> &'static GfTables {
@@ -258,10 +422,21 @@ impl GfTables {
             }
         }
 
+        let mut gf_mul_low = Box::new([[0; 16]; 256]);
+        let mut gf_mul_high = Box::new([[0; 16]; 256]);
+        for coefficient in 0..256 {
+            for nibble in 0..16 {
+                gf_mul_low[coefficient][nibble] = gf_mul[coefficient][nibble];
+                gf_mul_high[coefficient][nibble] = gf_mul[coefficient][nibble << 4];
+            }
+        }
+
         Self {
             gf_exp,
             inverse,
             gf_mul,
+            gf_mul_low,
+            gf_mul_high,
         }
     }
 }
@@ -278,13 +453,51 @@ fn gf_mul(x: u8, y: u8) -> u8 {
     tables().gf_mul[x as usize][y as usize]
 }
 
+#[inline(always)]
 fn addmul(dst: &mut [u8], src: &[u8], coefficient: u8, len: usize) {
     if coefficient == 0 {
         return;
     }
-    let mul = &tables().gf_mul[coefficient as usize];
-    for idx in 0..len {
+    if coefficient == 1 {
+        for (output, input) in dst[..len].iter_mut().zip(&src[..len]) {
+            *output ^= *input;
+        }
+        return;
+    }
+    let tables = tables();
+    let coefficient = coefficient as usize;
+    let vector_len = crate::fec_simd::addmul(
+        &mut dst[..len],
+        &src[..len],
+        &tables.gf_mul_low[coefficient],
+        &tables.gf_mul_high[coefficient],
+    );
+    let mul = &tables.gf_mul[coefficient];
+    for idx in vector_len..len {
         dst[idx] ^= mul[src[idx] as usize];
+    }
+}
+
+fn fragment_mut(data: &mut [u8], index: usize, block_size: usize) -> &mut [u8] {
+    &mut data[index * block_size..(index + 1) * block_size]
+}
+
+fn addmul_distinct_contiguous(
+    fragments: &mut [u8],
+    dst_idx: usize,
+    src_idx: usize,
+    coefficient: u8,
+    len: usize,
+) {
+    debug_assert_ne!(dst_idx, src_idx);
+    if dst_idx < src_idx {
+        let (before_src, from_src) = fragments.split_at_mut(src_idx * len);
+        let dst = &mut before_src[dst_idx * len..(dst_idx + 1) * len];
+        addmul(dst, &from_src[..len], coefficient, len);
+    } else {
+        let (before_dst, from_dst) = fragments.split_at_mut(dst_idx * len);
+        let src = &before_dst[src_idx * len..(src_idx + 1) * len];
+        addmul(&mut from_dst[..len], src, coefficient, len);
     }
 }
 
@@ -437,5 +650,117 @@ mod tests {
         let recovered = fec.recover_primary(&mut fragments, 4).unwrap();
         assert_eq!(recovered, 1);
         assert_eq!(fragments[1].as_deref(), Some(&primary[1][..]));
+    }
+
+    #[test]
+    fn optimized_addmul_matches_scalar_galois_field_math() {
+        let src: Vec<u8> = (0..79).map(|idx| (idx * 37 + 11) as u8).collect();
+        let initial: Vec<u8> = (0..79).map(|idx| (idx * 19 + 7) as u8).collect();
+
+        for coefficient in 0..=u8::MAX {
+            let mut actual = initial.clone();
+            addmul(&mut actual, &src, coefficient, src.len());
+
+            let mut expected = initial.clone();
+            for (output, input) in expected.iter_mut().zip(&src) {
+                *output ^= gf_mul(coefficient, *input);
+            }
+            assert_eq!(actual, expected, "coefficient {coefficient}");
+        }
+    }
+
+    #[test]
+    fn recovers_every_supported_wfb_eight_twelve_loss_pattern() {
+        let fec = FecCode::new(8, 12).unwrap();
+        assert_eq!(fec.decode_cache.len(), 494);
+
+        let primary: Vec<Vec<u8>> = (0..fec.k())
+            .map(|fragment| {
+                (0..257)
+                    .map(|offset| (fragment * 31 + offset * 17) as u8)
+                    .collect()
+            })
+            .collect();
+        let parity = fec.encode(&primary, 257).unwrap();
+        let complete: Vec<Vec<u8>> = primary.iter().chain(&parity).cloned().collect();
+
+        for mask in 1u16..(1 << fec.k()) {
+            let missing = mask.count_ones() as usize;
+            if missing > fec.n() - fec.k() {
+                continue;
+            }
+
+            let mut fragments: Vec<Option<Vec<u8>>> = complete.iter().cloned().map(Some).collect();
+            for (primary_idx, fragment) in fragments.iter_mut().enumerate().take(fec.k()) {
+                if mask & (1 << primary_idx) != 0 {
+                    *fragment = None;
+                }
+            }
+
+            assert_eq!(fec.recover_primary(&mut fragments, 257), Ok(missing));
+            for (fragment, expected) in fragments.iter().zip(&primary) {
+                assert_eq!(fragment.as_deref(), Some(&expected[..]));
+            }
+
+            let mut contiguous: Vec<u8> = complete.iter().flatten().copied().collect();
+            let mut present = vec![true; fec.n()];
+            for (primary_idx, is_present) in present.iter_mut().enumerate().take(fec.k()) {
+                if mask & (1 << primary_idx) != 0 {
+                    *is_present = false;
+                }
+            }
+            assert_eq!(
+                fec.recover_primary_into(&mut contiguous, &mut present, 257),
+                Ok(missing)
+            );
+            for (primary_idx, expected) in primary.iter().enumerate() {
+                let start = primary_idx * 257;
+                assert_eq!(&contiguous[start..start + 257], expected);
+            }
+        }
+    }
+
+    #[test]
+    fn cached_recovery_handles_every_primary_and_parity_loss_pattern() {
+        let fec = FecCode::new(8, 12).unwrap();
+        let primary: Vec<Vec<u8>> = (0..fec.k())
+            .map(|fragment| {
+                (0..257)
+                    .map(|offset| (fragment * 43 + offset * 29) as u8)
+                    .collect()
+            })
+            .collect();
+        let parity = fec.encode(&primary, 257).unwrap();
+        let complete: Vec<Vec<u8>> = primary.iter().chain(&parity).cloned().collect();
+        let parity_count = fec.n() - fec.k();
+        for primary_mask in 1u16..(1 << fec.k()) {
+            let missing = primary_mask.count_ones() as usize;
+            if missing > parity_count {
+                continue;
+            }
+            for parity_mask in 1u16..(1 << parity_count) {
+                if parity_mask.count_ones() as usize != missing {
+                    continue;
+                }
+
+                let mut fragments: Vec<Option<Vec<u8>>> =
+                    complete.iter().cloned().map(Some).collect();
+                for (primary_idx, fragment) in fragments.iter_mut().enumerate().take(fec.k()) {
+                    if primary_mask & (1 << primary_idx) != 0 {
+                        *fragment = None;
+                    }
+                }
+                for parity_idx in 0..parity_count {
+                    if parity_mask & (1 << parity_idx) == 0 {
+                        fragments[fec.k() + parity_idx] = None;
+                    }
+                }
+
+                assert_eq!(fec.recover_primary(&mut fragments, 257), Ok(missing));
+                for (fragment, expected) in fragments.iter().zip(&primary) {
+                    assert_eq!(fragment.as_deref(), Some(&expected[..]));
+                }
+            }
+        }
     }
 }

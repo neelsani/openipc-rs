@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 
 mod messages;
 mod route_runtime;
+mod uplink_control;
 
 #[cfg(debug_assertions)]
 pub(crate) mod codec_mock;
@@ -92,6 +93,10 @@ struct ChannelScanAccumulator {
     rssi_sum: [i64; 2],
     rssi_samples: [u64; 2],
     strongest: [u8; 2],
+    snr_sum: [i64; 2],
+    snr_samples: [u64; 2],
+    evm_sum: [i64; 2],
+    evm_samples: [u64; 2],
 }
 
 impl ChannelScanAccumulator {
@@ -120,10 +125,25 @@ impl ChannelScanAccumulator {
                 self.rssi_samples[path] += 1;
                 self.strongest[path] = self.strongest[path].max(rssi);
             }
+            let snr = packet.attrib.snr[path];
+            if snr != 0 {
+                self.snr_sum[path] += i64::from(snr);
+                self.snr_samples[path] += 1;
+            }
+            let evm = packet.attrib.evm[path];
+            if evm != 0 {
+                self.evm_sum[path] += i64::from(evm);
+                self.evm_samples[path] += 1;
+            }
         }
     }
 
-    fn finish(self, channel: u8, dwell: std::time::Duration) -> ChannelScanResult {
+    fn finish(
+        self,
+        channel: u8,
+        dwell: std::time::Duration,
+        retune: Option<(std::time::Duration, bool)>,
+    ) -> ChannelScanResult {
         let average_rssi_dbm = std::array::from_fn(|path| {
             if self.rssi_samples[path] == 0 {
                 0
@@ -131,6 +151,21 @@ impl ChannelScanAccumulator {
                 -(self.rssi_sum[path] / self.rssi_samples[path] as i64) as i32
             }
         });
+        let average_snr_db = std::array::from_fn(|path| {
+            if self.snr_samples[path] == 0 {
+                0
+            } else {
+                (self.snr_sum[path] / self.snr_samples[path] as i64) as i32
+            }
+        });
+        let average_evm_db = std::array::from_fn(|path| {
+            if self.evm_samples[path] == 0 {
+                0
+            } else {
+                (self.evm_sum[path] / self.evm_samples[path] as i64) as i32
+            }
+        });
+        let (retune, used_fast_retune) = retune.unzip();
         ChannelScanResult {
             channel,
             packets: self.packets,
@@ -138,6 +173,12 @@ impl ChannelScanAccumulator {
             wfb_frames: self.wfb_frames,
             average_rssi_dbm,
             strongest_rssi_dbm: self.strongest.map(|value| -(i32::from(value))),
+            average_snr_db,
+            average_evm_db,
+            retune_us: retune.map_or(0, |elapsed| {
+                elapsed.as_micros().min(u128::from(u64::MAX)) as u64
+            }),
+            used_fast_retune: used_fast_retune.unwrap_or(false),
             dwell_ms: dwell.as_millis().min(u128::from(u64::MAX)) as u64,
         }
     }
@@ -241,11 +282,17 @@ mod tests {
         };
         let mut accumulator = ChannelScanAccumulator::default();
         accumulator.observe(&packet);
-        let result = accumulator.finish(161, std::time::Duration::from_millis(150));
+        let result = accumulator.finish(
+            161,
+            std::time::Duration::from_millis(150),
+            Some((std::time::Duration::from_micros(1_500), true)),
+        );
 
         assert_eq!(result.packets, 1);
         assert_eq!(result.wfb_frames, 1);
         assert_eq!(result.average_rssi_dbm, [-58, -62]);
         assert_eq!(result.strongest_rssi_dbm, [-58, -62]);
+        assert_eq!(result.retune_us, 1_500);
+        assert!(result.used_fast_retune);
     }
 }

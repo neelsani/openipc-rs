@@ -24,18 +24,28 @@ use crate::{
     model::{
         AudioStats, DiagnosticsState, EnvironmentDetails, LiveMetrics, LogEntry, LogLevel,
         MetricHistory, ReceiverState, RecordingState, RecordingStatus, RecoveryStatus, RouteStats,
-        VpnStatus,
+        VpnStatus, VtxControlState, VtxControlStatus,
     },
     presets::{PresetExportDraft, PresetInstallDraft, PresetPack},
     remote_presets::{PresetRegistry, RemotePresetContent, RemoteRequest},
     runtime::{
         AdapterRuntimeMetrics, ReceiverInfo, Runtime, RuntimeEvent, StartRequest, UsbDeviceInfo,
+        VtxControlEvent, VtxControlRequest,
     },
     settings::{HudMetric, HudSettings, Settings},
     telemetry::TelemetryState,
 };
 
 const MAX_OSD_UNDO_STEPS: usize = 64;
+
+/// A consequential VTX operation waiting for explicit user approval.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingVtxConfirmation {
+    pub(crate) title: String,
+    pub(crate) message: String,
+    pub(crate) confirm_label: String,
+    pub(crate) request: VtxControlRequest,
+}
 
 #[derive(Default)]
 pub(crate) struct OsdEditHistory {
@@ -158,6 +168,8 @@ pub struct NebulusApp {
     pub(crate) environment: EnvironmentDetails,
     pub(crate) recording: RecordingStatus,
     pub(crate) vpn: VpnStatus,
+    pub(crate) vtx_control: VtxControlStatus,
+    pub(crate) pending_vtx_confirmation: Option<PendingVtxConfirmation>,
     #[cfg(target_os = "windows")]
     pub(crate) wintun_state: crate::wintun::InstallState,
     #[cfg(target_os = "windows")]
@@ -167,6 +179,7 @@ pub struct NebulusApp {
     pub(crate) data_page: crate::ui::DataPage,
     pub(crate) monitor_page: crate::ui::MonitorPage,
     pub(crate) runtime: Runtime,
+    runtime_events: Vec<RuntimeEvent>,
     pub(crate) texture: Option<egui::TextureHandle>,
     pub(crate) video_renderer: Option<crate::video::PlatformVideoRenderer>,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -261,6 +274,8 @@ impl NebulusApp {
             environment: EnvironmentDetails::detect(),
             recording: RecordingStatus::default(),
             vpn: VpnStatus::default(),
+            vtx_control: VtxControlStatus::default(),
+            pending_vtx_confirmation: None,
             #[cfg(target_os = "windows")]
             wintun_state: crate::wintun::InstallState::detect(),
             #[cfg(target_os = "windows")]
@@ -270,6 +285,7 @@ impl NebulusApp {
             data_page: crate::ui::DataPage::Routes,
             monitor_page: crate::ui::MonitorPage::Metrics,
             runtime: Runtime::new(context.egui_ctx.clone()),
+            runtime_events: Vec::with_capacity(16),
             texture: None,
             video_renderer,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -404,6 +420,19 @@ impl NebulusApp {
             vpn_enabled: self.settings.vpn_enabled
                 && self.settings.receiver_source == crate::settings::ReceiverSource::Usb
                 && self.vpn_available(),
+            vtx_control_enabled: self.settings.vtx_control_enabled
+                && self.settings.receiver_source == crate::settings::ReceiverSource::Usb,
+            vtx_credentials: openipc_uplink::SshCredentials {
+                username: self.settings.vtx_ssh_username.clone(),
+                password: self.settings.vtx_ssh_password.clone(),
+                host_key: if self.settings.vtx_host_key_sha256.trim().is_empty() {
+                    openipc_uplink::HostKeyPolicy::AcceptAny
+                } else {
+                    openipc_uplink::HostKeyPolicy::Sha256(
+                        self.settings.vtx_host_key_sha256.trim().to_owned(),
+                    )
+                },
+            },
             payload_routes: self.settings.payload_routes.clone(),
             telemetry: self.settings.telemetry.clone(),
         }
@@ -425,10 +454,12 @@ impl NebulusApp {
         self.diagnostics = DiagnosticsState::default();
         self.adapter_metrics.clear();
         self.vpn = VpnStatus::default();
+        self.vtx_control = VtxControlStatus::default();
     }
 
     pub(crate) fn stop_receiver(&mut self) {
         self.recovery.cancel();
+        self.pending_vtx_confirmation = None;
         if self.recording.state != RecordingState::Idle {
             self.runtime.stop_recording();
         }
@@ -461,6 +492,42 @@ impl NebulusApp {
 
     pub(crate) fn refresh_devices(&mut self) {
         self.runtime.refresh_devices();
+    }
+
+    pub(crate) fn request_vtx(&mut self, request: VtxControlRequest) {
+        if self.state != ReceiverState::Receiving {
+            self.log(
+                LogLevel::Warn,
+                "vtx",
+                "Start RX before connecting to the VTX",
+            );
+            return;
+        }
+        self.vtx_control.state = match request {
+            VtxControlRequest::Connect | VtxControlRequest::Refresh => VtxControlState::Connecting,
+            VtxControlRequest::Disconnect => VtxControlState::Disconnected,
+            _ => VtxControlState::Applying,
+        };
+        if let Err(error) = self.runtime.request_vtx(request) {
+            self.vtx_control.state = VtxControlState::Failed;
+            self.vtx_control.last_error.clone_from(&error);
+            self.log(LogLevel::Error, "vtx", error);
+        }
+    }
+
+    pub(crate) fn confirm_vtx(
+        &mut self,
+        title: impl Into<String>,
+        message: impl Into<String>,
+        confirm_label: impl Into<String>,
+        request: VtxControlRequest,
+    ) {
+        self.pending_vtx_confirmation = Some(PendingVtxConfirmation {
+            title: title.into(),
+            message: message.into(),
+            confirm_label: confirm_label.into(),
+            request,
+        });
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -940,8 +1007,9 @@ impl NebulusApp {
         if self.video_fullscreen && context.input(|input| input.key_pressed(egui::Key::Escape)) {
             self.set_video_fullscreen(context, false);
         }
-        let events = self.runtime.drain().collect::<Vec<_>>();
-        for event in events {
+        let mut events = std::mem::take(&mut self.runtime_events);
+        self.runtime.drain_into(&mut events);
+        for event in events.drain(..) {
             match event {
                 RuntimeEvent::Devices(devices) => {
                     self.devices = devices;
@@ -1110,6 +1178,68 @@ impl NebulusApp {
                     self.recording.state = RecordingState::Idle;
                     self.log(LogLevel::Error, "record", error);
                 }
+                RuntimeEvent::VtxControl(event) => match event {
+                    VtxControlEvent::Connecting => {
+                        self.vtx_control.state = VtxControlState::Connecting;
+                        self.vtx_control.last_error.clear();
+                        self.log(LogLevel::Debug, "vtx", "Connecting to 10.5.0.10 over WFB");
+                    }
+                    VtxControlEvent::Connected => {
+                        self.vtx_control.state = VtxControlState::Connected;
+                        self.vtx_control.last_error.clear();
+                        self.log(LogLevel::Info, "vtx", "VTX SSH control connected");
+                    }
+                    VtxControlEvent::Config(config) => {
+                        self.vtx_control.state = VtxControlState::Connected;
+                        match config.parse_settings() {
+                            Ok(mut snapshot) => {
+                                if let Some(channel) = snapshot
+                                    .channel
+                                    .take()
+                                    .and_then(|channel| u8::try_from(channel).ok())
+                                {
+                                    self.settings.channel = channel;
+                                }
+                                if let Some(width) = snapshot.channel_width.take() {
+                                    self.settings.channel_width_mhz = width;
+                                }
+                                if let Some(power) = snapshot.tx_power.take() {
+                                    self.settings.tx_power = power;
+                                }
+                                self.settings.vtx.apply_snapshot(snapshot);
+                            }
+                            Err(error) => self.log(
+                                LogLevel::Warn,
+                                "vtx",
+                                format!("VTX config loaded but known settings could not be parsed: {error}"),
+                            ),
+                        }
+                        if let Ok(profiles) = std::str::from_utf8(&config.tx_profiles) {
+                            self.settings.vtx.tx_profiles = profiles.to_owned();
+                        }
+                        self.vtx_control.config = Some(config);
+                        self.log(LogLevel::Info, "vtx", "VTX configuration refreshed");
+                    }
+                    VtxControlEvent::VideoMode(mode) => {
+                        self.vtx_control.state = VtxControlState::Connected;
+                        self.vtx_control.video_mode.clone_from(&mode);
+                        self.log(LogLevel::Info, "vtx", format!("Current video mode: {mode}"));
+                    }
+                    VtxControlEvent::Applied(label) => {
+                        self.vtx_control.state = VtxControlState::Connected;
+                        self.log(LogLevel::Info, "vtx", format!("Applied {label}"));
+                    }
+                    VtxControlEvent::Disconnected => {
+                        self.vtx_control.state = VtxControlState::Disconnected;
+                        self.vtx_control.config = None;
+                        self.log(LogLevel::Info, "vtx", "VTX control disconnected");
+                    }
+                    VtxControlEvent::Failed(error) => {
+                        self.vtx_control.state = VtxControlState::Failed;
+                        self.vtx_control.last_error.clone_from(&error);
+                        self.log(LogLevel::Error, "vtx", error);
+                    }
+                },
                 RuntimeEvent::Stopped => {
                     self.receiver_info = None;
                     self.receiver_infos.clear();
@@ -1117,6 +1247,8 @@ impl NebulusApp {
                     self.state = ReceiverState::Idle;
                     self.recording.state = RecordingState::Idle;
                     self.vpn.active = false;
+                    self.vtx_control.state = VtxControlState::Disconnected;
+                    self.pending_vtx_confirmation = None;
                     self.log(LogLevel::Info, "rx", "Receiver stopped");
                 }
                 RuntimeEvent::Failed(error) => {
@@ -1129,6 +1261,8 @@ impl NebulusApp {
                     self.state = ReceiverState::Failed;
                     self.recording.state = RecordingState::Idle;
                     self.vpn.active = false;
+                    self.vtx_control.state = VtxControlState::Disconnected;
+                    self.pending_vtx_confirmation = None;
                     self.log(LogLevel::Error, "runtime", error.clone());
                     if self.settings.auto_recover && recoverable && !cfg!(target_arch = "wasm32") {
                         self.schedule_recovery(error, context);
@@ -1136,6 +1270,7 @@ impl NebulusApp {
                 }
             }
         }
+        self.runtime_events = events;
         if self.state == ReceiverState::Receiving
             && (self.rate_window_bytes > 0 || self.rate_window_frames > 0)
         {
@@ -1661,6 +1796,7 @@ impl NebulusApp {
         accumulate_counters(&mut self.diagnostics.counters, batch.counters);
         self.diagnostics.rtp = batch.rtp;
         self.diagnostics.reorder = batch.reorder;
+        self.vtx_control.network = batch.uplink;
         if self.settings.receiver_source == crate::settings::ReceiverSource::UdpRtp {
             self.diagnostics
                 .observe("UDP socket wait", batch.usb_latency_ms);

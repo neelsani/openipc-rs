@@ -20,6 +20,7 @@ station for desktop, Android, and the browser.
 ```text
 crates/openipc-core       WFB, RTP, FEC, crypto, video and raw payload pipeline
 crates/openipc-rtl88xx    Realtek rtl88xx USB WiFi driver
+crates/openipc-uplink     Userspace WFB IPv4/TCP and backward-compatible VTX control
 crates/openipc-video      Cross-platform low-latency H.264/H.265 decoding
 crates/openipc-web        wasm-bindgen package for browser/WebUSB apps
 apps/openipc-cli          Native command-line utilities
@@ -38,6 +39,7 @@ scripts                   cleanup helpers
 | ----------------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `openipc-core`    | [crates.io](https://crates.io/crates/openipc-core)    | Shared protocol code: WFB, FEC, RTP, crypto, video frame extraction, generic raw payload taps, adaptive-link packet logic. |
 | `openipc-rtl88xx` | [crates.io](https://crates.io/crates/openipc-rtl88xx) | Realtek rtl88xx USB WiFi driver/HAL for monitor receive and adaptive-link transmit.                                        |
+| `openipc-uplink`  | [crates.io](https://crates.io/crates/openipc-uplink)  | Userspace IPv4/TCP over WFB tunnel ports, cross-target SSH, and typed controls for existing OpenIPC VTX firmware.          |
 | `openipc-video`   | [crates.io](https://crates.io/crates/openipc-video)   | Hardware H.264/H.265 decoding for macOS, Linux, Windows, Android, and WebAssembly/WebCodecs.                               |
 | `openipc-web`     | [crates.io](https://crates.io/crates/openipc-web)     | Rust/WASM bindings for browser WebUSB applications.                                                                        |
 | `wfb-rs`          | [crates.io](https://crates.io/crates/wfb-rs)          | WFB-style command-line tools backed by the Rust userland Realtek driver.                                                   |
@@ -140,7 +142,8 @@ sh scripts/clean-generated.sh
 
 The Rust protocol pipeline, Realtek driver path, WebUSB/WASM bindings, Nebulus
 platform decoding and UI, adaptive-link feedback, native VPN tunnel bridging,
-and CI/release automation are implemented. The driver tracks newer devourer
+userspace VTX control on native, Android, and browser targets, and CI/release
+automation are implemented. The driver tracks newer devourer
 behavior for TX modes, multi-transfer RX, RTL8814 firmware bring-up,
 RTL8812BU/RTL8822BU Jaguar2, RTL8812CU/EU and RTL8822CU/EU Jaguar3 descriptors,
 firmware, tables, EFUSE, RFE, calibration, 40/80 MHz and 40-in-80 operation,

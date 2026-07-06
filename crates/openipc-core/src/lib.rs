@@ -13,6 +13,7 @@ pub mod crypto;
 pub mod diversity;
 /// Reed-Solomon forward-error-correction helpers.
 pub mod fec;
+mod fec_simd;
 /// Minimal 802.11 frame parsing and construction helpers.
 pub mod ieee80211;
 /// Synthetic RTP source for no-hardware development.
@@ -33,6 +34,8 @@ pub mod rtp;
 pub mod wfb;
 /// WFB uplink packet transmitter.
 pub mod wfb_tx;
+/// WiFi channel/frequency helpers and sweep-list parsing.
+pub mod wifi;
 
 pub use adaptive::{AdaptiveLink, AdaptiveLinkSender, LinkQuality};
 pub use channel::{ChannelId, RadioPort};
@@ -44,8 +47,9 @@ pub use ieee80211::{FrameLayout, WifiFrame};
 pub use mock::{MockRtpFrame, MockRtpPipeline};
 pub use pipeline::{MockPayloadPipeline, PayloadPipeline, PayloadPipelineEvent, RecoveredPayload};
 pub use radiotap::{
-    build_stream_radiotap, parse_tx_mode_str, try_parse_tx_mode_str, ChannelBandwidth, TxMode,
-    TxModeKind, TxRadioParams, FRAME_TYPE_DATA, FRAME_TYPE_RTS,
+    build_stream_radiotap, build_stream_radiotap_on_channel, parse_radiotap_tx_channel,
+    parse_radiotap_tx_metadata, parse_tx_mode_str, try_parse_tx_mode_str, ChannelBandwidth,
+    RadiotapTxMetadata, TxMode, TxModeKind, TxRadioParams, FRAME_TYPE_DATA, FRAME_TYPE_RTS,
 };
 pub use realtek::{
     parse_rx_aggregate, parse_rx_aggregate_with_kind, RealtekRxPacket, RxDescriptorKind,
@@ -67,3 +71,4 @@ pub use wfb::{
     FecCounters, PlainAssembler, WfbKeypair, WfbOutput, WfbPacket, WfbReceiver, WfbSession,
 };
 pub use wfb_tx::{WfbTransmitter, WfbTxKeypair};
+pub use wifi::{channel_to_frequency, frequency_to_channel, parse_channel_sweep};

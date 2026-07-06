@@ -11,6 +11,10 @@ readme = "README.md"
 name = "openipc_core"
 path = "src/lib.rs"
 
+[[bench]]
+name = "dataplane"
+harness = false
+
 [dependencies]
 log.workspace = true
 chacha20 = { version = "0.10", features = ["cipher", "legacy"] }

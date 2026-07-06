@@ -22,6 +22,7 @@ material only; `openipc-rs` builds independently.
 openipc-rs/
   crates/openipc-core/        protocol, WFB, RTP, video, adaptive link
   crates/openipc-rtl88xx/     shared async Realtek rtl88xx USB/HAL driver
+  crates/openipc-uplink/      userspace WFB IPv4/TCP and VTX control
   crates/openipc-video/       platform-native and WebCodecs video decoding
   apps/openipc-cli/           native CLI utilities
   apps/wfb-rs/                WFB-ng-style Rust binaries over the userland driver

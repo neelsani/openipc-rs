@@ -15,12 +15,12 @@ plugins, fetch assets, or interpret shaders from a pack.
 
 ## How The Pieces Fit
 
-| Object | Lifetime | Contains |
-| --- | --- | --- |
-| Receiver profile | Local and editable | Hardware, radio, secrets, routes, telemetry, audio, VPN, decoder policy, and a reference to an OSD profile |
-| OSD profile | Local and editable | Indicator layout, visibility, graphs, scale, and overlay appearance |
-| Application theme | Global | Nebulus interface palette |
-| Preset pack | Installed, immutable, and versioned | Any combination of portable OSD, theme, route, telemetry, and performance components |
+| Object            | Lifetime                            | Contains                                                                                                   |
+| ----------------- | ----------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| Receiver profile  | Local and editable                  | Hardware, radio, secrets, routes, telemetry, audio, VPN, decoder policy, and a reference to an OSD profile |
+| OSD profile       | Local and editable                  | Indicator layout, visibility, graphs, scale, and overlay appearance                                        |
+| Application theme | Global                              | Nebulus interface palette                                                                                  |
+| Preset pack       | Installed, immutable, and versioned | Any combination of portable OSD, theme, route, telemetry, and performance components                       |
 
 Installing an OSD component creates or refreshes a local OSD profile carrying
 the pack ID and version as provenance. A receiver profile references that OSD
@@ -41,13 +41,13 @@ does not modify a receiver profile automatically: install the new file, inspect
 its components, and apply it explicitly. Removing an installed pack keeps any
 derived local OSD and receiver profiles.
 
-| Component | Result |
-| --- | --- |
-| OSD | Creates or refreshes a local OSD profile and selects it for the active receiver profile |
-| Theme | Changes the global GUI theme |
-| Routes | Replaces the active profile's auxiliary payload routes |
-| Telemetry | Replaces protocol and filter policy while preserving the local MAVLink signing key |
-| Performance | Applies codec preference and RTP reorder policy |
+| Component   | Result                                                                                  |
+| ----------- | --------------------------------------------------------------------------------------- |
+| OSD         | Creates or refreshes a local OSD profile and selects it for the active receiver profile |
+| Theme       | Changes the global GUI theme                                                            |
+| Routes      | Replaces the active profile's auxiliary payload routes                                  |
+| Telemetry   | Replaces protocol and filter policy while preserving the local MAVLink signing key      |
+| Performance | Applies codec preference and RTP reorder policy                                         |
 
 UDP route templates never carry a destination. They are installed disabled
 with a loopback placeholder and must be configured locally before use.

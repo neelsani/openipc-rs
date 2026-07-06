@@ -16,7 +16,7 @@ nusb.workspace = true
 js-sys = "0.3"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["UsbDevice", "Window"] }
+web-sys = { version = "0.3", features = ["Performance", "UsbDevice", "Window"] }
 
 [lib]
 name = "openipc_rtl88xx"

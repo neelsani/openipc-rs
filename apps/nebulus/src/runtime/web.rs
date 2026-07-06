@@ -82,6 +82,7 @@ pub(crate) struct Runtime {
     cancel: Option<Rc<Cell<bool>>>,
     audio_volume: Rc<Cell<u8>>,
     recording: Rc<RefCell<RecordingControl>>,
+    vtx_commands: Rc<RefCell<VecDeque<super::VtxControlRequest>>>,
     context: eframe::egui::Context,
 }
 
@@ -92,6 +93,7 @@ impl Runtime {
             cancel: None,
             audio_volume: Rc::new(Cell::new(100)),
             recording: Rc::new(RefCell::new(RecordingControl::default())),
+            vtx_commands: Rc::new(RefCell::new(VecDeque::new())),
             context,
         }
     }
@@ -185,6 +187,7 @@ impl Runtime {
         let audio_volume = Rc::clone(&self.audio_volume);
         let events = Rc::clone(&self.events);
         let recording = Rc::clone(&self.recording);
+        let vtx_commands = Rc::clone(&self.vtx_commands);
         let completion_cancel = Rc::clone(&cancel);
 
         spawn_local(async move {
@@ -194,6 +197,7 @@ impl Runtime {
                 cancel,
                 audio_volume,
                 recording,
+                vtx_commands,
                 events,
                 context,
             };
@@ -269,6 +273,7 @@ impl Runtime {
         let events = Rc::clone(&self.events);
         let completion_cancel = Rc::clone(&cancel);
         let recording = Rc::clone(&self.recording);
+        let vtx_commands = Rc::clone(&self.vtx_commands);
         emit(&events, &context, RuntimeEvent::Connecting);
         spawn_local(async move {
             let completion_events = Rc::clone(&events);
@@ -277,6 +282,7 @@ impl Runtime {
                 cancel,
                 audio_volume,
                 recording,
+                vtx_commands,
                 events,
                 context,
             };
@@ -312,6 +318,14 @@ impl Runtime {
         self.audio_volume.set(volume.min(100));
     }
 
+    pub(crate) fn request_vtx(&self, request: super::VtxControlRequest) -> Result<(), String> {
+        if self.cancel.is_none() {
+            return Err("VTX controller is not running".to_owned());
+        }
+        self.vtx_commands.borrow_mut().push_back(request);
+        Ok(())
+    }
+
     pub(crate) fn start_recording(&self) {
         let mut control = self.recording.borrow_mut();
         control.start = true;
@@ -328,12 +342,9 @@ impl Runtime {
         self.recording.borrow_mut().stop = true;
     }
 
-    pub(crate) fn drain(&mut self) -> impl Iterator<Item = RuntimeEvent> {
-        self.events
-            .borrow_mut()
-            .drain(..)
-            .collect::<Vec<_>>()
-            .into_iter()
+    pub(crate) fn drain_into(&self, output: &mut Vec<RuntimeEvent>) {
+        output.clear();
+        output.extend(self.events.borrow_mut().drain(..));
     }
 }
 
@@ -490,6 +501,7 @@ mod worker {
         cell::{Cell, RefCell},
         collections::VecDeque,
         rc::Rc,
+        sync::{Arc, Mutex},
     };
 
     use futures_channel::oneshot;
@@ -500,14 +512,15 @@ mod worker {
     use nusb::transfer::{Buffer, Bulk, Completion, In, Out, TransferError};
     use openipc_core::{
         realtek::{parse_rx_aggregate_with_kind, RxPacketType},
-        AdaptiveLink, AdaptiveLinkSender, ChannelId, DiversityCombiner, DiversityDecision,
-        DiversitySourceId, FecCounters, FrameLayout, PayloadRouteId, ReceiverRuntime, WfbKeypair,
-        WfbTxKeypair,
+        AdaptiveLink, ChannelId, DiversityCombiner, DiversityDecision, DiversitySourceId,
+        FecCounters, FrameLayout, PayloadRouteId, ReceiverRuntime, TxRadioParams, WfbKeypair,
+        WfbTransmitter, WfbTxKeypair,
     };
     use openipc_rtl88xx::{
         build_usb_tx_frame, ChannelWidth, ChipFamily, DriverOptions, Jaguar3PowerTrackingState,
         RadioConfig, RealtekDevice, RealtekTxDescriptor, RealtekTxOptions,
     };
+    use openipc_uplink::{NetworkConfig, UserspaceNetwork, VtxController};
     use wasm_bindgen::JsValue;
     use wasm_bindgen_futures::{spawn_local, JsFuture};
     use web_time::Instant;
@@ -602,17 +615,18 @@ mod worker {
                 if cancel.get() {
                     break;
                 }
-                if index > 0 {
-                    device
-                        .retune_async(RadioConfig {
-                            channel,
-                            channel_width: width,
-                            channel_offset: request.channel_offset,
-                        })
+                let retune = if index > 0 {
+                    let retune_started = Instant::now();
+                    let report = device
+                        .fast_retune_async(channel, true)
                         .await
                         .map_err(|error| format!("retune channel {channel} failed: {error}"))?;
-                    sleep_ms(15).await;
-                }
+                    let elapsed = retune_started.elapsed();
+                    sleep_ms(5).await;
+                    Some((elapsed, report.used_fast_path))
+                } else {
+                    None
+                };
                 let started = Instant::now();
                 let mut observed = ChannelScanAccumulator::default();
                 while started.elapsed() < request.dwell && !cancel.get() {
@@ -655,7 +669,7 @@ mod worker {
                     RuntimeEvent::ScanProgress {
                         index: index + 1,
                         total: request.channels.len(),
-                        result: observed.finish(channel, started.elapsed()),
+                        result: observed.finish(channel, started.elapsed(), retune),
                     },
                 );
             }
@@ -744,15 +758,152 @@ mod worker {
         pub(super) cancel: Rc<Cell<bool>>,
         pub(super) audio_volume: Rc<Cell<u8>>,
         pub(super) recording: Rc<RefCell<super::RecordingControl>>,
+        pub(super) vtx_commands: Rc<RefCell<VecDeque<crate::runtime::VtxControlRequest>>>,
         pub(super) events: Rc<RefCell<VecDeque<RuntimeEvent>>>,
         pub(super) context: eframe::egui::Context,
     }
     struct LinkRuntime {
         quality: AdaptiveLink,
-        sender: Option<AdaptiveLinkSender>,
+        adaptive_enabled: bool,
+        last_feedback_ms: Option<u64>,
         last_fec: FecCounters,
+    }
+
+    struct UplinkRuntime {
+        network: Arc<Mutex<UserspaceNetwork>>,
+        transmitter: WfbTransmitter,
         tx_options: RealtekTxOptions,
-        last_tx_queue_warning_ms: Option<u64>,
+        tx_params: TxRadioParams,
+        last_session_ms: Option<u64>,
+    }
+
+    impl UplinkRuntime {
+        fn new(request: &StartRequest, chip: ChipFamily) -> Result<Self, String> {
+            let keypair = WfbTxKeypair::from_bytes(&request.key_bytes)
+                .map_err(|error| format!("uplink transmit key is invalid: {error}"))?;
+            Ok(Self {
+                network: Arc::new(Mutex::new(
+                    UserspaceNetwork::new(NetworkConfig::default())
+                        .map_err(|error| error.to_string())?,
+                )),
+                transmitter: WfbTransmitter::new(
+                    ChannelId::from_link_port(
+                        request.channel_id >> 8,
+                        openipc_core::RadioPort::TunnelTx,
+                    ),
+                    keypair,
+                    0,
+                    1,
+                    5,
+                )
+                .map_err(|error| error.to_string())?,
+                tx_options: RealtekTxOptions {
+                    current_channel: request.channel,
+                    configured_channel_width: channel_width(request.channel_width_mhz)?,
+                    descriptor: RealtekTxDescriptor::for_chip_family(chip),
+                    ..RealtekTxOptions::default()
+                },
+                tx_params: TxRadioParams::openipc_uplink_default(),
+                last_session_ms: None,
+            })
+        }
+
+        fn network(&self) -> Arc<Mutex<UserspaceNetwork>> {
+            Arc::clone(&self.network)
+        }
+
+        fn network_metrics(&self) -> openipc_uplink::NetworkMetrics {
+            self.network.lock().map_or_else(
+                |_| openipc_uplink::NetworkMetrics::default(),
+                |network| network.metrics(),
+            )
+        }
+
+        fn write_downlink(&mut self, payload: &[u8]) -> Result<(), String> {
+            self.network
+                .lock()
+                .map_err(|_| "userspace network state poisoned".to_owned())?
+                .ingest_tunnel_payload(payload)
+                .map_err(|error| error.to_string())
+        }
+
+        fn tick(
+            &mut self,
+            now: u64,
+            tx_queue: &mut WebTxQueue,
+            adaptive: Option<Vec<u8>>,
+        ) -> Result<(), String> {
+            let mut payloads = Vec::new();
+            {
+                let mut network = self
+                    .network
+                    .lock()
+                    .map_err(|_| "userspace network state poisoned".to_owned())?;
+                network.poll(now);
+                payloads.extend(network.drain_outbound());
+            }
+            if let Some(payload) = adaptive {
+                payloads.push(payload);
+            }
+            if payloads.is_empty() {
+                return Ok(());
+            }
+            if self
+                .last_session_ms
+                .is_none_or(|last| now.saturating_sub(last) >= 1_000)
+            {
+                if !tx_queue.enqueue(
+                    self.transmitter.session_radio_packet(self.tx_params),
+                    self.tx_options,
+                )? {
+                    return Err("WebUSB TX queue full before uplink session packet".to_owned());
+                }
+                self.last_session_ms = Some(now);
+            }
+            for payload in payloads {
+                for frame in self
+                    .transmitter
+                    .radio_packets_for_payload(&payload, self.tx_params)
+                    .map_err(|error| error.to_string())?
+                {
+                    if !tx_queue.enqueue(frame, self.tx_options)? {
+                        return Err("WebUSB TX queue full; dropped uplink payload".to_owned());
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    type SharedVtxController = Rc<futures_util::lock::Mutex<Option<VtxController>>>;
+
+    fn service_vtx_commands(
+        commands: &Rc<RefCell<VecDeque<crate::runtime::VtxControlRequest>>>,
+        controller: &SharedVtxController,
+        network: &Arc<Mutex<UserspaceNetwork>>,
+        credentials: &openipc_uplink::SshCredentials,
+        events: &Rc<RefCell<VecDeque<RuntimeEvent>>>,
+        context: &eframe::egui::Context,
+    ) {
+        let pending = commands.borrow_mut().drain(..).collect::<Vec<_>>();
+        for request in pending {
+            let controller = Rc::clone(controller);
+            let network = Arc::clone(network);
+            let credentials = credentials.clone();
+            let events = Rc::clone(events);
+            let context = context.clone();
+            spawn_local(async move {
+                let mut controller = controller.lock().await;
+                crate::runtime::uplink_control::process_request(
+                    &mut controller,
+                    &network,
+                    &credentials,
+                    request,
+                    |event| super::emit(&events, &context, RuntimeEvent::VtxControl(event)),
+                )
+                .await;
+            });
+        }
     }
 
     struct WebTxQueue {
@@ -863,9 +1014,6 @@ mod worker {
     impl LinkRuntime {
         fn record_rx(&mut self, now: u64, rssi: [u8; 4], snr: [i8; 4]) {
             self.quality.record_rx_paths(now, rssi, snr);
-            if let Some(sender) = self.sender.as_mut() {
-                sender.record_rx_paths(now, rssi, snr);
-            }
         }
 
         fn record_fec(&mut self, now: u64, counters: FecCounters) {
@@ -883,9 +1031,18 @@ mod worker {
             let recovered = recovered.min(u64::from(u32::MAX)) as u32;
             let lost = lost.min(u64::from(u32::MAX)) as u32;
             self.quality.record_fec(now, total, recovered, lost);
-            if let Some(sender) = self.sender.as_mut() {
-                sender.record_fec(now, total, recovered, lost);
+        }
+
+        fn feedback_due(&mut self, now: u64) -> Option<Vec<u8>> {
+            if !self.adaptive_enabled
+                || self
+                    .last_feedback_ms
+                    .is_some_and(|last| now.saturating_sub(last) < 100)
+            {
+                return None;
             }
+            self.last_feedback_ms = Some(now);
+            Some(self.quality.feedback_ip_packet(now))
         }
     }
 
@@ -898,6 +1055,7 @@ mod worker {
         let cancel = &handles.cancel;
         let audio_volume = &handles.audio_volume;
         let recording_control = &handles.recording;
+        let vtx_commands = &handles.vtx_commands;
         let events = &handles.events;
         let context = &handles.context;
         let recording_audio_config = route_processor.recording_audio_config();
@@ -1081,7 +1239,11 @@ mod worker {
             );
         }
         let mut link = build_link(&request, chip, receiver.video_fec_counters(), &device).await?;
-        let mut tx_queue = if link.sender.is_some() {
+        let mut uplink = (request.vtx_control_enabled || request.adaptive_link)
+            .then(|| UplinkRuntime::new(&request, chip))
+            .transpose()?;
+        let vtx_controller = Rc::new(futures_util::lock::Mutex::new(None));
+        let mut tx_queue = if uplink.is_some() {
             Some(WebTxQueue::new(&device).await?)
         } else {
             None
@@ -1138,7 +1300,26 @@ mod worker {
                     events,
                     context,
                 );
-                tick_adaptive(&mut link, tx_queue.as_mut(), now_ms(), events, context);
+                let now = now_ms();
+                if request.vtx_control_enabled {
+                    service_vtx_commands(
+                        vtx_commands,
+                        &vtx_controller,
+                        &uplink
+                            .as_ref()
+                            .expect("VTX commands require an uplink runtime")
+                            .network(),
+                        &request.vtx_credentials,
+                        events,
+                        context,
+                    );
+                }
+                let adaptive = link.feedback_due(now);
+                if let (Some(uplink), Some(tx_queue)) = (uplink.as_mut(), tx_queue.as_mut()) {
+                    if let Err(error) = uplink.tick(now, tx_queue, adaptive) {
+                        log(events, context, LogLevel::Warn, "uplink", error);
+                    }
+                }
                 if let Some(tx_queue) = tx_queue.as_mut() {
                     if let Some(error) = tx_queue.service().await {
                         log(events, context, LogLevel::Warn, "adaptive", error);
@@ -1243,45 +1424,38 @@ mod worker {
             let parse_latency_ms = parse_start.elapsed().as_secs_f64() * 1_000.0;
             let now = now_ms();
             let source_index = usize::from(radio.source_id);
-            for packet in &packets {
-                if !packet.attrib.crc_err
-                    && !packet.attrib.icv_err
-                    && packet.attrib.pkt_rpt_type == RxPacketType::NormalRx
-                    && receiver.accepts_video_frame(packet.data)
+            let source = DiversitySourceId::new(radio.source_id);
+            let selected_packets = packets.into_iter().filter_map(|packet| {
+                if packet.attrib.crc_err
+                    || packet.attrib.icv_err
+                    || packet.attrib.pkt_rpt_type != RxPacketType::NormalRx
                 {
+                    return Some((packet, None));
+                }
+                let frame = openipc_core::WifiFrame::parse(packet.data, FrameLayout::WithFcs).ok();
+                let is_video = frame.is_some_and(|frame| {
+                    frame.matches_channel_id(ChannelId::new(request.channel_id))
+                });
+                if is_video {
                     source_quality[source_index].record_rx_paths(
                         now,
                         packet.attrib.rssi,
                         packet.attrib.snr,
                     );
                 }
-            }
-            let source = DiversitySourceId::new(radio.source_id);
-            let selected_packets = packets.into_iter().filter(|packet| {
-                if packet.attrib.crc_err
-                    || packet.attrib.icv_err
-                    || packet.attrib.pkt_rpt_type != RxPacketType::NormalRx
-                {
-                    return true;
-                }
-                let decision = if diversity_enabled {
-                    diversity.observe_frame(source, packet.data, FrameLayout::WithFcs)
-                } else {
-                    DiversityDecision::Passthrough
+                let decision = match (diversity_enabled, frame) {
+                    (true, Some(frame)) => diversity.observe_wifi_frame(source, frame),
+                    _ => DiversityDecision::Passthrough,
                 };
-                let is_video = openipc_core::WifiFrame::parse(packet.data, FrameLayout::WithFcs)
-                    .is_ok_and(|frame| {
-                        frame.matches_channel_id(ChannelId::new(request.channel_id))
-                    });
                 if decision != DiversityDecision::Duplicate && is_video {
                     link.record_rx(now, packet.attrib.rssi, packet.attrib.snr);
                 }
-                decision.should_forward()
+                decision.should_forward().then_some((packet, frame))
             });
             let pipeline_start = Instant::now();
             options.depacketize_video =
                 recorder.is_some() || recording_armed || recording_control.borrow().start;
-            let mut batch = receiver.push_rx_packets(selected_packets, &options);
+            let mut batch = receiver.push_parsed_rx_packets(selected_packets, &options);
             let pipeline_latency_ms = pipeline_start.elapsed().as_secs_f64() * 1_000.0;
 
             // Re-arm WebUSB as soon as parsing and WFB recovery no longer
@@ -1310,6 +1484,16 @@ mod worker {
             batch.frames.clear();
             let decode_submit_latency_ms = decode_submit_start.elapsed().as_secs_f64() * 1_000.0;
             let video_submit_path_ms = batch_start.elapsed().as_secs_f64() * 1_000.0;
+
+            if let Some(uplink) = uplink.as_mut() {
+                for payload in &batch.raw_payloads {
+                    if payload.route_id == crate::runtime::route_runtime::VPN_ROUTE_ID {
+                        if let Err(error) = uplink.write_downlink(&payload.data) {
+                            log(events, context, LogLevel::Warn, "uplink", error);
+                        }
+                    }
+                }
+            }
 
             route_processor.set_audio_volume(audio_volume.get());
             let route_start = Instant::now();
@@ -1376,6 +1560,10 @@ mod worker {
                 counters: batch.counters,
                 rtp: worker_snapshot.rtp,
                 reorder: worker_snapshot.reorder,
+                uplink: uplink.as_ref().map_or_else(
+                    openipc_uplink::NetworkMetrics::default,
+                    UplinkRuntime::network_metrics,
+                ),
                 routes: route_updates,
                 telemetry,
                 audio: route_processor.audio_stats(),
@@ -1400,7 +1588,25 @@ mod worker {
                     format!("decoder errors: {last_decode_errors}"),
                 );
             }
-            tick_adaptive(&mut link, tx_queue.as_mut(), now, events, context);
+            if request.vtx_control_enabled {
+                service_vtx_commands(
+                    vtx_commands,
+                    &vtx_controller,
+                    &uplink
+                        .as_ref()
+                        .expect("VTX commands require an uplink runtime")
+                        .network(),
+                    &request.vtx_credentials,
+                    events,
+                    context,
+                );
+            }
+            let adaptive = link.feedback_due(now);
+            if let (Some(uplink), Some(tx_queue)) = (uplink.as_mut(), tx_queue.as_mut()) {
+                if let Err(error) = uplink.tick(now, tx_queue, adaptive) {
+                    log(events, context, LogLevel::Warn, "uplink", error);
+                }
+            }
             if let Some(tx_queue) = tx_queue.as_mut() {
                 if let Some(error) = tx_queue.service().await {
                     log(events, context, LogLevel::Warn, "adaptive", error);
@@ -1509,6 +1715,11 @@ mod worker {
         let context = &handles.context;
         let recording_audio_config = route_processor.recording_audio_config();
         use crate::runtime::{codec_mock::MockAvStream, route_runtime::configure_mock_receiver};
+        let mock_codec = request.codec_preference.mock_codec();
+        let mock_codec_label = match mock_codec {
+            openipc_core::Codec::H264 => "H.264",
+            openipc_core::Codec::H265 => "H.265",
+        };
 
         let decoder = WebDecodeWorker::new(
             request.rtp_reorder,
@@ -1534,7 +1745,7 @@ mod worker {
             events,
             context,
             RuntimeEvent::Connected {
-                receivers: vec![crate::runtime::ReceiverInfo::codec_mock()],
+                receivers: vec![crate::runtime::ReceiverInfo::codec_mock(mock_codec)],
                 decoder: worker_decoder_environment(),
             },
         );
@@ -1544,7 +1755,7 @@ mod worker {
             context,
             LogLevel::Info,
             "mock",
-            "Pre-recorded 1080p H.264 + Opus RTP/WebCodecs mock started",
+            format!("Pre-recorded 1080p {mock_codec_label} + Opus RTP/WebCodecs mock started"),
         );
 
         let channel = ChannelId::default_video();
@@ -1557,7 +1768,7 @@ mod worker {
             options.raw_payload_routes.push(VIDEO_ROUTE);
         }
         let runtime = receiver.video_runtime();
-        let mut source = MockAvStream::new()?;
+        let mut source = MockAvStream::new(mock_codec)?;
         let mock_started = Instant::now();
         let mut payload_sequence = 1u64;
         let mut recorder: Option<BrowserRecorder> = None;
@@ -1869,85 +2080,26 @@ mod worker {
 
     async fn build_link(
         request: &StartRequest,
-        chip: ChipFamily,
+        _chip: ChipFamily,
         fec: FecCounters,
         device: &RealtekDevice,
     ) -> Result<LinkRuntime, String> {
-        let sender = if request.adaptive_link {
+        if request.adaptive_link {
             device
                 .set_tx_power_override_async(request.channel, request.tx_power)
                 .await
                 .map_err(|error| error.to_string())?;
-            let keypair = WfbTxKeypair::from_bytes(&request.key_bytes)
-                .map_err(|error| format!("adaptive-link key is invalid: {error}"))?;
-            Some(
-                AdaptiveLinkSender::new(request.channel_id >> 8, keypair, 0, 1, 5)
-                    .map_err(|error| error.to_string())?,
-            )
-        } else {
-            None
-        };
+        }
         Ok(LinkRuntime {
             quality: AdaptiveLink::new(),
-            sender,
+            adaptive_enabled: request.adaptive_link,
+            last_feedback_ms: None,
             last_fec: fec,
-            tx_options: RealtekTxOptions {
-                current_channel: request.channel,
-                configured_channel_width: channel_width(request.channel_width_mhz)?,
-                descriptor: RealtekTxDescriptor::for_chip_family(chip),
-                ..RealtekTxOptions::default()
-            },
-            last_tx_queue_warning_ms: None,
         })
     }
 
-    fn tick_adaptive(
-        runtime: &mut LinkRuntime,
-        tx_queue: Option<&mut WebTxQueue>,
-        now: u64,
-        events: &Rc<RefCell<VecDeque<RuntimeEvent>>>,
-        context: &eframe::egui::Context,
-    ) {
-        let (Some(sender), Some(tx_queue)) = (runtime.sender.as_mut(), tx_queue) else {
-            return;
-        };
-        match sender.tick(now) {
-            Ok(frames) => {
-                let mut dropped = false;
-                for frame in frames {
-                    match tx_queue.enqueue(frame, runtime.tx_options) {
-                        Ok(true) => {}
-                        Ok(false) => dropped = true,
-                        Err(error) => log(events, context, LogLevel::Warn, "adaptive", error),
-                    }
-                }
-                if dropped
-                    && runtime
-                        .last_tx_queue_warning_ms
-                        .is_none_or(|last| now.saturating_sub(last) >= 1_000)
-                {
-                    runtime.last_tx_queue_warning_ms = Some(now);
-                    log(
-                        events,
-                        context,
-                        LogLevel::Warn,
-                        "adaptive",
-                        "WebUSB TX queue full; dropped adaptive-link feedback",
-                    );
-                }
-            }
-            Err(error) => log(
-                events,
-                context,
-                LogLevel::Warn,
-                "adaptive",
-                error.to_string(),
-            ),
-        }
-    }
-
     async fn next_with_timeout(endpoint: &mut nusb::Endpoint<Bulk, In>) -> Option<Completion> {
-        next_with_timeout_ms(endpoint, 100).await
+        next_with_timeout_ms(endpoint, 10).await
     }
 
     async fn next_with_timeout_ms(

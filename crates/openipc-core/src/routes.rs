@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use crate::channel::ChannelId;
 use crate::ieee80211::{FrameLayout, WifiFrame};
@@ -63,7 +63,7 @@ pub enum PayloadRouteEvent {
         /// Runtime whose WFB session changed.
         runtime: PayloadRuntimeKey,
         /// Route ids attached to the runtime.
-        route_ids: Vec<PayloadRouteId>,
+        route_ids: Arc<[PayloadRouteId]>,
         /// Session epoch accepted from the transmitter.
         epoch: u64,
         /// Number of primary fragments in each FEC block.
@@ -76,7 +76,7 @@ pub enum PayloadRouteEvent {
         /// Runtime that recovered the payload.
         runtime: PayloadRuntimeKey,
         /// Route ids that should receive the payload.
-        route_ids: Vec<PayloadRouteId>,
+        route_ids: Arc<[PayloadRouteId]>,
         /// Recovered payload bytes and packet metadata.
         payload: RecoveredPayload,
     },
@@ -141,13 +141,18 @@ impl PayloadChannelPipeline {
         }
     }
 
-    fn push_matched_payload(
+    fn push_matched_payload_into(
         &mut self,
         payload: &[u8],
-    ) -> Result<Vec<PayloadPipelineEvent>, WfbError> {
+        events: &mut Vec<PayloadPipelineEvent>,
+    ) -> Result<(), WfbError> {
         match self {
-            Self::Real(pipeline) => pipeline.push_matched_payload(payload),
-            Self::Mock(_) => Ok(vec![PayloadPipelineEvent::IgnoredFrame]),
+            Self::Real(pipeline) => pipeline.push_matched_payload_into(payload, events),
+            Self::Mock(_) => {
+                events.clear();
+                events.push(PayloadPipelineEvent::IgnoredFrame);
+                Ok(())
+            }
         }
     }
 
@@ -191,21 +196,24 @@ impl PayloadChannelPipeline {
 #[derive(Debug, Clone)]
 pub struct PayloadChannelRuntime {
     pipeline: PayloadChannelPipeline,
-    route_ids: Vec<PayloadRouteId>,
+    route_ids: Arc<[PayloadRouteId]>,
+    pipeline_events: Vec<PayloadPipelineEvent>,
 }
 
 impl PayloadChannelRuntime {
     fn real(pipeline: PayloadPipeline, route_id: PayloadRouteId) -> Self {
         Self {
             pipeline: PayloadChannelPipeline::Real(Box::new(pipeline)),
-            route_ids: vec![route_id],
+            route_ids: Arc::from([route_id]),
+            pipeline_events: Vec::with_capacity(1),
         }
     }
 
     fn mock(channel_id: ChannelId, route_id: PayloadRouteId) -> Self {
         Self {
             pipeline: PayloadChannelPipeline::Mock(MockPayloadPipeline::new(channel_id)),
-            route_ids: vec![route_id],
+            route_ids: Arc::from([route_id]),
+            pipeline_events: Vec::with_capacity(1),
         }
     }
 
@@ -216,11 +224,16 @@ impl PayloadChannelRuntime {
 
     /// Return the route ids attached to this runtime.
     pub fn route_ids(&self) -> &[PayloadRouteId] {
-        self.route_ids.as_slice()
+        &self.route_ids
     }
 
     fn push_route_id(&mut self, route_id: PayloadRouteId) {
-        push_route_id(&mut self.route_ids, route_id);
+        if self.route_ids.contains(&route_id) {
+            return;
+        }
+        let mut route_ids = self.route_ids.to_vec();
+        route_ids.push(route_id);
+        self.route_ids = route_ids.into();
     }
 }
 
@@ -343,6 +356,19 @@ impl PayloadRouteManager {
             .map(PayloadChannelRuntime::route_ids)
     }
 
+    /// Return shared route membership and whether this is a direct runtime.
+    pub(crate) fn route_membership(
+        &self,
+        key: PayloadRuntimeKey,
+    ) -> Option<(Arc<[PayloadRouteId]>, bool)> {
+        self.runtimes.get(&key).map(|runtime| {
+            (
+                Arc::clone(&runtime.route_ids),
+                matches!(runtime.pipeline, PayloadChannelPipeline::Mock(_)),
+            )
+        })
+    }
+
     /// Return cumulative FEC counters for a runtime key.
     pub fn fec_counters(&self, key: PayloadRuntimeKey) -> Option<FecCounters> {
         self.runtimes
@@ -366,12 +392,32 @@ impl PayloadRouteManager {
         let Ok(frame_view) = WifiFrame::parse(frame, self.frame_layout) else {
             return Ok(vec![PayloadRouteEvent::IgnoredFrame]);
         };
+        self.push_wifi_frame(frame_view)
+    }
+
+    /// Route an already-validated borrowed WiFi frame.
+    pub fn push_wifi_frame(
+        &mut self,
+        frame_view: WifiFrame<'_>,
+    ) -> Result<Vec<PayloadRouteEvent>, PayloadRouteError> {
+        let mut route_events = Vec::new();
+        self.push_wifi_frame_into(frame_view, &mut route_events)?;
+        Ok(route_events)
+    }
+
+    /// Route a validated WiFi frame into a reusable event buffer.
+    pub fn push_wifi_frame_into(
+        &mut self,
+        frame_view: WifiFrame<'_>,
+        route_events: &mut Vec<PayloadRouteEvent>,
+    ) -> Result<(), PayloadRouteError> {
+        route_events.clear();
         let Some(channel_id) = frame_view.channel_id() else {
-            return Ok(vec![PayloadRouteEvent::IgnoredFrame]);
+            route_events.push(PayloadRouteEvent::IgnoredFrame);
+            return Ok(());
         };
 
         let mut matched = false;
-        let mut route_events = Vec::new();
         let mut first_error = None;
 
         for (key, runtime) in self
@@ -380,9 +426,17 @@ impl PayloadRouteManager {
             .filter(|(key, _)| key.channel_id() == channel_id)
         {
             matched = true;
-            match runtime.pipeline.push_matched_payload(frame_view.payload()) {
-                Ok(events) => {
-                    route_events.extend(map_pipeline_events(*key, runtime.route_ids(), events));
+            match runtime
+                .pipeline
+                .push_matched_payload_into(frame_view.payload(), &mut runtime.pipeline_events)
+            {
+                Ok(()) => {
+                    map_pipeline_events_into(
+                        *key,
+                        Arc::clone(&runtime.route_ids),
+                        runtime.pipeline_events.drain(..),
+                        route_events,
+                    );
                 }
                 Err(err) => {
                     if first_error.is_none() {
@@ -393,14 +447,15 @@ impl PayloadRouteManager {
         }
 
         if !matched {
-            return Ok(vec![PayloadRouteEvent::IgnoredFrame]);
+            route_events.push(PayloadRouteEvent::IgnoredFrame);
+            return Ok(());
         }
         if route_events.is_empty() {
             if let Some(err) = first_error {
                 return Err(err.into());
             }
         }
-        Ok(route_events)
+        Ok(())
     }
 
     /// Route one 802.11 frame with a caller-supplied decrypted fragment.
@@ -465,39 +520,41 @@ impl PayloadRouteManager {
     }
 }
 
-fn push_route_id(route_ids: &mut Vec<PayloadRouteId>, route_id: PayloadRouteId) {
-    if !route_ids.contains(&route_id) {
-        route_ids.push(route_id);
-    }
-}
-
 fn map_pipeline_events(
     runtime: PayloadRuntimeKey,
     route_ids: &[PayloadRouteId],
     events: Vec<PayloadPipelineEvent>,
 ) -> Vec<PayloadRouteEvent> {
-    events
-        .into_iter()
-        .map(|event| match event {
-            PayloadPipelineEvent::IgnoredFrame => PayloadRouteEvent::IgnoredFrame,
-            PayloadPipelineEvent::SessionEstablished {
-                epoch,
-                fec_k,
-                fec_n,
-            } => PayloadRouteEvent::SessionEstablished {
-                runtime,
-                route_ids: route_ids.to_vec(),
-                epoch,
-                fec_k,
-                fec_n,
-            },
-            PayloadPipelineEvent::Payload(payload) => PayloadRouteEvent::Payload {
-                runtime,
-                route_ids: route_ids.to_vec(),
-                payload,
-            },
-        })
-        .collect()
+    let mut mapped = Vec::with_capacity(events.len());
+    map_pipeline_events_into(runtime, Arc::from(route_ids), events, &mut mapped);
+    mapped
+}
+
+fn map_pipeline_events_into(
+    runtime: PayloadRuntimeKey,
+    route_ids: Arc<[PayloadRouteId]>,
+    events: impl IntoIterator<Item = PayloadPipelineEvent>,
+    mapped: &mut Vec<PayloadRouteEvent>,
+) {
+    mapped.extend(events.into_iter().map(|event| match event {
+        PayloadPipelineEvent::IgnoredFrame => PayloadRouteEvent::IgnoredFrame,
+        PayloadPipelineEvent::SessionEstablished {
+            epoch,
+            fec_k,
+            fec_n,
+        } => PayloadRouteEvent::SessionEstablished {
+            runtime,
+            route_ids: Arc::clone(&route_ids),
+            epoch,
+            fec_k,
+            fec_n,
+        },
+        PayloadPipelineEvent::Payload(payload) => PayloadRouteEvent::Payload {
+            runtime,
+            route_ids: Arc::clone(&route_ids),
+            payload,
+        },
+    }));
 }
 
 #[cfg(test)]
@@ -533,7 +590,7 @@ mod tests {
             events,
             vec![PayloadRouteEvent::Payload {
                 runtime,
-                route_ids: vec![PayloadRouteId::new(1), PayloadRouteId::new(2)],
+                route_ids: vec![PayloadRouteId::new(1), PayloadRouteId::new(2)].into(),
                 payload: RecoveredPayload {
                     channel_id: channel,
                     packet_seq: 0,

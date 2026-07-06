@@ -4,6 +4,15 @@ use eframe::{
 };
 use openipc_video::{DecodedFrame, DecodedSurface as _, PixelFormat};
 
+#[cfg(target_os = "macos")]
+use objc2_core_foundation::CFRetained;
+#[cfg(target_os = "macos")]
+use objc2_core_video::{
+    kCVReturnSuccess, CVMetalTexture, CVMetalTextureCache, CVMetalTextureGetTexture,
+};
+#[cfg(target_os = "macos")]
+use objc2_metal::{MTLPixelFormat, MTLTextureType};
+
 const SHADER: &str = r#"
 @group(0) @binding(0) var video_sampler: sampler;
 @group(0) @binding(1) var y_texture: texture_2d<f32>;
@@ -46,6 +55,8 @@ fn fragment(input: VertexOutput) -> @location(0) vec4<f32> {
 
 pub(crate) struct NativeNv12Renderer {
     render_state: egui_wgpu::RenderState,
+    #[cfg(target_os = "macos")]
+    metal_cache: MacMetalTextureCache,
 }
 
 struct Nv12Resources {
@@ -60,6 +71,25 @@ struct GpuFrame {
     uv_texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
     dimensions: [u32; 2],
+    #[cfg(target_os = "macos")]
+    _core_video_textures: Option<RetainedMetalPlanes>,
+}
+
+#[cfg(target_os = "macos")]
+struct RetainedMetalPlanes {
+    _planes: [CFRetained<CVMetalTexture>; 2],
+}
+
+// CVMetalTexture is a retained CoreVideo/Metal bridge object designed to keep
+// IOSurface planes alive across GPU submission. It is never mutated here.
+#[cfg(target_os = "macos")]
+unsafe impl Send for RetainedMetalPlanes {}
+#[cfg(target_os = "macos")]
+unsafe impl Sync for RetainedMetalPlanes {}
+
+#[cfg(target_os = "macos")]
+struct MacMetalTextureCache {
+    cache: CFRetained<CVMetalTextureCache>,
 }
 
 struct Nv12PaintCallback;
@@ -76,7 +106,13 @@ impl NativeNv12Renderer {
             .write()
             .callback_resources
             .insert(resources);
-        Ok(Self { render_state })
+        #[cfg(target_os = "macos")]
+        let metal_cache = MacMetalTextureCache::new(&render_state.device)?;
+        Ok(Self {
+            render_state,
+            #[cfg(target_os = "macos")]
+            metal_cache,
+        })
     }
 
     #[cfg(target_os = "macos")]
@@ -91,6 +127,19 @@ impl NativeNv12Renderer {
             ));
         }
         let dimensions = frame.dimensions();
+        if frame.surface.is_io_surface_backed() {
+            let mut renderer = self.render_state.renderer.write();
+            let resources = renderer
+                .callback_resources
+                .get_mut::<Nv12Resources>()
+                .ok_or_else(|| "NV12 GPU resources are unavailable".to_owned())?;
+            return resources.import_macos(
+                &self.render_state.device,
+                &self.metal_cache,
+                frame.surface.pixel_buffer(),
+                [dimensions.width, dimensions.height],
+            );
+        }
         frame
             .surface
             .with_mapped_planes(|planes| {
@@ -339,8 +388,177 @@ impl Nv12Resources {
             uv_texture,
             bind_group,
             dimensions,
+            #[cfg(target_os = "macos")]
+            _core_video_textures: None,
         });
         Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn import_macos(
+        &mut self,
+        device: &wgpu::Device,
+        cache: &MacMetalTextureCache,
+        pixel_buffer: &objc2_core_video::CVPixelBuffer,
+        dimensions: [u32; 2],
+    ) -> Result<(), String> {
+        let [width, height] = dimensions;
+        let (y_texture, y_cv) = cache.import_plane(
+            device,
+            pixel_buffer,
+            0,
+            width,
+            height,
+            MTLPixelFormat::R8Unorm,
+            wgpu::TextureFormat::R8Unorm,
+        )?;
+        let (uv_texture, uv_cv) = cache.import_plane(
+            device,
+            pixel_buffer,
+            1,
+            width.div_ceil(2),
+            height.div_ceil(2),
+            MTLPixelFormat::RG8Unorm,
+            wgpu::TextureFormat::Rg8Unorm,
+        )?;
+        let y_view = y_texture.create_view(&Default::default());
+        let uv_view = uv_texture.create_view(&Default::default());
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("nebulus-nv12-metal-bind-group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&y_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&uv_view),
+                },
+            ],
+        });
+        self.frame = Some(GpuFrame {
+            y_texture,
+            uv_texture,
+            bind_group,
+            dimensions,
+            _core_video_textures: Some(RetainedMetalPlanes {
+                _planes: [y_cv, uv_cv],
+            }),
+        });
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl MacMetalTextureCache {
+    fn new(device: &wgpu::Device) -> Result<Self, String> {
+        use std::{ptr, ptr::NonNull};
+
+        // SAFETY: The cache borrows the raw Metal device only during creation
+        // and retains the device internally for its own lifetime.
+        let hal_device = unsafe { device.as_hal::<wgpu::hal::api::Metal>() }
+            .ok_or_else(|| "wgpu is not using the Metal backend".to_owned())?;
+        let mut cache = ptr::null_mut();
+        // SAFETY: `cache` is a writable out pointer and the Metal device comes
+        // from this exact wgpu device.
+        let status = unsafe {
+            CVMetalTextureCache::create(
+                None,
+                None,
+                hal_device.raw_device(),
+                None,
+                NonNull::from(&mut cache),
+            )
+        };
+        if status != kCVReturnSuccess {
+            return Err(format!("CVMetalTextureCacheCreate failed: {status}"));
+        }
+        let cache = NonNull::new(cache)
+            .ok_or_else(|| "CVMetalTextureCacheCreate returned null".to_owned())?;
+        // SAFETY: CoreVideo Create functions return a +1 retained object.
+        Ok(Self {
+            cache: unsafe { CFRetained::from_raw(cache) },
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn import_plane(
+        &self,
+        device: &wgpu::Device,
+        pixel_buffer: &objc2_core_video::CVPixelBuffer,
+        plane: usize,
+        width: u32,
+        height: u32,
+        metal_format: MTLPixelFormat,
+        wgpu_format: wgpu::TextureFormat,
+    ) -> Result<(wgpu::Texture, CFRetained<CVMetalTexture>), String> {
+        use std::{ptr, ptr::NonNull};
+
+        let mut cv_texture = ptr::null_mut();
+        // SAFETY: The cache and pixel buffer are live, dimensions match the
+        // selected NV12 plane, and `cv_texture` is a writable out pointer.
+        let status = unsafe {
+            CVMetalTextureCache::create_texture_from_image(
+                None,
+                &self.cache,
+                pixel_buffer,
+                None,
+                metal_format,
+                width as usize,
+                height as usize,
+                plane,
+                NonNull::from(&mut cv_texture),
+            )
+        };
+        if status != kCVReturnSuccess {
+            return Err(format!(
+                "CVMetalTextureCacheCreateTextureFromImage plane {plane} failed: {status}"
+            ));
+        }
+        let cv_texture = NonNull::new(cv_texture)
+            .ok_or_else(|| format!("CoreVideo returned null for NV12 plane {plane}"))?;
+        // SAFETY: CoreVideo Create functions return a +1 retained object.
+        let cv_texture = unsafe { CFRetained::from_raw(cv_texture) };
+        let raw_texture = CVMetalTextureGetTexture(&cv_texture)
+            .ok_or_else(|| format!("CoreVideo returned no Metal texture for plane {plane}"))?;
+        let extent = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        // SAFETY: The Metal texture was created by a cache using this wgpu
+        // device, is initialized by VideoToolbox, and matches this descriptor.
+        let hal_texture = unsafe {
+            wgpu::hal::metal::Device::texture_from_raw(
+                raw_texture,
+                wgpu_format,
+                MTLTextureType::Type2D,
+                1,
+                1,
+                extent.into(),
+            )
+        };
+        let descriptor = wgpu::TextureDescriptor {
+            label: Some("nebulus-videotoolbox-plane"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu_format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        };
+        // SAFETY: `hal_texture` satisfies the conditions documented above and
+        // remains backed by the retained CVMetalTexture stored with the frame.
+        let texture = unsafe {
+            device.create_texture_from_hal::<wgpu::hal::api::Metal>(hal_texture, &descriptor)
+        };
+        Ok((texture, cv_texture))
     }
 }
 

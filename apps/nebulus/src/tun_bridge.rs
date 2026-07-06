@@ -61,10 +61,11 @@ impl TunBridge {
     }
 
     pub(crate) fn write_downlink(&mut self, payload: &[u8]) -> io::Result<usize> {
-        let Some(packet) = tunnel_packet(payload) else {
-            return Ok(0);
-        };
-        self.device.send(packet)
+        let mut written = 0;
+        for packet in tunnel_packets(payload) {
+            written += self.device.send(packet?)?;
+        }
+        Ok(written)
     }
 
     pub(crate) fn read_uplink(&mut self) -> io::Result<Option<Vec<u8>>> {
@@ -151,10 +152,11 @@ impl TunBridge {
     }
 
     pub(crate) fn write_downlink(&mut self, payload: &[u8]) -> io::Result<usize> {
-        let Some(packet) = tunnel_packet(payload) else {
-            return Ok(0);
-        };
-        self.device.send(packet)
+        let mut written = 0;
+        for packet in tunnel_packets(payload) {
+            written += self.device.send(packet?)?;
+        }
+        Ok(written)
     }
 
     pub(crate) fn read_uplink(&mut self) -> io::Result<Option<Vec<u8>>> {
@@ -262,13 +264,15 @@ impl TunBridge {
     }
 
     pub(crate) fn write_downlink(&mut self, payload: &[u8]) -> io::Result<usize> {
-        let Some(packet) = tunnel_packet(payload) else {
-            return Ok(0);
-        };
-        self.downlink
-            .send(packet.to_vec())
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "VPN worker stopped"))?;
-        Ok(packet.len())
+        let mut written = 0;
+        for packet in tunnel_packets(payload) {
+            let packet = packet?;
+            written += packet.len();
+            self.downlink
+                .send(packet.to_vec())
+                .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "VPN worker stopped"))?;
+        }
+        Ok(written)
     }
 
     pub(crate) fn read_uplink(&mut self) -> io::Result<Option<Vec<u8>>> {
@@ -294,34 +298,36 @@ impl Drop for TunBridge {
     }
 }
 
-fn tunnel_packet(payload: &[u8]) -> Option<&[u8]> {
-    if payload.len() < 3 {
-        return None;
-    }
-    let declared = u16::from_be_bytes([payload[0], payload[1]]) as usize;
-    let body = &payload[2..];
-    Some(if declared == 0 || declared > body.len() {
-        body
-    } else {
-        &body[..declared]
-    })
+fn tunnel_packets(payload: &[u8]) -> impl Iterator<Item = io::Result<&[u8]>> {
+    openipc_uplink::parse_tunnel_packets(payload)
+        .map(|packet| packet.map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error)))
 }
 
 fn length_prefixed(packet: &[u8]) -> Vec<u8> {
-    let length = packet.len().min(usize::from(u16::MAX)) as u16;
-    let mut payload = Vec::with_capacity(2 + packet.len());
-    payload.extend_from_slice(&length.to_be_bytes());
-    payload.extend_from_slice(packet);
-    payload
+    openipc_uplink::frame_ip_packet(packet)
+        .expect("native TUN MTU always fits OpenIPC tunnel framing")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{length_prefixed, tunnel_packet};
+    use super::{length_prefixed, tunnel_packets};
 
     #[test]
     fn tunnel_framing_round_trips() {
         let payload = length_prefixed(&[0x45, 1, 2, 3]);
-        assert_eq!(tunnel_packet(&payload), Some(&[0x45, 1, 2, 3][..]));
+        let packets = tunnel_packets(&payload)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(packets, [&[0x45, 1, 2, 3][..]]);
+    }
+
+    #[test]
+    fn tunnel_framing_preserves_aggregated_packets() {
+        let mut payload = length_prefixed(&[0x45, 1]);
+        payload.extend(length_prefixed(&[0x45, 2]));
+        let packets = tunnel_packets(&payload)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(packets, [&[0x45, 1][..], &[0x45, 2][..]]);
     }
 }

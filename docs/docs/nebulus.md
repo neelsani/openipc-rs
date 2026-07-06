@@ -204,10 +204,12 @@ still available for operators who intentionally need to test an unusual setup.
 **Scan channels** opens an idle survey and cannot run alongside RX. Select a
 2.4 GHz or 5 GHz preset, individual channels, and a dwell time. Nebulus performs
 one monitor-mode initialization, keeps bulk-IN transfers active, and uses the
-driver's retune operation between dwell windows. Each result includes valid
-802.11 packet count, recognized WFB frame count, average RSSI by RF path,
-captured bytes, and the corresponding observed bitrate. **Use** copies a result
-back into the active radio settings.
+driver's fast-retune operation between dwell windows. Same-band hops use the
+generation-specific lean path; band changes automatically use the full path.
+Each result includes valid 802.11 packet count, recognized WFB frame count,
+average RSSI/SNR/EVM by RF path, captured bytes, observed bitrate, measured
+retune time, and whether that hop was fast or full. **Use** copies a result back
+into the active radio settings.
 
 The scanner is a receiver-side observation, not a spectrum analyzer. Packet
 counts only cover traffic the adapter can demodulate. A strong WFB count is a
@@ -226,6 +228,14 @@ device is still connected.
 The Linux decoder requires VA-API development packages. See
 [Platform Video Decoding](./native-video.md#linux-va-api) for the package list
 and render-node override.
+
+## VTX Configuration
+
+The **Setup → VTX** page controls current OpenIPC WFB firmware over the radio
+tunnel. It uses a Rust userspace TCP stack and SSH client on desktop, Android,
+and the browser; the native VPN interface is optional. See
+[VTX Control](./vtx-control.md) for addresses, command mappings, host-key policy,
+and library integration.
 
 ## Browser
 
@@ -263,14 +273,16 @@ Serve the generated `dist/` directory over HTTPS. Do not open `index.html`
 directly from disk; WebUSB is unavailable from a `file:` origin.
 
 Run `trunk serve` without `--release` to expose the development-only
-**Codec mock** button. The same button is available from a debug native build
-started with `cargo run -p nebulus --bin nebulus`. It loops an embedded,
-pre-recorded 1920x1080 H.264 stream with 48 kHz Opus audio. Rust packetizes and
-interleaves both tracks as RTP. Video runs through the normal depacketizer and
-production decode/presentation path; audio runs through the configured
-mixed-audio route, Opus decoder, volume control, and output queue. WASM uses
-WebCodecs only for video decoding; the mock does not use an encoder. It requires
-no USB adapter and is omitted from release builds.
+**H.264 mock** or **H.265 mock** button. The codec follows Setup → Media → Codec
+preference; `Auto` uses H.265 because that is the normal OpenIPC default. The
+same button is available from a debug native build started with
+`cargo run -p nebulus --bin nebulus`. It loops embedded, pre-recorded 1920x1080
+video with 48 kHz Opus audio. Rust packetizes and interleaves both tracks as
+RTP. Video runs through the normal depacketizer and production
+decode/presentation path; audio runs through the configured mixed-audio route,
+Opus decoder, volume control, and output queue. WASM uses WebCodecs only for
+video decoding; the mock does not use an encoder. It requires no USB adapter
+and is omitted from release builds.
 
 ## Android
 
@@ -336,18 +348,17 @@ Nebulus favors current video over complete playback:
 
 On macOS, Linux, and Windows, the receiver hands retained native decoder
 surfaces to the UI through a latest-only event slot. Stale surfaces are
-dropped before presentation work begins. The UI uploads the newest frame's Y
-and UV planes into persistent `R8Unorm` and `Rg8Unorm` wgpu textures and
-converts them in a GPU fragment shader. This reduces a 1080p upload from about
-8.3 MB of RGBA to 3.1 MB of NV12 and removes per-pixel CPU color conversion.
+dropped before presentation work begins. The UI converts NV12 to RGB in a GPU
+fragment shader, removing per-pixel CPU color conversion.
 
-VideoToolbox exposes mapped NV12 planes on macOS. Linux maps the selected
-VA-API DMA surface only after coalescing. Windows retains the Media Foundation
-D3D11 texture through coalescing, reuses one resolution-matched staging
-texture for readback, and then uploads NV12. The CPU RGBA presenter remains a
-failure fallback. Stable wgpu does not currently expose portable IOSurface,
-DMA-BUF, or D3D11 texture import; those imports are the remaining route to a
-fully zero-copy presentation path.
+VideoToolbox's IOSurface-backed NV12 planes are imported directly into
+Metal/wgpu on macOS, so the normal presentation path does not map or upload
+decoded pixels. Linux maps only the selected VA-API DMA surface. Windows keeps
+the Media Foundation D3D11 texture through coalescing, reuses one
+resolution-matched staging texture for readback, and then uploads NV12. The
+CPU RGBA presenter remains a failure fallback. Direct DMA-BUF and D3D11 texture
+imports are the remaining platform-specific zero-copy work on Linux and
+Windows.
 
 Android uses `AndroidSurfaceDecoder` and gives MediaCodec a SurfaceTexture
 producer window. MediaCodec renders decoded output into the external OES

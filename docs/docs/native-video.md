@@ -8,13 +8,13 @@ sidebar_position: 7
 accepts complete Annex-B H.264/H.265 access units and returns a retained output
 from the decoder provided by the current platform.
 
-| Target  | Rust type        | Decoder                       | Retained output                             |
-| ------- | ---------------- | ----------------------------- | ------------------------------------------- |
-| macOS   | `MacOsDecoder`   | VideoToolbox                  | IOSurface-backed `CVPixelBuffer`            |
-| Linux   | `LinuxDecoder`   | `cros-codecs` + VA-API        | GBM/DMA-backed frame                        |
-| Windows | `WindowsDecoder` | Media Foundation + DXVA/D3D11 | `ID3D11Texture2D` subresource               |
-| Android | `AndroidDecoder` / `AndroidSurfaceDecoder` | NDK MediaCodec | readable `AImage`, or direct output surface |
-| Web     | `WebDecoder`     | WebCodecs                     | browser `VideoFrame`                        |
+| Target  | Rust type                                  | Decoder                       | Retained output                             |
+| ------- | ------------------------------------------ | ----------------------------- | ------------------------------------------- |
+| macOS   | `MacOsDecoder`                             | VideoToolbox                  | IOSurface-backed `CVPixelBuffer`            |
+| Linux   | `LinuxDecoder`                             | `cros-codecs` + VA-API        | GBM/DMA-backed frame                        |
+| Windows | `WindowsDecoder`                           | Media Foundation + DXVA/D3D11 | `ID3D11Texture2D` subresource               |
+| Android | `AndroidDecoder` / `AndroidSurfaceDecoder` | NDK MediaCodec                | readable `AImage`, or direct output surface |
+| Web     | `WebDecoder`                               | WebCodecs                     | browser `VideoFrame`                        |
 
 `PlatformDecoder` is an alias for the matching row. Target dependencies are
 selected with Cargo `cfg` sections, so a macOS app does not build VA-API,

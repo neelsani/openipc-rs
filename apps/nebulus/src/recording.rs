@@ -187,7 +187,16 @@ mod tests {
 
     #[test]
     fn muxes_h264_and_opus_tracks() {
-        let mut source = crate::runtime::codec_mock::MockAvStream::new().unwrap();
+        assert_mock_av_mux(openipc_core::Codec::H264, b"avc1");
+    }
+
+    #[test]
+    fn muxes_h265_and_opus_tracks() {
+        assert_mock_av_mux(openipc_core::Codec::H265, b"hvc1");
+    }
+
+    fn assert_mock_av_mux(codec: openipc_core::Codec, video_sample_entry: &[u8; 4]) {
+        let mut source = crate::runtime::codec_mock::MockAvStream::new(codec).unwrap();
         let mut depacketizer = RtpDepacketizer::new();
         let mut frames = Vec::new();
         let mut audio = Vec::new();
@@ -221,7 +230,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(&output[4..8], b"ftyp");
-        assert!(output.windows(4).any(|bytes| bytes == b"avc1"));
+        assert!(output.windows(4).any(|bytes| bytes == video_sample_entry));
         assert!(output.windows(4).any(|bytes| bytes == b"Opus"));
         assert!(output.windows(4).any(|bytes| bytes == b"dOps"));
         assert!(output.windows(4).any(|bytes| bytes == b"mdat"));

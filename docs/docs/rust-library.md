@@ -16,6 +16,7 @@ From crates.io:
 [dependencies]
 openipc-core = "0.1"
 openipc-rtl88xx = "0.1"
+openipc-uplink = "0.1"
 openipc-video = "0.1"
 ```
 
@@ -25,6 +26,7 @@ From git:
 [dependencies]
 openipc-core = { git = "https://github.com/neelsani/openipc-rs", package = "openipc-core" }
 openipc-rtl88xx = { git = "https://github.com/neelsani/openipc-rs", package = "openipc-rtl88xx" }
+openipc-uplink = { git = "https://github.com/neelsani/openipc-rs", package = "openipc-uplink" }
 openipc-video = { git = "https://github.com/neelsani/openipc-rs", package = "openipc-video" }
 ```
 
@@ -40,11 +42,16 @@ nusb = { package = "nusb-webusb", version = "0.2.3" }
 - `openipc-core` is pure protocol logic. It can process bytes from files, USB,
   tests, or another transport.
 - `openipc-rtl88xx` owns Realtek USB device access and monitor-mode setup.
+- `openipc-uplink` runs IPv4/TCP and SSH over recovered WFB tunnel payloads,
+  without a platform socket or mandatory TUN interface.
 - `openipc-video` consumes Annex-B access units and owns platform decode, frame
   backpressure, and retained decoded surfaces on desktop, Android, and web.
 - `openipc-web` is for building the WASM/npm package. Browser apps normally use
   `@openipc-rs/web` from npm instead.
 - `apps/openipc-cli` is a command-line app, not a library dependency.
+
+See [VTX Control](./vtx-control.md) for the userspace network loop and typed
+firmware-control API.
 
 ## Parse A Realtek RX Transfer
 

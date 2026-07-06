@@ -18,11 +18,16 @@ OpenIPC video without taking a dependency on a specific USB frontend.
 - Expose recovered non-video WFB payload bytes from telemetry, tunnel/data,
   audio, or custom radio ports without parsing those application protocols.
 - Parse RTP and depacketize H.264/H.265 into Annex-B access units.
+- Accept Waybeam's H.265 payload-type 97 single-NAL/FU stream, separate
+  parameter sets, and refPred `TRAIL_N` pictures.
 - Expose RTP payload bytes for app-owned sinks such as UDP forwarding or Opus
   audio decoding.
 - Build adaptive-link feedback payloads and WFB uplink packets.
 - Build radiotap + 802.11 WFB transmit frames. Hardware crates add their own
   USB/driver descriptors before transmission.
+- Build and parse radiotap CHANNEL fields for per-packet radio hopping, convert
+  WiFi channels and center frequencies, and expand Devourer-compatible sweep
+  specifications such as `1,6,11` or `5170-5250/20`.
 - Select the first valid copy of each WFB packet when several independent
   receive adapters feed one protocol pipeline.
 
@@ -66,6 +71,19 @@ The returned frame data is still encoded video. Feed it to WebCodecs, a native
 decoder, a file writer, or an RTP/Annex-B bridge depending on your application.
 Long-running receivers should treat per-frame WFB errors as dropped packets and
 continue scanning the current USB aggregate.
+
+## Channel And Radiotap Helpers
+
+`channel_to_frequency` and `frequency_to_channel` cover the 2.4 GHz and 5 GHz
+channel grids used by the Realtek driver. `parse_channel_sweep` expands the
+same comma/range/step grammar as Devourer's hopping and sounding tools.
+
+For transmitters, `build_stream_radiotap_on_channel` adds a CHANNEL request to
+the normal rate metadata. Passing that frame to
+`RealtekDevice::send_packet_async` or `send_packet_for_radio` causes the
+hardware crate to retune before it builds the USB TX descriptor.
+`parse_radiotap_tx_metadata` exposes both the requested frequency and TX mode
+for applications that need to inspect or route these frames themselves.
 
 ## Multiple-Adapter Diversity
 
@@ -284,3 +302,24 @@ The test builds a temporary C harness, generates PixelPilot parity/recovery
 vectors, and compares them with `FecCode` plus a WFB-shaped
 `PlainAssembler` recovery case. It is ignored by default so normal CI does not
 depend on a PixelPilot checkout or a C compiler.
+
+## Performance Benchmarks
+
+The hardware-independent dataplane benchmark covers Realtek aggregate parsing,
+802.11 matching, WFB 8/12 recovery, H.264 RTP depacketization, and the direct
+receiver path:
+
+```sh
+cargo bench -p openipc-core --bench dataplane --locked
+```
+
+With PixelPilot cloned next to this repository, compare the same FEC workloads
+against its optimized zfex implementation:
+
+```sh
+./scripts/benchmark-reference-fec.sh
+```
+
+The benchmark reports median nanoseconds per operation. It is intended for
+regression testing; it is not a substitute for synchronized glass-to-glass
+latency measurement on real radios and displays.

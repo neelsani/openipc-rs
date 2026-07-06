@@ -27,6 +27,7 @@ const sidebars: SidebarsConfig = {
         "video-pipeline",
         "low-latency",
         "adaptive-link",
+        "vtx-control",
         "realtek-driver",
         "devourer-parity",
       ],

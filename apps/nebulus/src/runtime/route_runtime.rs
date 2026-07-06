@@ -42,6 +42,7 @@ pub(super) struct RouteProcessor {
     routes: BTreeMap<u64, ActiveRoute>,
     recording_audio_route: Option<u64>,
     startup_logs: Vec<RouteLog>,
+    audio_volume: u8,
 }
 
 impl RouteProcessor {
@@ -87,7 +88,7 @@ impl RouteProcessor {
                             Some(AudioStats {
                                 enabled: true,
                                 supported: false,
-                                decoder_name: "Unavailable".to_owned(),
+                                decoder_name: "Unavailable",
                                 errors: 1,
                                 ..AudioStats::default()
                             }),
@@ -135,6 +136,7 @@ impl RouteProcessor {
             routes,
             recording_audio_route,
             startup_logs,
+            audio_volume: request.audio_volume.min(100),
         })
     }
 
@@ -143,6 +145,11 @@ impl RouteProcessor {
     }
 
     pub(super) fn set_audio_volume(&mut self, volume: u8) {
+        let volume = volume.min(100);
+        if self.audio_volume == volume {
+            return;
+        }
+        self.audio_volume = volume;
         for route in self.routes.values_mut() {
             if let Some(audio) = route.audio.as_mut() {
                 audio.set_volume(volume);
@@ -306,7 +313,7 @@ impl RouteProcessor {
                 .audio
                 .as_ref()
                 .map(AudioPlayer::stats)
-                .or_else(|| route.audio_unavailable.clone());
+                .or(route.audio_unavailable);
             let Some(stats) = stats else {
                 continue;
             };
@@ -359,7 +366,7 @@ pub(super) fn configure_receiver(
             options.raw_payload_routes.push(route_id);
         }
     }
-    if request.vpn_enabled {
+    if request.vpn_enabled || request.vtx_control_enabled || request.adaptive_link {
         let keypair = WfbKeypair::from_bytes(&request.key_bytes)
             .map_err(|error| format!("VPN key is invalid: {error}"))?;
         receiver
@@ -476,6 +483,12 @@ mod tests {
             key_bytes: settings.key_bytes,
             audio_volume: settings.audio_volume,
             vpn_enabled: settings.vpn_enabled,
+            vtx_control_enabled: settings.vtx_control_enabled,
+            vtx_credentials: openipc_uplink::SshCredentials {
+                username: settings.vtx_ssh_username.clone(),
+                password: settings.vtx_ssh_password.clone(),
+                host_key: openipc_uplink::HostKeyPolicy::AcceptAny,
+            },
             payload_routes: settings.payload_routes,
             telemetry: settings.telemetry,
         }
@@ -518,7 +531,8 @@ mod tests {
         let mut options = configure_mock_receiver(&mut receiver, &request);
         options.depacketize_video = false;
         options.raw_payload_routes.push(video_route);
-        let mut source = crate::runtime::codec_mock::MockAvStream::new().unwrap();
+        let mut source =
+            crate::runtime::codec_mock::MockAvStream::new(openipc_core::Codec::H264).unwrap();
         let event = source.next_event();
 
         let mut raw_video_packets = 0;

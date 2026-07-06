@@ -16,6 +16,27 @@ pub(crate) enum ReceiverState {
     Failed,
 }
 
+/// Current state of the backward-compatible VTX SSH controller.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum VtxControlState {
+    #[default]
+    Disconnected,
+    Connecting,
+    Connected,
+    Applying,
+    Failed,
+}
+
+/// VTX control state shown by the settings UI.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct VtxControlStatus {
+    pub(crate) state: VtxControlState,
+    pub(crate) config: Option<openipc_uplink::ConfigBundle>,
+    pub(crate) last_error: String,
+    pub(crate) video_mode: String,
+    pub(crate) network: openipc_uplink::NetworkMetrics,
+}
+
 /// In-memory state for bounded-delay receiver recovery.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RecoveryStatus {
@@ -110,11 +131,11 @@ pub(crate) struct RouteStats {
     pub(crate) errors: u64,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct AudioStats {
     pub(crate) enabled: bool,
     pub(crate) supported: bool,
-    pub(crate) decoder_name: String,
+    pub(crate) decoder_name: &'static str,
     pub(crate) packets: u64,
     pub(crate) bytes: u64,
     pub(crate) decoded_frames: u64,

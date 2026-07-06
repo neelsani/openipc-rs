@@ -5,6 +5,129 @@ use crate::regs::*;
 use crate::types::{ChannelWidth, ChipFamily, ChipInfo, DriverError, RadioConfig, RfType};
 
 impl RealtekDevice {
+    pub(crate) async fn fast_retune_jaguar1_async(
+        &self,
+        chip: ChipInfo,
+        current: RadioConfig,
+        channel: u8,
+        cache_rf: bool,
+    ) -> Result<bool, DriverError> {
+        if chip.family == ChipFamily::Rtl8814 {
+            return Ok(false);
+        }
+        if matches!(
+            current.channel_width,
+            ChannelWidth::Mhz5 | ChannelWidth::Mhz10
+        ) {
+            return Ok(false);
+        }
+        let center = center_channel(channel, current.channel_width, current.channel_offset);
+        let mut profiler = crate::hop_prof::HopProfiler::new("j1", channel);
+        let mut state = self
+            .retune_state
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)?
+            .jaguar1
+            .clone();
+
+        let fc = match center {
+            15..=48 => 0x494,
+            50..=80 => 0x453,
+            82..=116 => 0x452,
+            118..=u8::MAX => 0x412,
+            _ => 0x96a,
+        };
+        if state.last_fc != Some(fc) {
+            self.set_bb_reg_async(R_FC_AREA_JAGUAR, 0x1ffe_0000, fc)
+                .await?;
+            state.last_fc = Some(fc);
+        }
+
+        let mod_ag = match center {
+            15..=80 => 0x101,
+            82..=140 => 0x301,
+            141..=u8::MAX => 0x501,
+            _ => 0,
+        };
+        let mod_ag_mask = BIT18 | BIT17 | BIT16 | BIT9 | BIT8;
+        for path in RfPath::iter(chip.total_rf_paths()) {
+            if !cache_rf || state.rf18[path.index()].is_none() {
+                state.rf18[path.index()] = Some(
+                    self.query_rf_reg_async(chip, path, RF_CHNLBW_JAGUAR)
+                        .await?,
+                );
+            }
+        }
+        profiler.mark("prime");
+
+        let spur_class = if current.channel_width == ChannelWidth::Mhz40 && center == 11 {
+            1
+        } else if current.channel_width == ChannelWidth::Mhz20 && matches!(center, 13 | 14) {
+            2
+        } else {
+            0
+        };
+        if chip.family == ChipFamily::Rtl8812 && state.last_spur_class != Some(spur_class) {
+            if chip.cut_version == 2 {
+                self.set_bb_reg_async(
+                    R_RFMOD_JAGUAR,
+                    0x0c00,
+                    u32::from(if spur_class == 1 { 3u8 } else { 2u8 }),
+                )
+                .await?;
+                if spur_class == 2 {
+                    self.set_bb_reg_async(R_RFMOD_JAGUAR, 0x0300, 3).await?;
+                    self.set_bb_reg_async(0x08c4, BIT30, 1).await?;
+                } else if spur_class == 1 {
+                    self.set_bb_reg_async(0x08c4, BIT30, 1).await?;
+                } else if current.channel_width != ChannelWidth::Mhz80 {
+                    self.set_bb_reg_async(R_RFMOD_JAGUAR, 0x0300, 2).await?;
+                    self.set_bb_reg_async(0x08c4, BIT30, 0).await?;
+                }
+            } else if spur_class == 2 {
+                self.set_bb_reg_async(R_RFMOD_JAGUAR, 0x0300, 3).await?;
+            } else if center <= 14 {
+                self.set_bb_reg_async(R_RFMOD_JAGUAR, 0x0300, 2).await?;
+            }
+            state.last_spur_class = Some(spur_class);
+        }
+
+        for path in RfPath::iter(chip.total_rf_paths()) {
+            let cached = state.rf18[path.index()].expect("RF18 cache was primed");
+            let value = (cached & !mod_ag_mask & !B_MASK_BYTE0)
+                | (mod_ag << bit_shift(mod_ag_mask))
+                | u32::from(center);
+            self.set_rf_reg_async(chip, path, RF_CHNLBW_JAGUAR, B_LSSI_WRITE_DATA, value)
+                .await?;
+            state.rf18[path.index()] = Some(value & B_LSSI_WRITE_DATA);
+        }
+        profiler.mark("rf18");
+
+        if current.channel_width != ChannelWidth::Mhz20 {
+            let subchannel = current.channel_offset;
+            if state.last_subchannel != Some(subchannel) {
+                self.write_u8_async(REG_DATA_SC_8812, subchannel).await?;
+                self.set_bb_reg_async(R_RFMOD_JAGUAR, 0x3c, u32::from(subchannel))
+                    .await?;
+                if current.channel_width == ChannelWidth::Mhz40 {
+                    self.set_bb_reg_async(R_CCA_ON_SEC_JAGUAR, 0xf000_0000, u32::from(subchannel))
+                        .await?;
+                    self.set_bb_reg_async(0x0a00, BIT4, u32::from(subchannel == 1))
+                        .await?;
+                }
+                state.last_subchannel = Some(subchannel);
+            }
+        }
+        profiler.mark("subchannel");
+
+        self.retune_state
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)?
+            .jaguar1 = state;
+        log::debug!(target: "openipc_rtl88xx::retune", "Jaguar1 fast retune channel={} center={}", channel, center);
+        Ok(true)
+    }
+
     pub(crate) async fn set_monitor_mode_async(
         &self,
         accept_bad_fcs: bool,

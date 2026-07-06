@@ -26,9 +26,6 @@ crates/openipc-web        wasm-bindgen package for browser/WebUSB apps
 apps/openipc-cli          Native command-line utilities
 apps/wfb-rs               WFB-style Rust command-line tools
 apps/nebulus              Main egui ground station for desktop, Android, and WebUSB
-apps/openipc-station      Older React/Vite and Tauri station implementation
-plugins/tauri-plugin-openipc-usb
-                          Android USB and VPN permission bridge used by Station
 docs                      Docusaurus documentation site
 scripts                   cleanup helpers
 ```
@@ -57,7 +54,6 @@ Public links:
 
 - Docs: [openipc-rs.neels.dev](https://openipc-rs.neels.dev)
 - Nebulus web app: [nebulus.openipc-rs.neels.dev](https://nebulus.openipc-rs.neels.dev)
-- Legacy Station: [station.openipc-rs.neels.dev](https://station.openipc-rs.neels.dev)
 
 Test the core:
 
@@ -173,7 +169,6 @@ bun run start
 - [Native](docs/docs/native.md)
 - [Web And WASM](docs/docs/web-wasm.md)
 - [WASM SDK Usage](docs/docs/wasm-sdk.md)
-- [Desktop Tauri](docs/docs/desktop-tauri.md)
 - [Nebulus](docs/docs/nebulus.md)
 - [Receive Diversity](docs/docs/receive-diversity.md)
 - [Adaptive Link](docs/docs/adaptive-link.md)
@@ -199,8 +194,8 @@ Useful repository secrets:
 
 - `CARGO_REGISTRY_TOKEN` for crates.io releases
 - npm trusted publishing for `@openipc-rs/web`
-- `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` for Nebulus, legacy
-  Station, and docs deploys
+- `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` for Nebulus and docs
+  deploys
 
 Normal CI lives in `.github/workflows/ci.yml`; release publishing is isolated
 in the reusable `.github/workflows/release.yml`. A cargo release produces one

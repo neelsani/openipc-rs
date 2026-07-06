@@ -1,7 +1,7 @@
 //! WebAssembly bindings for the OpenIPC receiver pipeline and WebUSB driver.
 //!
 //! The Rust types in this crate wrap `openipc-core` and `openipc-rtl88xx` for
-//! browser and Tauri-webview frontends. JavaScript receives typed video frames,
+//! browser frontends. JavaScript receives typed video frames,
 //! raw route payloads, diagnostics, and WebUSB helpers through wasm-bindgen.
 
 mod adaptive;

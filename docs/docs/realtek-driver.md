@@ -83,12 +83,9 @@ Platform-specific filters are derived from this table:
 
 - the WASM package exports `supportedUsbFilters()` from `SUPPORTED_DEVICES` for
   `navigator.usb.requestDevice`,
-- the desktop/Tauri backend reports devices through the same driver table and
-  runtime `nusb` discovery,
+- native applications use the same table with runtime `nusb` discovery, and
 - Nebulus uses the table for desktop/WebUSB discovery and Android permission
-  filtering,
-- the legacy Android Tauri plugin generates its USB attach XML and Kotlin
-  runtime filter from `SUPPORTED_DEVICES` during its Rust build script.
+  filtering.
 
 ## Implemented Operations
 
@@ -202,9 +199,8 @@ which makes channel selection a per-packet input alongside RATE/MCS/VHT.
 
 Android is another transport boundary. Nebulus calls `UsbManager` through its
 small JNI module for discovery and permission, then wraps the already-open file
-descriptor with `nusb::Device::from_fd`. The legacy Station performs the same
-handoff through `tauri-plugin-openipc-usb`. In either application, the shared
-Realtek initialization and RX/TX code takes over after permission is granted.
+descriptor with `nusb::Device::from_fd`. The shared Realtek initialization and
+RX/TX code takes over after permission is granted.
 
 ## Runtime Options
 
@@ -287,13 +283,13 @@ The Rust driver exposes diagnostics as explicit calls, not background threads.
 That is deliberate.
 
 Devourer has native background work because it owns the whole process and can
-coordinate that with libusb transfer timing. `openipc-rs` is a library used from
-native CLI, Tauri, and browser/WebUSB code. A hidden polling thread in the
-driver would be hard to schedule correctly across all three.
+coordinate that with libusb transfer timing. `openipc-rs` is a library used
+from native and browser/WebUSB code. A hidden polling thread in the driver
+would be hard to schedule correctly across both environments.
 
 Applications should schedule diagnostics at the app boundary:
 
-- native CLI/Tauri can poll from the existing RX loop or an app-owned worker,
+- native applications can poll from the existing RX loop or an app-owned worker,
 - browser apps can use timers, animation frames, or a Web Worker if UI jank
   appears,
 - the core driver APIs remain deterministic and testable.

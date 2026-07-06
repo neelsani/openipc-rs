@@ -2,14 +2,7 @@
 /.cargo-tools/
 /.bun-cache/
 /crates/openipc-web/pkg/
-/apps/openipc-station/node_modules/
-/apps/openipc-station/dist/
 /apps/nebulus/dist/
-/apps/openipc-station/.wrangler/
-/apps/openipc-station/src-tauri/gen/
-/plugins/*/android/.tauri/
-/plugins/*/android/build/
-/plugins/*/android/.gradle
 /docs/node_modules/
 /docs/build/
 /docs/.docusaurus/
@@ -22,7 +15,6 @@ package-lock.json
 *.annexb
 *.bin
 *.key
-!/apps/openipc-station/public/gs.key
 *.log
 *.pcap
 *.pcapng

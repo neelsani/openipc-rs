@@ -136,13 +136,11 @@ specific receiver bottleneck. These are not glass-to-glass measurements; true
 camera-to-display latency requires a transmitter timestamp or synchronized
 visual test.
 
-The legacy React/Tauri Station has an additional encoded-frame IPC boundary and
-decodes through WebCodecs in its WebView. Aviateur adds a local UDP handoff,
-FFmpeg demux, decoded-frame transfer, and a small presentation queue. PixelPilot
-uses a direct MediaCodec surface on Android. Nebulus removes the former
-handoffs and uses the same direct-surface class of path as PixelPilot on
-Android, but performance claims still require the same adapter, VTX stream,
-display mode, and a synchronized glass-to-glass test.
+Aviateur adds a local UDP handoff, FFmpeg demux, decoded-frame transfer, and a
+small presentation queue. PixelPilot uses a direct MediaCodec surface on
+Android. Nebulus avoids those handoffs and uses the same direct-surface class
+of path as PixelPilot on Android, but performance claims still require the same
+adapter, VTX stream, display mode, and a synchronized glass-to-glass test.
 
 ## Reproducible Microbenchmarks
 

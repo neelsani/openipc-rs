@@ -8,19 +8,17 @@ sidebar_position: 4
 The UI app uses all of these pieces, but library users often only need one or
 two crates.
 
-| Name                       | Published As                                                                                                         | Use It For                                                                                                                                                                                                                               |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `openipc-core`             | [crates.io](https://crates.io/crates/openipc-core)                                                                   | Parsing Realtek RX aggregates, combining duplicate packets from multiple radios, decrypting WFB packets, recovering FEC blocks, routing raw payloads, depacketizing RTP into Annex-B frames, and creating adaptive-link uplink payloads. |
-| `openipc-rtl88xx`          | [crates.io](https://crates.io/crates/openipc-rtl88xx)                                                                | Realtek Jaguar1/2/3 userspace USB HAL: cold initialization, monitor RX, injection, wide/narrow channels, TX power, sounding, CSI/NBI controls, and diagnostics.                                                                          |
-| `openipc-uplink`           | [crates.io](https://crates.io/crates/openipc-uplink)                                                                 | Userspace IPv4/TCP over WFB tunnel ports, virtual async TCP streams, WASM-compatible SSH, config transfer, and typed controls for existing OpenIPC VTX firmware.                                                                         |
-| `openipc-video`            | [crates.io](https://crates.io/crates/openipc-video)                                                                  | Turning Annex-B H.264/H.265 access units into retained decoder surfaces through VideoToolbox, VA-API, Media Foundation/D3D11, Android MediaCodec, or browser WebCodecs.                                                                  |
-| `openipc-web`              | [crates.io](https://crates.io/crates/openipc-web)                                                                    | Rust/WASM bindings. Downstream Rust users normally do not call this directly unless they are building the npm package from source.                                                                                                       |
-| `@openipc-rs/web`          | [npm](https://www.npmjs.com/package/@openipc-rs/web)                                                                 | Browser SDK generated from `openipc-web`: WASM, JavaScript glue, and TypeScript definitions for WebUSB apps.                                                                                                                             |
-| `openipc-cli`              | Not published                                                                                                        | Native command-line utilities under `apps/openipc-cli` for probes, capture decoding, receive-loop testing, Annex-B output, and RTP UDP mirroring.                                                                                        |
-| `wfb-rs`                   | [crates.io](https://crates.io/crates/wfb-rs)                                                                         | WFB-style command-line tools including `wfb_rx`, `wfb_tx`, `wfb_keygen`, `wfb_tx_cmd`, `wfb_tun`, and `wfb_rtsp` over the Rust userland driver.                                                                                          |
-| `nebulus`                  | [crates.io](https://crates.io/crates/nebulus) and [GitHub Releases](https://github.com/neelsani/openipc-rs/releases) | The primary pure-Rust egui station for desktop, Android, and browsers, using the platform decoder crate and a shared receiver UI/runtime.                                                                                                |
-| `openipc-station`          | Not published                                                                                                        | The older React/Vite station and Tauri shell retained as an alternative implementation and SDK integration example.                                                                                                                      |
-| `tauri-plugin-openipc-usb` | Not published                                                                                                        | Local Tauri plugin used by Station's Android build to request USB/VPN permission through Android APIs and hand file descriptors to the Rust backend.                                                                                     |
+| Name              | Published As                                                                                                         | Use It For                                                                                                                                                                                                                               |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `openipc-core`    | [crates.io](https://crates.io/crates/openipc-core)                                                                   | Parsing Realtek RX aggregates, combining duplicate packets from multiple radios, decrypting WFB packets, recovering FEC blocks, routing raw payloads, depacketizing RTP into Annex-B frames, and creating adaptive-link uplink payloads. |
+| `openipc-rtl88xx` | [crates.io](https://crates.io/crates/openipc-rtl88xx)                                                                | Realtek Jaguar1/2/3 userspace USB HAL: cold initialization, monitor RX, injection, wide/narrow channels, TX power, sounding, CSI/NBI controls, and diagnostics.                                                                          |
+| `openipc-uplink`  | [crates.io](https://crates.io/crates/openipc-uplink)                                                                 | Userspace IPv4/TCP over WFB tunnel ports, virtual async TCP streams, WASM-compatible SSH, config transfer, and typed controls for existing OpenIPC VTX firmware.                                                                         |
+| `openipc-video`   | [crates.io](https://crates.io/crates/openipc-video)                                                                  | Turning Annex-B H.264/H.265 access units into retained decoder surfaces through VideoToolbox, VA-API, Media Foundation/D3D11, Android MediaCodec, or browser WebCodecs.                                                                  |
+| `openipc-web`     | [crates.io](https://crates.io/crates/openipc-web)                                                                    | Rust/WASM bindings. Downstream Rust users normally do not call this directly unless they are building the npm package from source.                                                                                                       |
+| `@openipc-rs/web` | [npm](https://www.npmjs.com/package/@openipc-rs/web)                                                                 | Browser SDK generated from `openipc-web`: WASM, JavaScript glue, and TypeScript definitions for WebUSB apps.                                                                                                                             |
+| `openipc-cli`     | Not published                                                                                                        | Native command-line utilities under `apps/openipc-cli` for probes, capture decoding, receive-loop testing, Annex-B output, and RTP UDP mirroring.                                                                                        |
+| `wfb-rs`          | [crates.io](https://crates.io/crates/wfb-rs)                                                                         | WFB-style command-line tools including `wfb_rx`, `wfb_tx`, `wfb_keygen`, `wfb_tx_cmd`, `wfb_tun`, and `wfb_rtsp` over the Rust userland driver.                                                                                          |
+| `nebulus`         | [crates.io](https://crates.io/crates/nebulus) and [GitHub Releases](https://github.com/neelsani/openipc-rs/releases) | The primary pure-Rust egui station for desktop, Android, and browsers, using the platform decoder crate and a shared receiver UI/runtime.                                                                                                |
 
 ## Choosing A Layer
 
@@ -73,22 +71,15 @@ a latest transferable `VideoFrame` returns to egui for presentation. Settings,
 routes, metrics, recording, adaptive link, VPN controls where supported, and the
 egui UI are shared.
 
-`tauri-plugin-openipc-usb` is an app-support crate, not a public SDK. It exists
-because Android apps cannot enumerate USB devices from the normal Linux sysfs
-path that `nusb` uses on desktop. The plugin owns the small Kotlin layer that
-asks Android for permission and opens the adapter; the driver still runs in Rust
-after Station receives the file descriptor.
-
 ## Versioning
 
 The repo uses one lockstep SemVer version across the Rust crates, the npm
-package metadata, the station app, and the docs package. `cargo release` updates
-the Rust manifests, including the local Tauri plugin, uses
-`bun pm version --cwd ...` for JavaScript package versions, and refreshes
-`bun.lock` files before it creates the `v*` tag. CI publishes the crates.io
-packages and the npm package from that tag. Crates marked `publish = false`,
-such as the desktop shell and Android plugin, are versioned with the workspace
-but are not uploaded to crates.io.
+package metadata, Nebulus, and the docs package. `cargo release` updates the
+Rust manifests, uses `bun pm version --cwd ...` for JavaScript package
+versions, and refreshes `bun.lock` files before it creates the `v*` tag. CI
+publishes the crates.io packages and the npm package from that tag. Internal
+workspace packages marked `publish = false` are versioned but not uploaded to
+crates.io.
 
 ## Dependency Notes
 

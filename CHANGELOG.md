@@ -198,7 +198,7 @@ Prioritize and decouple native receive work, bound browser and decoder queues, r
 ### Changes
 - Add routed payload pipeline and mixed RTP audio
 
-Introduce shared receiver route fanout with filtered RTP payload taps, wire route manager/audio support through WASM and Tauri station runtimes, and update docs around OpenIPC radio ports, audio, telemetry, and native CLI structure. (d78be69)
+Introduce shared receiver route fanout with filtered RTP payload taps, wire route manager/audio support through application runtimes, and update docs around OpenIPC radio ports, audio, telemetry, and native CLI structure. (d78be69)
 - Generalize audio route settings
 
 Rename the route action to Audio, add an audio codec preference with Auto and Opus modes, wire codec selection through playback, and refresh station/docs wording around audio route configuration. (1c14c84)

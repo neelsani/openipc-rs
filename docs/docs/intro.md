@@ -9,8 +9,7 @@ slug: /
 meant to be useful in two ways:
 
 - as reusable crates for people building their own OpenIPC tools, and
-- as Nebulus, the primary pure-Rust ground station, with an older React/Tauri
-  client retained as an integration reference.
+- as Nebulus, the pure-Rust ground station for desktop, Android, and browsers.
 
 The project was built after studying `devourer`, `aviateur`, `openipc-zig`, the
 standalone `adaptive-link` tools, and PixelPilot. Those projects are reference
@@ -28,9 +27,6 @@ openipc-rs/
   apps/wfb-rs/                WFB-ng-style Rust binaries over the userland driver
   crates/openipc-web/         wasm-bindgen SDK
   apps/nebulus/               primary egui station for desktop, Android, and browser
-  apps/openipc-station/       older browser and Tauri station implementation
-  plugins/tauri-plugin-openipc-usb/
-                                Android USB permission plugin for Station
   docs/                       this Docusaurus site
   scripts/                    build, clean, release helpers
 ```
@@ -48,12 +44,12 @@ The platform boundary is kept at the edges:
 - browser apps ask JavaScript for WebUSB permission and then pass the granted
   `UsbDevice` into Rust/WASM,
 - Nebulus Android builds perform the same permission/file-descriptor handoff
-  through a small Rust JNI module and do not require Tauri,
+  through a small Rust JNI module,
 - Nebulus browser builds run RTP reorder/depacketization and the
   `openipc-video` WebCodecs backend in separate Rust/WASM workers built from
   Nebulus's internal `nebulus-decode-worker` binary target,
-- the older Station app uses a local Tauri plugin on Android and WebCodecs in
-  its React frontend.
+- Nebulus native, Android, and browser targets share one egui application and
+  receiver model.
 
 Nebulus is the main application: egui provides the UI and
 `openipc-video` selects VideoToolbox, VA-API, Media Foundation, MediaCodec, or

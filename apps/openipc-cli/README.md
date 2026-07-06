@@ -80,7 +80,7 @@ Useful bring-up flags:
 
 ## Receive Path
 
-The CLI uses the same shared receive runtime as Station and the WASM SDK:
+The CLI uses the same shared receive runtime as Nebulus and the WASM SDK:
 
 ```text
 Realtek USB aggregate

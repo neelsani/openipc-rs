@@ -1,9 +1,0 @@
-[default]
-description = "Default OpenIPC USB plugin permissions"
-permissions = [
-  "allow-list-devices",
-  "allow-open-device",
-  "allow-close-device",
-  "allow-open-vpn",
-  "allow-close-vpn",
-]

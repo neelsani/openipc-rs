@@ -10,7 +10,7 @@ use crate::regs::{CHIP_VER_RTL_MASK, CHIP_VER_RTL_SHIFT, RF_TYPE_ID};
 /// Realtek USB IDs supported by the driver.
 ///
 /// This table is the source of truth for desktop filtering, WebUSB filters,
-/// and the Android Tauri plugin's generated USB filter resources.
+/// and application USB permission filters.
 pub const SUPPORTED_DEVICES: &[SupportedDevice] = &[
     SupportedDevice::new(
         0x0bda,

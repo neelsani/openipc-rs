@@ -33,7 +33,7 @@ nebulus
 
 On Linux, install the VA-API build dependencies listed in the
 [`openipc-video` README](../../crates/openipc-video/README.md). The app uses
-`nusb` directly; it does not need the Tauri backend or the devourer library.
+`nusb` directly and does not depend on the devourer library.
 
 macOS and Windows builds add a Nebulus system-tray icon. Its menu can show or
 hide the window, start or stop RX, enable VPN for the next receiver start, open

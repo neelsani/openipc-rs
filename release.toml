@@ -11,7 +11,7 @@ pre-release-hook = [
   '''
 set -euo pipefail
 
-if [ "${CRATE_NAME:-}" != "openipc-rs-desktop" ]; then
+if [ "${CRATE_NAME:-}" != "nebulus" ]; then
   exit 0
 fi
 
@@ -21,10 +21,8 @@ if [ "${DRY_RUN:-false}" = "true" ]; then
 fi
 
 bun pm version "$NEW_VERSION" --cwd "$WORKSPACE_ROOT/crates/openipc-web" --no-git-tag-version --allow-same-version --force
-bun pm version "$NEW_VERSION" --cwd "$WORKSPACE_ROOT/apps/openipc-station" --no-git-tag-version --allow-same-version --force
 bun pm version "$NEW_VERSION" --cwd "$WORKSPACE_ROOT/docs" --no-git-tag-version --allow-same-version --force
 
-bun install --cwd "$WORKSPACE_ROOT/apps/openipc-station" --lockfile-only --registry https://registry.npmjs.org/
 bun install --cwd "$WORKSPACE_ROOT/docs" --lockfile-only --registry https://registry.npmjs.org/
 
 if ! command -v git-cliff >/dev/null 2>&1; then

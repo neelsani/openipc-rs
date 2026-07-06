@@ -26,9 +26,8 @@ path is still required before those two backends can advertise Main10. Android,
 macOS, and WebCodecs negotiate platform output according to device support.
 
 Nebulus uses every backend in this table directly, including `WebDecoder` in
-its WASM build. The legacy React Station calls WebCodecs from JavaScript. Both
-browser routes keep decoded pixels in browser-owned `VideoFrame` objects rather
-than copying them through WASM memory.
+its WASM build. The browser path keeps decoded pixels in browser-owned
+`VideoFrame` objects rather than copying them through WASM memory.
 
 ```mermaid
 flowchart LR

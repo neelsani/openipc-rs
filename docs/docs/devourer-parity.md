@@ -84,8 +84,8 @@ boundaries are:
   diagnostics, and explicit runtime hooks.
 - `openipc-core` owns byte-level RX aggregate parsing plus WFB/RTP/FEC payload
   handling.
-- apps own scheduling: receive loops, periodic diagnostics, WebUSB UI timing,
-  and Tauri worker threads.
+- apps own scheduling: receive loops, periodic diagnostics, native workers,
+  and WebUSB UI timing.
 
 ## Executed Checks
 
@@ -195,7 +195,7 @@ The Rust code tracks the devourer behavior that matters for OpenIPC use:
   binding.
 
 The Rust crate keeps these as explicit APIs. The app decides whether they run
-in a native worker thread, a Tauri command, a browser loop, or a Web Worker.
+in a native worker thread, a browser loop, or a Web Worker.
 Devourer's timed `DEVOURER_RX_PATHS=mask:mask@milliseconds` mode is a
 measurement harness, not hidden HAL state: Rust apps can schedule the explicit
 mask setter on their existing worker or browser timer.
@@ -280,9 +280,9 @@ including the cancelled completion used by `nusb` for a timeout.
 ## Why App-Owned Polling
 
 Devourer is a native process and can create background threads around libusb.
-`openipc-rs` is also a library for browsers and Tauri. A hidden polling thread
-inside the driver would not map cleanly to WebUSB and would make app shutdown
-harder to reason about.
+`openipc-rs` is also a browser library. A hidden polling thread inside the
+driver would not map cleanly to WebUSB and would make app shutdown harder to
+reason about.
 
 For Jaguar3, devourer's coex thread does two jobs:
 
@@ -290,10 +290,10 @@ For Jaguar3, devourer's coex thread does two jobs:
 2. every roughly two seconds, re-apply 5 GHz coex, power tracking, and H2C
    heartbeats.
 
-OpenIPC Station already keeps bulk-IN transfers posted in its RX loop. The app
-also calls `run_jaguar3_coex_keepalive` and `tick_jaguar3_power_tracking` on a
-two-second cadence. The latter dispatches the correct RTL8822C or RTL8822E
-thermal algorithm. The driver exposes the hooks; the app owns scheduling.
+Nebulus keeps bulk-IN transfers posted in its RX loop and calls
+`run_jaguar3_coex_keepalive` plus `tick_jaguar3_power_tracking` on a two-second
+cadence. The latter dispatches the correct RTL8822C or RTL8822E thermal
+algorithm. The driver exposes the hooks; the app owns scheduling.
 
 ## Test Strategy
 

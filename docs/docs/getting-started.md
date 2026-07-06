@@ -13,7 +13,6 @@ Public builds:
 - Nebulus: [nebulus.openipc-rs.neels.dev](https://nebulus.openipc-rs.neels.dev)
 - Downloads: [GitHub Releases](https://github.com/neelsani/openipc-rs/releases)
 - Docs: [openipc-rs.neels.dev](https://openipc-rs.neels.dev)
-- Legacy Station: [station.openipc-rs.neels.dev](https://station.openipc-rs.neels.dev)
 
 ## Choose A Build
 
@@ -45,8 +44,7 @@ the picker must be opened by **Start RX** for the first radio or **Add adapter**
 for each additional diversity receiver.
 
 For source builds, install Rust stable. Trunk is needed for the browser app.
-Bun is only needed for the documentation site, legacy Station, and generated
-npm SDK workflows.
+Bun is only needed for the documentation site and generated npm SDK workflows.
 
 ## Receive A Stream
 

@@ -19,8 +19,7 @@ flowchart LR
 
     Nebulus["Nebulus<br/>egui native, Android, or WASM"] --> Rtl
     Native["Native CLI app<br/>openipc-cli"] --> Rtl
-    Desktop["Legacy Tauri backend<br/>OpenIPC Station"] --> Rtl
-    Browser["Browser UI<br/>React + WebUSB permission"] --> Wasm["openipc-web<br/>wasm-bindgen"]
+    Browser["Browser app<br/>WebUSB permission"] --> Wasm["openipc-web<br/>wasm-bindgen"]
     Wasm --> Rtl
     Rtl --> Core
     Core --> Uplink
@@ -66,7 +65,6 @@ protocol details, then let each target own the APIs that make sense there.
 - Nebulus per-adapter bulk-IN workers feeding one protocol and decoder worker;
   a lower-priority bounded radio worker owns auxiliary bulk-OUT and Jaguar3
   maintenance.
-- Tauri commands/events for the legacy desktop station UI.
 
 ### Browser
 
@@ -89,23 +87,14 @@ protocol details, then let each target own the APIs that make sense there.
   packets into smoltcp; Russh consumes the virtual TCP stream, and outbound IP
   packets return through WebUSB bulk OUT.
 
-### Desktop Applications
+### Desktop Application
 
-The legacy Tauri app uses the same React components as its browser build, but
-the receive loop runs in native Rust. Encoded Annex-B frames and metrics are
-sent to the UI. WebCodecs still performs video decode inside the WebView, so the
-desktop path avoids copying decoded video surfaces through Rust.
-
-Nebulus follows a different desktop boundary. Its native worker submits
+Nebulus's native worker submits
 Annex-B access units to `openipc-video`, receives a retained platform decoder
 surface, and hands the newest presentable frame to egui. That path avoids the
-WebView entirely.
+browser and WebView boundaries entirely.
 
 ## Copy Boundaries
-
-Legacy Station's largest regular boundary is the encoded video frame returned
-from Rust/WASM or native Tauri Rust to JavaScript. Decoded pixels then stay in
-WebCodecs and the browser/WebView canvas.
 
 Nebulus has no JavaScript frame callback. It keeps encoded video and decoder
 control in Rust, coalesces retained native decoder surfaces, uploads NV12

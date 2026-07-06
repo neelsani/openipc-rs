@@ -17,7 +17,6 @@ const sidebars: SidebarsConfig = {
         "native-video",
         "web-wasm",
         "wasm-sdk",
-        "desktop-tauri",
       ],
     },
     {

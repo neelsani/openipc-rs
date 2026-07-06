@@ -22,18 +22,14 @@ CARGO_MANIFESTS = (
     "crates/openipc-uplink/Cargo.toml",
     "crates/openipc-video/Cargo.toml",
     "crates/openipc-web/Cargo.toml",
-    "apps/openipc-station/src-tauri/Cargo.toml",
-    "plugins/tauri-plugin-openipc-usb/Cargo.toml",
 )
 
 JSON_PACKAGES = (
     "crates/openipc-web/package.json",
-    "apps/openipc-station/package.json",
     "docs/package.json",
 )
 
 BUN_LOCKS = (
-    "apps/openipc-station/bun.lock",
     "docs/bun.lock",
 )
 

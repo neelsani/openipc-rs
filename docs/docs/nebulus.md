@@ -12,14 +12,12 @@ the driver, protocol, and decoder crates fit together.
 Nebulus is the project's primary ground station. It provides the low-latency
 video receive path, adaptive link, configurable payload routes, Opus playback,
 encoded recording, native VPN bridging, diagnostics, and a portable all-Rust
-UI. The older React/Tauri OpenIPC Station remains in the repository as an
-alternative implementation. New desktop and Android release artifacts, and the
-hosted app at [nebulus.openipc-rs.neels.dev](https://nebulus.openipc-rs.neels.dev),
-are built from Nebulus. The older React app remains available at its own legacy
-URL.
+UI. Desktop and Android release artifacts, and the hosted app at
+[nebulus.openipc-rs.neels.dev](https://nebulus.openipc-rs.neels.dev), are built
+from Nebulus.
 
 The header always shows the package version. CI builds also embed the current
-tag and short commit hash from the same `OPENIPC_*` metadata used by Station.
+tag and short commit hash from the `OPENIPC_*` build metadata.
 
 ## Architecture
 

@@ -20,16 +20,16 @@ tag push does not start CI.
 
 ## Validation
 
-| Job                     | What it checks                                                                                                 |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `Build Context`         | Detects an annotated release tag on the exact `master` commit.                                                 |
-| `Rust Workspace`        | Formatting, workspace Clippy, tests, version metadata, and WASM-target checks.                                 |
-| `Web Apps And WASM SDK` | Builds the WASM SDK, dry-runs its npm package, and builds legacy Station and Nebulus.                          |
-| `Docs Site`             | Installs the frozen Bun dependencies and builds Docusaurus.                                                    |
-| `Desktop Check`         | Tests `openipc-video` and checks Nebulus on Linux x64/arm64, macOS Apple Silicon/Intel, and Windows x64/arm64. |
-| `Android Check`         | Clippies the Android video/app paths and builds an arm64 debug APK with `cargo-apk2`.                          |
+| Job                        | What it checks                                                                                                 |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `Build Context`            | Detects an annotated release tag on the exact `master` commit.                                                 |
+| `Rust Workspace`           | Formatting, workspace Clippy, tests, version metadata, and WASM-target checks.                                 |
+| `Nebulus Web And WASM SDK` | Builds the WASM SDK, dry-runs its npm package, and builds Nebulus for the browser.                             |
+| `Docs Site`                | Installs the frozen Bun dependencies and builds Docusaurus.                                                    |
+| `Desktop Check`            | Tests `openipc-video` and checks Nebulus on Linux x64/arm64, macOS Apple Silicon/Intel, and Windows x64/arm64. |
+| `Android Check`            | Clippies the Android video/app paths and builds an arm64 debug APK with `cargo-apk2`.                          |
 
-The three static sites are built once. Successful `master` builds upload their
+The two static sites are built once. Successful `master` builds upload their
 outputs as short-lived workflow artifacts, and the deployment matrix sends
 those exact artifacts to Cloudflare Pages. Deployment never rebuilds source.
 
@@ -137,11 +137,10 @@ CLOUDFLARE_ACCOUNT_ID
 
 The deployment matrix uses these projects:
 
-| Site           | Cloudflare project   | Public URL                                                           |
-| -------------- | -------------------- | -------------------------------------------------------------------- |
-| Nebulus        | `nebulus`            | [nebulus.openipc-rs.neels.dev](https://nebulus.openipc-rs.neels.dev) |
-| Legacy Station | `openipc-rs-station` | [station.openipc-rs.neels.dev](https://station.openipc-rs.neels.dev) |
-| Docs           | `openipc-rs-docs`    | [openipc-rs.neels.dev](https://openipc-rs.neels.dev)                 |
+| Site    | Cloudflare project | Public URL                                                           |
+| ------- | ------------------ | -------------------------------------------------------------------- |
+| Nebulus | `nebulus`          | [nebulus.openipc-rs.neels.dev](https://nebulus.openipc-rs.neels.dev) |
+| Docs    | `openipc-rs-docs`  | [openipc-rs.neels.dev](https://openipc-rs.neels.dev)                 |
 
 When the Cloudflare secrets are absent, validation still succeeds and the
 deployment steps report that they were skipped.

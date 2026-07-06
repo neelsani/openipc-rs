@@ -187,7 +187,3 @@ access unit remains one MP4 sample, including streams with multi-slice pictures.
 The first enabled Opus audio route is stripped of RTP framing and muxed as a
 second track using its own RTP clock. See
 [Nebulus Recording](./nebulus.md#recording) for timing and size limits.
-
-The legacy React Station instead records its rendered canvas with
-`MediaRecorder` and can attach decoded audio. That is a separate implementation
-tradeoff, not the primary Nebulus path.

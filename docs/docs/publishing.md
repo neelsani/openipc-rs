@@ -5,7 +5,7 @@ sidebar_position: 11
 # Publishing
 
 The repository uses one lockstep SemVer version for the Rust crates, Nebulus,
-WASM npm metadata, legacy Station, the Tauri shell, and the docs site.
+WASM npm metadata, and the docs site.
 
 Use `cargo release` with the workspace `release.toml` to update the shared
 version, update Bun lockfiles, update the changelog, create the release commit,
@@ -37,7 +37,7 @@ cargo release patch --workspace --execute --no-push
 
 `release.toml` has `publish = false`, so local release commands do not publish
 to crates.io. The release hook updates the Bun-managed `package.json` versions,
-regenerates app/docs `bun.lock` files with `bun install --lockfile-only`, and
+regenerates the docs `bun.lock` with `bun install --lockfile-only`, and
 prepends release notes to `CHANGELOG.md` with `git-cliff`.
 
 `cargo release` atomically pushes the release commit and its annotated tag. The
@@ -72,7 +72,6 @@ The existing Cloudflare secrets are required for deployments from `master`:
 CI deploys the public sites:
 
 - Nebulus: [nebulus.openipc-rs.neels.dev](https://nebulus.openipc-rs.neels.dev)
-- Legacy Station: [station.openipc-rs.neels.dev](https://station.openipc-rs.neels.dev)
 - Docs: [openipc-rs.neels.dev](https://openipc-rs.neels.dev)
 
 Release commits use the same workflow run as ordinary `master` commits. The
@@ -156,10 +155,10 @@ The library crates are intended for crates.io publication:
 - `wfb-rs`
 - `nebulus`
 
-`apps/openipc-cli`, `apps/openipc-station/src-tauri`, and the local Android USB
-plugin are versioned with the workspace but marked `publish = false`. The
-published Nebulus package contains its internal decode-worker binary target;
-Trunk bundles that target into the site instead of publishing another crate.
+`apps/openipc-cli` is versioned with the workspace but marked `publish = false`.
+The published Nebulus package contains its internal decode-worker binary
+target; Trunk bundles that target into the site instead of publishing another
+crate.
 
 `openipc-core` is the easiest crate to publish because it owns protocol logic
 and does not need USB access. `openipc-video` has target-specific decoder
@@ -186,9 +185,7 @@ cargo publish --workspace
 Nebulus is published as a Cargo package for source installation and reuse, and
 is also distributed as ready-to-run GitHub Release artifacts. Its versioned
 path dependencies resolve to the corresponding crates.io versions when Cargo
-packages it. `openipc-rs-desktop` and `tauri-plugin-openipc-usb` remain
-`publish = false` because they are local parts of the older Station
-implementation.
+packages it.
 
 ## Desktop Releases
 
@@ -230,6 +227,4 @@ trunk build --release
 
 The deployable output is `apps/nebulus/dist`. GitHub Actions builds it once and
 deploys that artifact to the `nebulus` Cloudflare Pages project on `master`
-pushes, including release commits. The existing `openipc-rs-station` project
-keeps serving `apps/openipc-station/dist`; neither deployment needs a local
-script.
+pushes, including release commits. Deployment does not require a local script.

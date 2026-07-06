@@ -9,8 +9,6 @@ members = [
     "crates/openipc-uplink",
     "crates/openipc-video",
     "crates/openipc-web",
-    "apps/openipc-station/src-tauri",
-    "plugins/tauri-plugin-openipc-usb",
 ]
 
 [workspace.package]

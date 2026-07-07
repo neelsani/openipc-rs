@@ -491,14 +491,17 @@ fn open_tx_output(config: &TxConfig) -> CliResult<TxOutput> {
         }));
     }
 
+    let mut radio_device = config.radio_device.clone();
+    radio_device.monitor_options.jaguar3_enable_rx =
+        std::env::var_os("DEVOURER_TX_WITH_RX").is_some();
     let opened = if config.mirror {
-        let radios = open_radios(&config.radio_device)?;
+        let radios = open_radios(&radio_device)?;
         if radios.len() == 1 {
             eprintln!("mirror mode requested but only one matching Realtek adapter was opened");
         }
         radios
     } else {
-        vec![open_radio(&config.radio_device)?]
+        vec![open_radio(&radio_device)?]
     };
 
     let mut outputs = Vec::with_capacity(opened.len());

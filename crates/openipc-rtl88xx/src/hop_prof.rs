@@ -59,7 +59,7 @@ impl Drop for HopProfiler {
 fn env_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
-        std::env::var_os("DEVOURER_HOP_PROF").is_some()
+        crate::types::read_env_flag("DEVOURER_HOP_PROF")
             || std::env::var_os("OPENIPC_HOP_PROF").is_some()
     })
 }

@@ -268,9 +268,10 @@ impl ChipInfo {
         sys_cfg: u32,
         sys_cfg2_chip_id: u8,
     ) -> Self {
-        // SYS_CFG2 is authoritative for Jaguar3. RTL8812EU can use the same
-        // USB PID as RTL8812AU, so PID-only dispatch silently selects the wrong
-        // firmware, PHY tables, and RX descriptor layout.
+        // Match devourer's factory dispatch exactly: SYS_CFG2 is authoritative
+        // for Jaguar2/3 because several generations share USB product IDs.
+        // A failed SYS_CFG2 read falls through to the Jaguar1 path rather than
+        // guessing a firmware/descriptor generation from PID.
         let family = if sys_cfg2_chip_id == 0x09 {
             ChipFamily::Rtl8821c
         } else if matches!(sys_cfg2_chip_id, 0x0a | 0x50) {
@@ -281,12 +282,6 @@ impl ChipInfo {
             ChipFamily::Rtl8822c
         } else if product_id == 0x8813 {
             ChipFamily::Rtl8814
-        } else if is_rtl8822b_pid(vendor_id, product_id) {
-            ChipFamily::Rtl8822b
-        } else if is_rtl8822e_pid(vendor_id, product_id) {
-            ChipFamily::Rtl8822e
-        } else if is_rtl8822c_pid(vendor_id, product_id) {
-            ChipFamily::Rtl8822c
         } else if is_rtl8821a_pid(vendor_id, product_id) {
             ChipFamily::Rtl8821
         } else {
@@ -484,6 +479,14 @@ pub struct MonitorOptions {
     pub disable_iqk: bool,
     /// Skip RTL8822E TX gain calibration after IQK.
     pub skip_txgapk: bool,
+    /// Skip Jaguar2's post-IQK TX/RX path reassertion.
+    pub skip_trx_reassert: bool,
+    /// Skip Jaguar2 RFE mux and beamforming initialization.
+    pub skip_rfe_init: bool,
+    /// Skip Jaguar2's WLAN coexistence grant.
+    pub skip_coex: bool,
+    /// Skip application-scheduled Jaguar2 DIG updates.
+    pub skip_dig: bool,
     /// Disable Jaguar3's MAC EDCCA transmit-deferral gate.
     ///
     /// This deliberately does not apply the vendor BB `dis_cca` writes, which
@@ -499,6 +502,39 @@ pub struct MonitorOptions {
     pub rx_path_mask: Option<u8>,
     /// Override the EFUSE-selected RFE front-end type.
     pub rfe_type_override: Option<u8>,
+    /// Include RTL8821C's 32-byte PHY-status block in each RX descriptor.
+    ///
+    /// This also enables the vendor RX-boundary fix that makes the descriptor
+    /// report the block through `drv_info_size`, keeping aggregate parsing
+    /// aligned. Devourer enables this by default.
+    pub phy_status_8821c: bool,
+    /// Optional fixed Jaguar2 initial-gain index (`0..=0x7f`).
+    ///
+    /// `None` uses Devourer's hardware-validated monitor default of `0x40`.
+    pub jaguar2_igi: Option<u8>,
+    /// Keep Jaguar3 RX active during a transmit-capable session.
+    ///
+    /// Receiver applications leave this enabled. TX-only applications disable
+    /// it so unread RX traffic cannot throttle injection, matching `InitWrite`.
+    pub jaguar3_enable_rx: bool,
+    /// Optional Jaguar3 40 MHz TX RF-bandwidth field override (`0..=3`).
+    pub jaguar3_tx_rf_bw: Option<u8>,
+    /// Optional Jaguar3 narrowband DAC-divider override (`0..=7`).
+    pub jaguar3_nb_dac: Option<u8>,
+    /// Optional flat TXAGC index applied during bring-up.
+    pub tx_power_index: Option<u8>,
+    /// Arm the hardware sounding engine after bring-up.
+    pub beamforming_sounder: bool,
+    /// Optional self MAC used by the sounder.
+    pub beamforming_sounder_mac: Option<[u8; 6]>,
+    /// Optional peer whose NDPA/NDP exchange should receive a CSI response.
+    pub beamformee_of: Option<[u8; 6]>,
+    /// Request MU rather than SU beamformee feedback.
+    pub beamformee_mu: bool,
+    /// Optional Jaguar3 peer for closed-loop TX beamforming.
+    pub transmit_beamforming_peer: Option<[u8; 6]>,
+    /// NDPA cadence (`0` disables, `1` marks every frame).
+    pub ndpa_period: u32,
     /// Optional RX CSI frequency mask applied after channel setup.
     pub csi_mask: Option<CsiMaskSpec>,
     /// Optional RX narrow-band notch frequency in kHz.
@@ -518,11 +554,27 @@ impl Default for MonitorOptions {
             force_iqk: false,
             disable_iqk: false,
             skip_txgapk: false,
+            skip_trx_reassert: false,
+            skip_rfe_init: false,
+            skip_coex: false,
+            skip_dig: false,
             disable_cca: false,
             firmware_8814_mode: Firmware8814Mode::Kernel,
             firmware_8814_chunk: None,
             rx_path_mask: None,
             rfe_type_override: None,
+            phy_status_8821c: true,
+            jaguar2_igi: None,
+            jaguar3_enable_rx: true,
+            jaguar3_tx_rf_bw: None,
+            jaguar3_nb_dac: None,
+            tx_power_index: None,
+            beamforming_sounder: false,
+            beamforming_sounder_mac: None,
+            beamformee_of: None,
+            beamformee_mu: false,
+            transmit_beamforming_peer: None,
+            ndpa_period: 0,
             csi_mask: None,
             nbi_frequency_khz: None,
             cw_tone_gain: None,
@@ -540,12 +592,17 @@ impl MonitorOptions {
         #[cfg(not(target_arch = "wasm32"))]
         {
             Self {
-                skip_tx_power: std::env::var_os("DEVOURER_SKIP_TXPWR").is_some(),
-                force_iqk: std::env::var_os("DEVOURER_FORCE_IQK").is_some(),
-                disable_iqk: std::env::var_os("DEVOURER_DISABLE_IQK").is_some()
-                    || std::env::var_os("DEVOURER_SKIP_IQK").is_some(),
-                skip_txgapk: std::env::var_os("DEVOURER_SKIP_TXGAPK").is_some(),
-                disable_cca: std::env::var_os("DEVOURER_DIS_CCA").is_some(),
+                accept_bad_fcs: read_env_flag("DEVOURER_RX_KEEP_CORRUPTED"),
+                skip_tx_power: read_env_flag("DEVOURER_SKIP_TXPWR"),
+                force_iqk: read_env_flag("DEVOURER_FORCE_IQK"),
+                disable_iqk: read_env_flag("DEVOURER_DISABLE_IQK")
+                    || read_env_flag("DEVOURER_SKIP_IQK"),
+                skip_txgapk: read_env_flag("DEVOURER_SKIP_TXGAPK"),
+                skip_trx_reassert: read_env_flag("DEVOURER_SKIP_TRX_REASSERT"),
+                skip_rfe_init: read_env_flag("DEVOURER_SKIP_RFEINIT"),
+                skip_coex: read_env_flag("DEVOURER_SKIP_COEX"),
+                skip_dig: read_env_flag("DEVOURER_SKIP_DIG"),
+                disable_cca: read_env_flag("DEVOURER_DIS_CCA"),
                 firmware_8814_mode: std::env::var("DEVOURER_8814_FWDL")
                     .ok()
                     .and_then(|value| Firmware8814Mode::from_env_value(&value))
@@ -554,14 +611,34 @@ impl MonitorOptions {
                     .filter(|chunk| (64..=4096).contains(chunk)),
                 rx_path_mask: read_env_u8("DEVOURER_RX_PATHS"),
                 rfe_type_override: read_env_u8("DEVOURER_RFE"),
+                phy_status_8821c: !read_env_flag("DEVOURER_8821C_NO_PHYST"),
+                jaguar2_igi: read_env_u8("DEVOURER_IGI").map(|igi| igi & 0x7f),
+                jaguar3_enable_rx: true,
+                jaguar3_tx_rf_bw: read_env_u8("DEVOURER_TX_RF_BW").map(|value| value & 0x03),
+                jaguar3_nb_dac: read_env_u8("DEVOURER_NB_DAC").map(|value| value & 0x07),
+                tx_power_index: read_env_u8("DEVOURER_TX_PWR").map(|value| value & 0x3f),
+                beamforming_sounder: std::env::var_os("DEVOURER_BF_ARM_SOUNDER").is_some(),
+                beamforming_sounder_mac: std::env::var("DEVOURER_BF_ARM_SOUNDER")
+                    .ok()
+                    .and_then(|value| parse_mac_address(&value)),
+                beamformee_of: std::env::var("DEVOURER_BF_ARM_BFEE")
+                    .ok()
+                    .and_then(|value| parse_mac_address(&value)),
+                beamformee_mu: read_env_flag("DEVOURER_BF_ARM_BFEE_MU"),
+                transmit_beamforming_peer: std::env::var("DEVOURER_BF_TXBF")
+                    .ok()
+                    .and_then(|value| parse_mac_address(&value)),
+                ndpa_period: std::env::var("DEVOURER_TX_NDPA")
+                    .ok()
+                    .map(|value| value.parse::<u32>().unwrap_or(1).max(1))
+                    .unwrap_or(0),
                 csi_mask: std::env::var("DEVOURER_RX_CSI_MASK")
                     .ok()
                     .and_then(|value| CsiMaskSpec::parse_mhz(&value)),
                 nbi_frequency_khz: read_env_u32("DEVOURER_RX_NBI")
                     .and_then(|frequency| frequency.checked_mul(1000)),
-                cw_tone_gain: std::env::var_os("DEVOURER_CW_TONE")
-                    .map(|_| read_env_u8("DEVOURER_CW_TONE_GAIN").unwrap_or(0) & 0x1f),
-                ..Self::default()
+                cw_tone_gain: read_env_flag("DEVOURER_CW_TONE")
+                    .then(|| read_env_u8("DEVOURER_CW_TONE_GAIN").unwrap_or(0) & 0x1f),
             }
         }
     }
@@ -592,6 +669,21 @@ impl MonitorOptions {
             ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => true,
         }
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn parse_mac_address(value: &str) -> Option<[u8; 6]> {
+    let mut mac = [0u8; 6];
+    let mut parts = value.split(':');
+    for octet in &mut mac {
+        *octet = u8::from_str_radix(parts.next()?, 16).ok()?;
+    }
+    parts.next().is_none().then_some(mac)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn read_env_flag(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|value| value != "0")
 }
 
 /// Result status from monitor-mode initialization.
@@ -934,6 +1026,7 @@ pub(crate) fn is_rtl8821a_pid(vid: u16, pid: u16) -> bool {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn is_rtl8822c_pid(vid: u16, pid: u16) -> bool {
     matches!(
         ((vid as u32) << 16) | pid as u32,
@@ -941,6 +1034,7 @@ pub(crate) fn is_rtl8822c_pid(vid: u16, pid: u16) -> bool {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn is_rtl8822b_pid(vid: u16, pid: u16) -> bool {
     matches!(
         ((vid as u32) << 16) | pid as u32,
@@ -948,6 +1042,7 @@ pub(crate) fn is_rtl8822b_pid(vid: u16, pid: u16) -> bool {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn is_rtl8822e_pid(vid: u16, pid: u16) -> bool {
     matches!(
         ((vid as u32) << 16) | pid as u32,

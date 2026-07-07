@@ -5,7 +5,7 @@ sidebar_position: 10
 # Devourer Parity Audit
 
 This page tracks the driver-level audit against the current `devourer` tree.
-The goal is practical parity: `openipc-rs` should issue the same class of USB,
+The goal is wire and register parity: `openipc-rs` should issue the same
 firmware, MAC, RF, RX, and TX operations while keeping a Rust-native API and
 using `nusb` instead of libusb directly.
 
@@ -110,7 +110,16 @@ Rust driver now mirrors the new devourer implementation:
   `0bda:b812`, `0bda:b82c`, and `2357:012d` discovery IDs,
 - one-path/two-path selection from `SYS_CFG1` bit 27,
 - 161,240-byte firmware, reserved-page packet-offset handling, IDDMA transfer,
-  checksum/ready polling, and failure cleanup,
+  checksum/ready polling, failure cleanup, and Devourer's two-attempt CPU-reset
+  retry nested inside its four-attempt full pre-init + card OFF/ON recovery loop,
+- exact monitor RCR `0x7000002f`; the Jaguar1-style bits at 11/12/13 are not
+  set because they suppress ambient frames on Jaguar2,
+- RTL8821C PHY-status setup writes `REG_RX_DRVINFO_SZ=4` and the
+  `REG_TRXFF_BNDY+1` low-nibble fix so the descriptor reports the 32-byte block,
+- eight persistent bulk-IN transfers and the same 100 ms false-alarm/DIG step
+  while an RX loop is active,
+- exact 20/40-in-80 and 20-in-40 `DATA_SC` mapping, per-packet power LUT, and
+  32-byte descriptor checksum span,
 - HalMAC queue, protocol, EDCA, WMAC, USB aggregation, H2C, and BB/RF enable
   sequences,
 - generated MAC/PHY/AGC/radio/TX-limit data imported reproducibly from the
@@ -280,7 +289,7 @@ The `3ec1ab1..40e3a2a` runtime APIs are represented directly in Rust:
 - Jaguar2 reads radiotap `DBM_TX_POWER` as a relative per-frame trim and maps
   it to the measured descriptor LUT: `0, -3, -7, -11, +3, +6 dB`.
 - `TxCapabilities` reports stream count, STBC, LDPC, SGI, and maximum width.
-  Descriptor building rejects STBC on a 1T1R adapter.
+  Descriptor building clears STBC on a 1T1R adapter, as Devourer does.
 - `TxStats` tracks submissions and final failures, retaining whether the last
   failure was timeout/backpressure, stall, disconnect, or another error.
 - `RxQualityAccumulator` drains windowed RSSI/SNR/EVM, computes the passive
@@ -299,6 +308,24 @@ The `3ec1ab1..40e3a2a` runtime APIs are represented directly in Rust:
 These are explicit calls and state objects. The crate does not start thermal,
 quality, health, or control threads. Native apps normally schedule them on the
 radio worker; WASM apps schedule the same async calls from their event loop.
+
+## Intentional Transport Differences
+
+The hardware-facing register values, ordering, firmware data, RX parsing, and
+TX descriptor bytes are the parity boundary. Two host-side mechanics remain
+different by design:
+
+- `nusb` replaces libusb. Jaguar1/RTL8814 transfer termination is reproduced
+  with an explicit zero-length packet when the frame ends on a USB max-packet
+  boundary, because `nusb` does not expose libusb's
+  `LIBUSB_TRANSFER_ADD_ZERO_PACKET` flag.
+- Scheduling belongs to the application instead of hidden driver threads.
+  Nebulus, `openipc-cli`, and `wfb_rx` keep eight RX transfers posted and run
+  Jaguar2 DIG every 100 ms. Web apps schedule the same async operation from the
+  browser event loop.
+
+PCIe/VFIO is outside this USB/WebUSB crate. Debug-only dump formatting and
+Devourer's experimental executables are not part of the on-air parity contract.
 
 The final upstream commit also introduces a VFIO PCIe transport for RTL8821CE.
 That is not copied into `openipc-rtl88xx`: this crate is the cross-platform

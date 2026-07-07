@@ -47,6 +47,23 @@ impl RealtekTxDescriptor {
             ChipFamily::Rtl8812 | ChipFamily::Rtl8821 => Self::Jaguar1,
         }
     }
+
+    /// Whether Devourer's USB path requests a terminating zero-length packet.
+    pub const fn uses_terminated_bulk_out(self) -> bool {
+        matches!(self, Self::Jaguar1 | Self::Rtl8814)
+    }
+}
+
+/// Return whether Devourer's `ADD_ZERO_PACKET` flag emits a ZLP for this frame.
+pub const fn bulk_out_requires_zlp(
+    descriptor: RealtekTxDescriptor,
+    transfer_len: usize,
+    max_packet_size: usize,
+) -> bool {
+    descriptor.uses_terminated_bulk_out()
+        && transfer_len != 0
+        && max_packet_size != 0
+        && transfer_len.is_multiple_of(max_packet_size)
 }
 
 /// Options used while building a Realtek USB TX frame.
@@ -62,8 +79,12 @@ pub struct RealtekTxOptions {
     pub tx_mode_default: Option<TxMode>,
     /// RF bandwidth configured on the adapter, used for subchannel placement.
     pub configured_channel_width: ChannelWidth,
+    /// Primary-channel index within a configured 40/80 MHz channel.
+    pub configured_channel_offset: u8,
     /// Mark this frame as an NDPA and disable ordinary sequence/fallback handling.
     pub beamforming_ndpa: bool,
+    /// Force periodic Jaguar3 sounding frames to VHT 2SS MCS0.
+    pub beamforming_ndpa_periodic: bool,
     /// Session-default Jaguar2 `TXPWR_OFSET` step used when radiotap omits one.
     pub jaguar2_packet_power_step: u8,
     /// Probed hardware capabilities used to reject unsupported modulation.
@@ -78,7 +99,9 @@ impl Default for RealtekTxOptions {
             legacy_8812_descriptor: false,
             tx_mode_default: None,
             configured_channel_width: ChannelWidth::Mhz20,
+            configured_channel_offset: 0,
             beamforming_ndpa: false,
+            beamforming_ndpa_periodic: false,
             jaguar2_packet_power_step: 0,
             capabilities: None,
         }
@@ -92,8 +115,6 @@ pub enum RealtekTxError {
     Radiotap(RadiotapError),
     /// 802.11 payload does not fit in the descriptor length field.
     PayloadTooLarge,
-    /// Requested STBC cannot be transmitted by this adapter.
-    UnsupportedStbc { spatial_streams: u8 },
 }
 
 impl std::fmt::Display for RealtekTxError {
@@ -101,10 +122,6 @@ impl std::fmt::Display for RealtekTxError {
         match self {
             Self::Radiotap(err) => write!(f, "{err}"),
             Self::PayloadTooLarge => write!(f, "802.11 TX payload is too large for descriptor"),
-            Self::UnsupportedStbc { spatial_streams } => write!(
-                f,
-                "STBC requires at least two TX chains; adapter exposes {spatial_streams}"
-            ),
         }
     }
 }
@@ -124,10 +141,17 @@ pub fn build_usb_tx_frame(
 ) -> Result<Vec<u8>, RealtekTxError> {
     let rtap_len = radiotap_len(radiotap_packet)?;
     let metadata = openipc_core::parse_radiotap_tx_metadata(radiotap_packet)?;
-    let tx_mode = metadata
+    let mut tx_mode = metadata
         .mode
         .or(options.tx_mode_default)
         .unwrap_or_else(TxMode::legacy_1m);
+    if options.beamforming_ndpa_periodic {
+        // Devourer forces periodic Jaguar3 sounding to a two-stream NDP while
+        // preserving the caller's bandwidth/coding flags.
+        tx_mode.kind = TxModeKind::Vht;
+        tx_mode.vht_nss = 2;
+        tx_mode.vht_mcs = 0;
+    }
     let payload = &radiotap_packet[rtap_len..];
     if payload.len() > u16::MAX as usize {
         return Err(RealtekTxError::PayloadTooLarge);
@@ -137,9 +161,8 @@ pub fn build_usb_tx_frame(
             .capabilities
             .is_some_and(|capabilities| !capabilities.stbc)
     {
-        return Err(RealtekTxError::UnsupportedStbc {
-            spatial_streams: options.capabilities.map_or(0, |caps| caps.spatial_streams),
-        });
+        log::warn!(target: "openipc_rtl88xx::tx", "STBC requested on a 1T1R adapter; clearing STBC so the frame remains decodable");
+        tx_mode.stbc = false;
     }
 
     let mut fixed_rate = tx_mode_fixed_rate(tx_mode);
@@ -168,6 +191,7 @@ pub fn build_usb_tx_frame(
         2,
         tx_mode.bandwidth.realtek_desc_bits() as u32,
     );
+    set_bits_le32(&mut out, 20, 0, 4, data_subchannel(options, tx_mode));
     let use_8814_descriptor_exceptions =
         options.descriptor == RealtekTxDescriptor::Rtl8814 && !options.legacy_8812_descriptor;
 
@@ -252,6 +276,7 @@ fn build_usb_tx_frame_halmac(
         2,
         tx_mode.bandwidth.realtek_desc_bits() as u32,
     );
+    set_bits_le32(&mut out, 20, 0, 4, data_subchannel(options, tx_mode));
     if tx_mode.ldpc {
         set_bits_le32(&mut out, 20, 7, 1, 1);
     }
@@ -261,13 +286,6 @@ fn build_usb_tx_frame_halmac(
             jaguar2_packet_power_step(db)
         });
         set_bits_le32(&mut out, 20, 28, 3, u32::from(step & 0x07));
-    }
-    if options.descriptor == RealtekTxDescriptor::Jaguar3
-        && options.configured_channel_width == ChannelWidth::Mhz80
-        && tx_mode.bandwidth == ChannelBandwidth::Mhz40
-    {
-        // VHT_DATA_SC_40_LOWER_OF_80MHZ.
-        set_bits_le32(&mut out, 20, 0, 4, 10);
     }
     set_bits_le32(&mut out, 32, 15, 1, 1);
     if options.beamforming_ndpa {
@@ -282,6 +300,41 @@ fn build_usb_tx_frame_halmac(
     }
     out[TX_DESC_SIZE_8822C..].copy_from_slice(payload);
     Ok(out)
+}
+
+fn data_subchannel(options: RealtekTxOptions, tx_mode: TxMode) -> u32 {
+    if options.descriptor == RealtekTxDescriptor::Jaguar3 {
+        return u32::from(
+            options.configured_channel_width == ChannelWidth::Mhz80
+                && tx_mode.bandwidth == ChannelBandwidth::Mhz40,
+        ) * 10;
+    }
+    if options.descriptor != RealtekTxDescriptor::Jaguar2 {
+        return 0;
+    }
+    let primary = options.configured_channel_offset;
+    match (options.configured_channel_width, tx_mode.bandwidth) {
+        (ChannelWidth::Mhz80, ChannelBandwidth::Mhz40) => {
+            if primary <= 2 {
+                10
+            } else {
+                9
+            }
+        }
+        (ChannelWidth::Mhz80, ChannelBandwidth::Mhz20) => match primary {
+            1 => 4,
+            2 => 2,
+            3 => 1,
+            4 => 3,
+            _ => 0,
+        },
+        (ChannelWidth::Mhz40, ChannelBandwidth::Mhz20) => match primary {
+            1 => 2,
+            2 => 1,
+            _ => 0,
+        },
+        _ => 0,
+    }
 }
 
 pub(crate) fn build_firmware_page_8822b(chunk: &[u8]) -> (Vec<u8>, usize) {
@@ -417,6 +470,65 @@ fn bits(word: u32, offset: u8, len: u8) -> u32 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn zlp_rule_matches_devourer_add_zero_packet() {
+        assert!(bulk_out_requires_zlp(
+            RealtekTxDescriptor::Jaguar1,
+            1024,
+            512
+        ));
+        assert!(bulk_out_requires_zlp(
+            RealtekTxDescriptor::Rtl8814,
+            512,
+            512
+        ));
+        assert!(!bulk_out_requires_zlp(
+            RealtekTxDescriptor::Jaguar1,
+            513,
+            512
+        ));
+        assert!(!bulk_out_requires_zlp(
+            RealtekTxDescriptor::Jaguar2,
+            512,
+            512
+        ));
+    }
+
+    #[test]
+    fn jaguar2_subchannel_mapping_matches_devourer() {
+        let mut mode = TxMode::ht(0);
+        mode.bandwidth = ChannelBandwidth::Mhz20;
+        let options = RealtekTxOptions {
+            descriptor: RealtekTxDescriptor::Jaguar2,
+            configured_channel_width: ChannelWidth::Mhz80,
+            configured_channel_offset: 3,
+            ..RealtekTxOptions::default()
+        };
+        assert_eq!(data_subchannel(options, mode), 1);
+        mode.bandwidth = ChannelBandwidth::Mhz40;
+        assert_eq!(data_subchannel(options, mode), 9);
+    }
+
+    #[test]
+    fn periodic_jaguar3_sounding_forces_vht_two_stream_mcs0() {
+        let mut packet = openipc_core::build_stream_radiotap(TxMode::ht(4));
+        packet.extend_from_slice(&[0u8; 24]);
+        let frame = build_usb_tx_frame(
+            &packet,
+            RealtekTxOptions {
+                descriptor: RealtekTxDescriptor::Jaguar3,
+                beamforming_ndpa: true,
+                beamforming_ndpa_periodic: true,
+                capabilities: Some(TxCapabilities::for_family(ChipFamily::Rtl8822e)),
+                ..RealtekTxOptions::default()
+            },
+        )
+        .unwrap();
+        // MGN_VHT2SS_MCS0 maps through MRateToHwRate to DESC_RATEVHT2SS_MCS0.
+        assert_eq!(test_bits(read_le32(&frame, 16), 0, 7), 0x36);
+        assert_eq!(test_bits(read_le32(&frame, 12), 22, 2), 1);
+    }
+
     fn radiotap_with_packet_power(db: i8) -> Vec<u8> {
         let present = (1u32 << 2) | (1u32 << 10);
         let mut packet = vec![0, 0, 10, 0];
@@ -442,12 +554,12 @@ mod tests {
     }
 
     #[test]
-    fn one_stream_capability_rejects_stbc() {
+    fn one_stream_capability_clears_stbc() {
         let mut mode = TxMode::ht(0);
         mode.stbc = true;
         let mut packet = openipc_core::build_stream_radiotap(mode);
         packet.extend_from_slice(&[0u8; 24]);
-        let error = build_usb_tx_frame(
+        let frame = build_usb_tx_frame(
             &packet,
             RealtekTxOptions {
                 capabilities: Some(TxCapabilities {
@@ -461,11 +573,8 @@ mod tests {
                 ..RealtekTxOptions::default()
             },
         )
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            RealtekTxError::UnsupportedStbc { spatial_streams: 1 }
-        ));
+        .unwrap();
+        assert_eq!(test_bits(read_le32(&frame, 20), 8, 2), 0);
     }
     use openipc_core::ieee80211::build_wfb_header_with_frame_type;
     use openipc_core::radiotap::{

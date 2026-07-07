@@ -322,8 +322,7 @@ impl RealtekDevice {
         self.init_rfk_jaguar3_async(chip).await?;
         self.run_dack_jaguar3_with_retry_async(chip).await?;
         self.bf_init_8822c_async().await?;
-        self.monitor_rx_cfg_8822c_async(options.accept_bad_fcs)
-            .await?;
+        self.monitor_rx_cfg_8822c_async().await?;
         self.enable_tx_path_8822c_async().await?;
         self.set_channel_bwmode_8822c_async(
             chip,
@@ -336,7 +335,9 @@ impl RealtekDevice {
             self.run_iqk_jaguar3_with_retry_async(chip, radio, options.skip_txgapk)
                 .await?;
         }
-        self.enable_rx_path_jaguar3_async().await?;
+        if options.jaguar3_enable_rx {
+            self.enable_rx_path_jaguar3_async().await?;
+        }
         if chip.family == ChipFamily::Rtl8822e {
             self.dpk_force_bypass_8822e_async().await?;
             self.config_rfe_8822e_async(rfe_type, radio.channel).await?;
@@ -364,6 +365,9 @@ impl RealtekDevice {
         let _ = self.fw_set_pwr_mode_active_8822c_async().await;
         let _ = self.fw_coex_query_bt_info_8822c_async().await;
         let _ = self.fw_coex_tdma_off_8822c_async().await;
+        if !options.jaguar3_enable_rx {
+            self.prepare_transmit_only_async().await?;
+        }
 
         Ok(InitReport {
             chip,
@@ -1025,7 +1029,14 @@ impl RealtekDevice {
         } else if plan.is_40mhz {
             self.set_bb_reg_async(0x1a00, BIT4, u32::from(primary == 1))
                 .await?;
-            self.set_bb_reg_async(0x09b0, 0x000f, 0x05).await?;
+            let tx_rf_bw = self.jaguar3_tx_rf_bw.load(Ordering::Acquire);
+            let rf_bw = if tx_rf_bw == u8::MAX {
+                0x05
+            } else {
+                (tx_rf_bw & 0x03) | 0x04
+            };
+            self.set_bb_reg_async(0x09b0, 0x000f, u32::from(rf_bw))
+                .await?;
             self.set_bb_reg_async(0x09b0, 0xff00, u32::from(primary | (primary << 4)))
                 .await?;
             self.set_bb_reg_async(0x0cbc, BIT21, 1).await?;
@@ -1183,11 +1194,15 @@ impl RealtekDevice {
         channel: u8,
     ) -> Result<(), DriverError> {
         self.invalidate_jaguar3_fast_cache()?;
-        let (small_bw, dac, adc, dfir) = match width {
+        let (small_bw, mut dac, adc, dfir) = match width {
             ChannelWidth::Mhz10 => (0x2, 0x6, 0x5, 0x2ab),
             ChannelWidth::Mhz5 => (0x1, 0x4, 0x4, 0x2ab),
             _ => (0x0, 0x7, 0x6, 0x19b),
         };
+        let dac_override = self.jaguar3_nb_dac.load(Ordering::Acquire);
+        if dac_override != u8::MAX {
+            dac = u32::from(dac_override & 0x07);
+        }
         let is_8822e = chip.family == ChipFamily::Rtl8822e;
         self.set_bb_reg_async(0x0810, 0x3ff0, dfir).await?;
         self.set_bb_reg_async(0x09b0, if is_8822e { 0xffc0 } else { 0x00c0 }, small_bw)
@@ -1242,13 +1257,11 @@ impl RealtekDevice {
         Ok(())
     }
 
-    async fn monitor_rx_cfg_8822c_async(&self, accept_bad_fcs: bool) -> Result<(), DriverError> {
+    async fn monitor_rx_cfg_8822c_async(&self) -> Result<(), DriverError> {
         self.write_u16_async(REG_CR, 0x06ff).await?;
-        let mut rcr = 0xf410_400f | BIT28;
-        if !accept_bad_fcs {
-            rcr &= !(RCR_ACRC32 | RCR_AICV);
-        }
-        self.write_u32_async(REG_RCR, rcr).await?;
+        // Devourer's fixed Jaguar3 monitor recipe always forwards CRC/ICV
+        // marked frames and appends PHY status.
+        self.write_u32_async(REG_RCR, 0xf410_400f | BIT28).await?;
         self.write_u8_async(REG_RX_DRVINFO_SZ, 0x04).await?;
         self.write_u16_async(REG_RXFLTMAP0, 0xffff).await?;
         self.write_u16_async(REG_RXFLTMAP1, 0xffff).await?;
@@ -1397,10 +1410,12 @@ impl RealtekDevice {
             .tx_power_control
             .lock()
             .map_err(|_| DriverError::DriverStatePoisoned)?;
+        let skip_path_b =
+            chip.family == ChipFamily::Rtl8822e && self.jaguar3_rx_wanted.load(Ordering::Acquire);
         if let Some(flat) = control.flat_index {
             let index = self.controlled_tx_power_index(i16::from(flat), chip.family)?;
             return self
-                .set_tx_power_ref_jaguar3_async(index, index, true, false)
+                .set_tx_power_ref_jaguar3_async(index, index, true, skip_path_b)
                 .await;
         }
         if chip.family == ChipFamily::Rtl8822c {
@@ -1416,7 +1431,7 @@ impl RealtekDevice {
         // desensitizes the receiver. Keep the table-programmed value for this
         // one field during combined TX/RX bring-up; explicit TX overrides still
         // program both RF paths.
-        self.apply_power_by_rate_8822e_async(channel, base_a, base_b, true)
+        self.apply_power_by_rate_8822e_async(channel, base_a, base_b, skip_path_b)
             .await
     }
 

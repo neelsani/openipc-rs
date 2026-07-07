@@ -26,6 +26,9 @@ lists.
   HalMAC firmware download, MAC/USB setup, EFUSE/RFE handling, BB/AGC/RF
   tables, LCK/IQK/DIG, 24-byte RX descriptors, and 48-byte TX descriptors with
   the chip-specific 32-byte checksum span.
+- Jaguar2 performs Devourer's two-attempt CPU-reset firmware retry inside a
+  four-attempt complete pre-init, card OFF/ON, and system-configuration retry,
+  matching its warm-chip recovery boundary.
 - RTL8821C-specific firmware, one-path PHY/RF tables, power/FIFO/channel
   sequences, WLAN/BT antenna grant, LOK/TXK/RXK IQK, calibrated per-rate TXAGC,
   and CW carrier.
@@ -53,8 +56,8 @@ lists.
   reporting, saturation flags, thermal status, and representative index
   readback. Jaguar2 also maps radiotap `DBM_TX_POWER` to its measured
   per-packet `TXPWR_OFSET` descriptor LUT.
-- TX capability validation rejects STBC on 1T1R RTL8821/RTL8821C adapters
-  instead of transmitting an undecodable descriptor.
+- TX capability validation clears STBC on 1T1R RTL8821/RTL8821C adapters,
+  matching Devourer's behavior instead of transmitting an undecodable descriptor.
 - Driver-side TX submission statistics distinguish timeout/backpressure from
   stalls, disconnects, and other transport errors.
 - Explicit Jaguar1/2/3 SU/MU beamformee and sounding-engine controls, NDPA TX
@@ -114,7 +117,7 @@ fn receive_one_transfer() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     let mut bulk_in = device.bulk_in_endpoint()?;
-    while bulk_in.pending() < 4 {
+    while bulk_in.pending() < 8 {
         bulk_in.submit(bulk_in.allocate(32 * 1024));
     }
 
@@ -216,22 +219,38 @@ Native builds also understand devourer-compatible environment variables:
 DEVOURER_VID / DEVOURER_PID       target a specific USB adapter
 DEVOURER_SKIP_RESET               skip USB reset before claiming the adapter
 DEVOURER_TX_EP                    force the bulk-OUT endpoint
+DEVOURER_RX_KEEP_CORRUPTED        retain frames marked with CRC/ICV errors
+DEVOURER_RX_URBS=<n>              set the persistent RX queue depth (default 8)
 DEVOURER_SKIP_TXPWR               skip TX-power programming during channel set
 DEVOURER_FORCE_IQK                run IQK even where it is normally opt-in
 DEVOURER_DISABLE_IQK              suppress IQK
 DEVOURER_SKIP_IQK                 suppress IQK (newer devourer spelling)
 DEVOURER_SKIP_TXGAPK              skip RTL8822E TX gain calibration
+DEVOURER_SKIP_TRX_REASSERT        skip Jaguar2 post-IQK TRX-path reassertion
+DEVOURER_SKIP_RFEINIT             skip Jaguar2 RFE/beamforming initialization
+DEVOURER_SKIP_COEX                skip Jaguar2 WLAN coexistence grant
+DEVOURER_SKIP_DIG                 disable Jaguar2 100 ms DIG maintenance
+DEVOURER_8821C_NO_PHYST           disable RTL8821C RX PHY-status blocks
+DEVOURER_IGI=<n>                  override Jaguar2's initial gain index
 DEVOURER_DIS_CCA                  disable only Jaguar3's safe MAC EDCCA gate
 DEVOURER_8814_FWDL=kernel|rtw88   select RTL8814 firmware download path
 DEVOURER_8814_FWDL_CHUNK=<n>      override RTL8814 kernel-path chunk size
 DEVOURER_RX_PATHS=<mask>          select Jaguar1 RX chains, for example 0x11 or 0xff
 DEVOURER_RFE=<n>                  override the EFUSE-selected RFE type
+DEVOURER_TX_PWR=<n>               force a flat Jaguar2 TXAGC index
+DEVOURER_TX_RF_BW=<n>             override Jaguar3's 40 MHz TX RF-BW field
+DEVOURER_NB_DAC=<n>               override Jaguar3's narrowband DAC divider
 DEVOURER_RX_CSI_MASK=<range>[/w]  mask an MHz range, for example 5230-5250/7
 DEVOURER_RX_NBI=<mhz>             place one RX narrow-band interference notch
 DEVOURER_TX_TIMEOUT_MS=<n>        set the native bulk-OUT timeout
 DEVOURER_TX_LEGACY_8812_DESC      use the older 8812 descriptor shape on RTL8814 TX
 DEVOURER_CW_TONE                  arm RF-test CW mode during initialization
 DEVOURER_CW_TONE_GAIN=0..31       set the CW RF gain index (default 0)
+DEVOURER_BF_ARM_SOUNDER[=<mac>]   arm the hardware sounding engine
+DEVOURER_BF_ARM_BFEE=<mac>        arm a beamformee for one peer
+DEVOURER_BF_ARM_BFEE_MU           request MU beamformee feedback
+DEVOURER_BF_TXBF=<mac>            arm Jaguar3 closed-loop TX beamforming
+DEVOURER_TX_NDPA=<n>              mark sounding frames at the selected cadence
 ```
 
 ## Native And WebUSB
@@ -242,12 +261,13 @@ directly. Browser applications go through `openipc-web`, where JavaScript first
 gets a user-approved `UsbDevice` and Rust/WASM uses the WebUSB-capable `nusb`
 backend.
 
-Jaguar2/3 note: the Rust driver tracks devourer's RTL8812BU/CU/EU and
+Jaguar2/3 note: the Rust driver tracks Devourer's RTL8812BU/CU/EU and
 RTL8822BU/CU/EU cold-start paths. RTL8822E support includes the chip-specific firmware and
 tables, V1 EFUSE reader, PA bias, DACK/IQK/TXGAPK, RFE and channel finalization,
-per-path TXAGC, and thermal tracking. The Rust port still needs cold-plug
-register traces and sustained on-air testing before a particular adapter can be
-called validated.
+per-path TXAGC, and thermal tracking. Register sequences and descriptor behavior
+are kept aligned with the hardware-tested Devourer source. A particular adapter
+model is still only considered validated after cold-plug and sustained on-air
+testing with that physical board revision.
 
 One naming caveat: the native `*_async` methods are async-shaped compatibility
 APIs around blocking `nusb` calls (`wait` and blocking bulk transfers). They are

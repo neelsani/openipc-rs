@@ -94,7 +94,9 @@ Platform-specific filters are derived from this table:
 - firmware download for supported Jaguar-family chips,
 - Jaguar2 RTL8812BU/RTL8822BU HalMAC bring-up: firmware reserved-page/DDMA,
   MAC/USB queues, EFUSE/RFE, conditional BB/AGC/RF tables, LCK, software IQK,
-  DIG, regulatory TX power, and the 8822B-specific TX checksum,
+  100 ms DIG, regulatory TX power, the 8822B-specific TX checksum, and the
+  nested two-attempt CPU-reset and four-attempt full power-cycle firmware
+  recovery used by Devourer,
 - RTL8811CU/RTL8821CU one-path Jaguar2 bring-up with its own firmware,
   power/FIFO tables, RF/channel setup, WLAN antenna grant, regulatory TXAGC,
   descriptor parsing, and CW support,
@@ -227,19 +229,31 @@ Native builds additionally read devourer-compatible environment variables:
 | `DEVOURER_VID` / `DEVOURER_PID`    | Target a specific USB adapter.                         |
 | `DEVOURER_SKIP_RESET`              | Skip USB reset before claiming the adapter.            |
 | `DEVOURER_TX_EP`                   | Force a bulk-OUT endpoint.                             |
+| `DEVOURER_RX_KEEP_CORRUPTED`       | Retain frames marked with CRC/ICV errors.              |
+| `DEVOURER_RX_URBS=<n>`             | Set persistent RX transfers; default is eight.         |
 | `DEVOURER_SKIP_TXPWR`              | Skip TX-power table programming during channel set.    |
 | `DEVOURER_FORCE_IQK`               | Run IQK where it is otherwise opt-in, notably RTL8814. |
 | `DEVOURER_DISABLE_IQK`             | Suppress IQK.                                          |
 | `DEVOURER_SKIP_IQK`                | Suppress IQK using newer devourer naming.              |
 | `DEVOURER_SKIP_TXGAPK`             | Skip RTL8822E TX gain calibration.                     |
+| `DEVOURER_SKIP_TRX_REASSERT`       | Skip Jaguar2 post-IQK TRX reassertion.                 |
+| `DEVOURER_SKIP_RFEINIT`            | Skip Jaguar2 RFE/beamforming initialization.           |
+| `DEVOURER_SKIP_COEX`               | Skip Jaguar2's WLAN coexistence grant.                 |
+| `DEVOURER_SKIP_DIG`                | Disable Jaguar2's 100 ms DIG step.                     |
+| `DEVOURER_8821C_NO_PHYST`          | Disable RTL8821C's RX PHY-status block.                |
+| `DEVOURER_IGI=<n>`                 | Override Jaguar2's initial gain index.                 |
 | `DEVOURER_8814_FWDL=kernel\|rtw88` | Select the RTL8814 firmware path.                      |
 | `DEVOURER_8814_FWDL_CHUNK=<n>`     | Override RTL8814 kernel-path chunk size.               |
 | `DEVOURER_RX_PATHS=<mask>`         | Select Jaguar1 RX chains after channel setup and IQK.  |
 | `DEVOURER_RFE=<n>`                 | Override the EFUSE-selected RFE front-end type.        |
+| `DEVOURER_TX_PWR=<n>`              | Force a flat Jaguar2 TXAGC index.                      |
+| `DEVOURER_TX_RF_BW=<n>`            | Override Jaguar3's 40 MHz TX RF-BW field.              |
+| `DEVOURER_NB_DAC=<n>`              | Override Jaguar3's narrowband DAC divider.             |
 | `DEVOURER_RX_CSI_MASK=<range>[/w]` | Mask an inclusive MHz range; Jaguar3 weight is `0..7`. |
 | `DEVOURER_RX_NBI=<mhz>`            | Place one receive-side NBI notch.                      |
 | `DEVOURER_TX_TIMEOUT_MS=<n>`       | Set native bulk-OUT timeout before recovery.           |
 | `DEVOURER_TX_LEGACY_8812_DESC`     | Use the older 8812 TX descriptor shape on RTL8814.     |
+| `DEVOURER_TX_NDPA=<n>`             | Select the beamforming sounding cadence.               |
 
 The browser API exposes the same choices with
 `WebUsbRealtekDevice.fromWebUsbDeviceWithOptions`,

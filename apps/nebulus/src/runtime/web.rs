@@ -536,7 +536,7 @@ mod worker {
     };
 
     const VIDEO_ROUTE: PayloadRouteId = PayloadRouteId::new(1);
-    const RX_TRANSFERS_IN_FLIGHT: usize = 4;
+    const RX_TRANSFERS_IN_FLIGHT: usize = 8;
     const TX_TRANSFERS_IN_FLIGHT: usize = 8;
     const MAX_BROWSER_RECORDING_BYTES: usize = 512 * 1024 * 1024;
 
@@ -800,6 +800,7 @@ mod worker {
                 tx_options: RealtekTxOptions {
                     current_channel: request.channel,
                     configured_channel_width: channel_width(request.channel_width_mhz)?,
+                    configured_channel_offset: request.channel_offset,
                     descriptor: RealtekTxDescriptor::for_chip_family(chip),
                     ..RealtekTxOptions::default()
                 },
@@ -907,21 +908,27 @@ mod worker {
     }
 
     struct WebTxQueue {
+        device: Rc<RealtekDevice>,
+        chip: ChipFamily,
         endpoint: nusb::Endpoint<Bulk, Out>,
         stalled: bool,
         last_error: Option<String>,
     }
 
     impl WebTxQueue {
-        async fn new(device: &RealtekDevice) -> Result<Self, String> {
+        async fn new(device: Rc<RealtekDevice>, chip: ChipFamily) -> Result<Self, String> {
             let mut endpoint = device
                 .open_bulk_out_endpoint()
                 .map_err(|error| error.to_string())?;
-            endpoint
-                .clear_halt()
-                .await
-                .map_err(|error| format!("clear bulk-OUT halt failed: {error}"))?;
+            if RealtekTxDescriptor::for_chip_family(chip).uses_terminated_bulk_out() {
+                endpoint
+                    .clear_halt()
+                    .await
+                    .map_err(|error| format!("clear Jaguar1 bulk-OUT halt failed: {error}"))?;
+            }
             Ok(Self {
+                device,
+                chip,
                 endpoint,
                 stalled: false,
                 last_error: None,
@@ -930,12 +937,25 @@ mod worker {
 
         fn enqueue(&mut self, frame: Vec<u8>, options: RealtekTxOptions) -> Result<bool, String> {
             self.drain_ready();
-            if self.stalled || self.endpoint.pending() >= TX_TRANSFERS_IN_FLIGHT {
-                return Ok(false);
-            }
+            let options = self
+                .device
+                .apply_persistent_tx_options(self.chip, options)
+                .map_err(|error| error.to_string())?;
             let usb_frame =
                 build_usb_tx_frame(&frame, options).map_err(|error| error.to_string())?;
+            let terminate = options.descriptor.uses_terminated_bulk_out()
+                && !usb_frame.is_empty()
+                && usb_frame
+                    .len()
+                    .is_multiple_of(self.endpoint.max_packet_size());
+            let required = if terminate { 2 } else { 1 };
+            if self.stalled || self.endpoint.pending() + required > TX_TRANSFERS_IN_FLIGHT {
+                return Ok(false);
+            }
             self.endpoint.submit(Buffer::from(usb_frame));
+            if terminate {
+                self.endpoint.submit(Buffer::new(0));
+            }
             Ok(true)
         }
 
@@ -945,7 +965,7 @@ mod worker {
                     break;
                 };
                 if let Err(error) = completion.status {
-                    self.stalled |= error == TransferError::Stall;
+                    self.stalled = true;
                     self.last_error = Some(format!("WebUSB bulk OUT failed: {error}"));
                     if self.stalled {
                         break;
@@ -974,7 +994,7 @@ mod worker {
 
     impl WebMaintenance {
         fn start(device: Rc<RealtekDevice>, chip: ChipFamily) -> Option<Self> {
-            if !chip.is_jaguar3() {
+            if !chip.is_jaguar2() && !chip.is_jaguar3() {
                 return None;
             }
             let (stop, stop_receiver) = oneshot::channel();
@@ -983,14 +1003,18 @@ mod worker {
                 let mut stop_receiver = Box::pin(stop_receiver);
                 let mut power_tracking = Jaguar3PowerTrackingState::default();
                 loop {
-                    let timer = Box::pin(sleep_ms(2_000));
+                    let timer = Box::pin(sleep_ms(if chip.is_jaguar2() { 100 } else { 2_000 }));
                     match select(timer, stop_receiver).await {
                         Either::Left(((), remaining_stop)) => {
                             stop_receiver = remaining_stop;
-                            let _ = device.run_jaguar3_coex_keepalive_async().await;
-                            let _ = device
-                                .tick_jaguar3_power_tracking_async(&mut power_tracking)
-                                .await;
+                            if chip.is_jaguar2() && device.jaguar2_dig_enabled() {
+                                let _ = device.run_jaguar2_dig_step_async().await;
+                            } else if chip.is_jaguar3() {
+                                let _ = device.run_jaguar3_coex_keepalive_async().await;
+                                let _ = device
+                                    .tick_jaguar3_power_tracking_async(&mut power_tracking)
+                                    .await;
+                            }
                         }
                         Either::Right((_stop, _timer)) => break,
                     }
@@ -1244,7 +1268,7 @@ mod worker {
             .transpose()?;
         let vtx_controller = Rc::new(futures_util::lock::Mutex::new(None));
         let mut tx_queue = if uplink.is_some() {
-            Some(WebTxQueue::new(&device).await?)
+            Some(WebTxQueue::new(Rc::clone(&device), chip).await?)
         } else {
             None
         };

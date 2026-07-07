@@ -1077,7 +1077,7 @@ fn tx_power_by_rate_enabled() -> bool {
     #[cfg(not(target_arch = "wasm32"))]
     {
         std::env::var_os("OPENIPC_RS_ENABLE_TXPWR_BY_RATE").is_some()
-            || std::env::var_os("DEVOURER_ENABLE_TXPWR_BY_RATE").is_some()
+            || crate::types::read_env_flag("DEVOURER_ENABLE_TXPWR_BY_RATE")
     }
     #[cfg(target_arch = "wasm32")]
     {

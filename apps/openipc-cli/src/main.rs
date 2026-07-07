@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::net::{SocketAddr, UdpSocket};
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nusb::transfer::{Bulk, Out};
 use openipc_core::channel::DEFAULT_LINK_ID;
@@ -225,7 +225,11 @@ impl RecvConfig {
             ChannelId::from_link_port(DEFAULT_LINK_ID, openipc_core::RadioPort::Video);
         let mut minimum_epoch = 0u64;
         let mut max_transfers = None;
-        let mut rx_urbs = 4usize;
+        let mut rx_urbs = env::var("DEVOURER_RX_URBS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(8usize)
+            .max(1);
         let mut initialize_hardware = true;
         let mut driver_options = DriverOptions::from_env();
         let mut monitor_options = MonitorOptions::from_env();
@@ -489,6 +493,7 @@ impl RecvConfig {
             tx_options: RealtekTxOptions {
                 current_channel: self.radio.channel,
                 configured_channel_width: self.radio.channel_width,
+                configured_channel_offset: self.radio.channel_offset,
                 descriptor: openipc_rtl88xx::RealtekTxDescriptor::for_chip_family(chip_family),
                 capabilities: Some(openipc_rtl88xx::TxCapabilities::for_family(chip_family)),
                 legacy_8812_descriptor: self.tx_legacy_8812_descriptor,
@@ -554,6 +559,8 @@ fn run_recv(config: RecvConfig) -> Result<(), Box<dyn std::error::Error>> {
         let buffer = ep_in.allocate(DEFAULT_RX_TRANSFER_SIZE);
         ep_in.submit(buffer);
     }
+    let jaguar2_dig = chip.family.is_jaguar2() && device.jaguar2_dig_enabled();
+    let mut last_dig = Instant::now();
 
     loop {
         if let Some(max) = config.max_transfers {
@@ -562,10 +569,24 @@ fn run_recv(config: RecvConfig) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        let Some(completion) = ep_in.wait_next_complete(Duration::from_millis(1000)) else {
+        let wait_timeout = if jaguar2_dig {
+            Duration::from_millis(100)
+        } else {
+            Duration::from_millis(1000)
+        };
+        let completion = ep_in.wait_next_complete(wait_timeout);
+        if jaguar2_dig && last_dig.elapsed() >= Duration::from_millis(100) {
+            if let Err(err) = device.run_jaguar2_dig_step() {
+                eprintln!("Jaguar2 DIG step failed: {err}");
+            }
+            last_dig = Instant::now();
+        }
+        let Some(completion) = completion else {
             let now_ms = unix_time_ms();
             tick_adaptive(&mut adaptive, &device, ep_out.as_mut(), now_ms, &mut stats);
-            eprintln!("{}", stats.summary());
+            if !jaguar2_dig {
+                eprintln!("{}", stats.summary());
+            }
             continue;
         };
 

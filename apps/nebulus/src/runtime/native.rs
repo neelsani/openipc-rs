@@ -665,7 +665,7 @@ mod worker {
     }
 
     const VIDEO_ROUTE: PayloadRouteId = PayloadRouteId::new(1);
-    const RX_TRANSFERS_IN_FLIGHT: usize = 4;
+    const RX_TRANSFERS_IN_FLIGHT: usize = 8;
     const CAPTURE_QUEUE_PER_ADAPTER: usize = 2;
 
     struct CaptureEvent {
@@ -982,7 +982,7 @@ mod worker {
         },
     }
 
-    /// Keeps auxiliary USB OUT and Jaguar3 register work off the RX thread.
+    /// Keeps auxiliary USB OUT and radio maintenance off the RX thread.
     struct RadioWorker {
         sender: Option<SyncSender<RadioCommand>>,
         worker: Option<JoinHandle<()>>,
@@ -990,7 +990,8 @@ mod worker {
 
     impl RadioWorker {
         const QUEUE_CAPACITY: usize = 64;
-        const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(2);
+        const JAGUAR2_DIG_INTERVAL: Duration = Duration::from_millis(100);
+        const JAGUAR3_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(2);
 
         fn start(
             device: Arc<RealtekDevice>,
@@ -999,7 +1000,7 @@ mod worker {
             events: &super::EventQueue,
             context: &eframe::egui::Context,
         ) -> Result<Option<Self>, String> {
-            if !transmit && !chip.is_jaguar3() {
+            if !transmit && !chip.is_jaguar2() && !chip.is_jaguar3() {
                 return Ok(None);
             }
             let mut endpoint = transmit
@@ -1019,11 +1020,14 @@ mod worker {
                     let mut last_maintenance = Instant::now();
                     let mut last_tx_error_log = None;
                     loop {
-                        let wait = if chip.is_jaguar3() {
-                            Self::MAINTENANCE_INTERVAL.saturating_sub(last_maintenance.elapsed())
+                        let interval = if chip.is_jaguar2() {
+                            Self::JAGUAR2_DIG_INTERVAL
+                        } else if chip.is_jaguar3() {
+                            Self::JAGUAR3_MAINTENANCE_INTERVAL
                         } else {
                             Duration::from_secs(60)
                         };
+                        let wait = interval.saturating_sub(last_maintenance.elapsed());
                         match receiver.recv_timeout(wait) {
                             Ok(RadioCommand::Transmit { frame, options }) => {
                                 let result = endpoint.as_mut().map_or_else(
@@ -1048,12 +1052,14 @@ mod worker {
                             Err(mpsc::RecvTimeoutError::Timeout) => {}
                             Err(mpsc::RecvTimeoutError::Disconnected) => break,
                         }
-                        if chip.is_jaguar3()
-                            && last_maintenance.elapsed() >= Self::MAINTENANCE_INTERVAL
-                        {
+                        if last_maintenance.elapsed() >= interval {
                             last_maintenance = Instant::now();
-                            let _ = device.run_jaguar3_coex_keepalive();
-                            let _ = device.tick_jaguar3_power_tracking(&mut power_tracking);
+                            if chip.is_jaguar2() && device.jaguar2_dig_enabled() {
+                                let _ = device.run_jaguar2_dig_step();
+                            } else if chip.is_jaguar3() {
+                                let _ = device.run_jaguar3_coex_keepalive();
+                                let _ = device.tick_jaguar3_power_tracking(&mut power_tracking);
+                            }
                         }
                     }
                 })
@@ -1123,6 +1129,7 @@ mod worker {
                 tx_options: RealtekTxOptions {
                     current_channel: request.channel,
                     configured_channel_width: channel_width(request.channel_width_mhz)?,
+                    configured_channel_offset: request.channel_offset,
                     descriptor: RealtekTxDescriptor::for_chip_family(chip),
                     capabilities: Some(openipc_rtl88xx::TxCapabilities::for_family(chip)),
                     ..RealtekTxOptions::default()

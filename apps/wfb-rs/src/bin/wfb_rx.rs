@@ -52,7 +52,11 @@ impl RxConfig {
             client: "127.0.0.1:5600".parse()?,
             log_interval: Duration::from_millis(1000),
             max_transfers: None,
-            rx_urbs: 4,
+            rx_urbs: std::env::var("DEVOURER_RX_URBS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(8usize)
+                .max(1),
             radio_device: RadioDeviceConfig::default(),
         };
 
@@ -150,6 +154,8 @@ fn run_rx(config: RxConfig) -> CliResult<()> {
         let buffer = ep_in.allocate(DEFAULT_RX_TRANSFER_SIZE);
         ep_in.submit(buffer);
     }
+    let jaguar2_dig = opened.chip_family.is_jaguar2() && opened.device.jaguar2_dig_enabled();
+    let mut last_dig = Instant::now();
 
     loop {
         if let Some(max) = config.max_transfers {
@@ -158,8 +164,22 @@ fn run_rx(config: RxConfig) -> CliResult<()> {
             }
         }
 
-        let Some(completion) = ep_in.wait_next_complete(Duration::from_millis(1000)) else {
-            log_stats(&stats);
+        let wait_timeout = if jaguar2_dig {
+            Duration::from_millis(100)
+        } else {
+            Duration::from_millis(1000)
+        };
+        let completion = ep_in.wait_next_complete(wait_timeout);
+        if jaguar2_dig && last_dig.elapsed() >= Duration::from_millis(100) {
+            if let Err(err) = opened.device.run_jaguar2_dig_step() {
+                eprintln!("Jaguar2 DIG step failed: {err}");
+            }
+            last_dig = Instant::now();
+        }
+        let Some(completion) = completion else {
+            if !jaguar2_dig {
+                log_stats(&stats);
+            }
             continue;
         };
         let actual_len = completion.actual_len;

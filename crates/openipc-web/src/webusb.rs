@@ -1,6 +1,8 @@
 #[cfg(target_arch = "wasm32")]
 use js_sys::{Array, Int8Array, Object, Reflect, Uint32Array, Uint8Array};
 #[cfg(target_arch = "wasm32")]
+use openipc_core::try_parse_tx_mode_str;
+#[cfg(target_arch = "wasm32")]
 use openipc_rtl88xx::is_supported_id;
 use openipc_rtl88xx::SUPPORTED_DEVICES;
 #[cfg(target_arch = "wasm32")]
@@ -1034,6 +1036,41 @@ impl WebUsbRealtekDevice {
     ) -> Result<(), JsValue> {
         self.driver
             .set_tx_power_override_async(current_channel, power)
+            .await
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = setTxMode)]
+    /// Set the fallback TX mode used when a packet has no radiotap rate.
+    pub fn set_tx_mode(&self, specification: &str) -> Result<(), JsValue> {
+        let mode = try_parse_tx_mode_str(specification)
+            .ok_or_else(|| JsValue::from_str("invalid Devourer TX mode specification"))?;
+        self.driver.set_tx_mode(mode).map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = clearTxMode)]
+    /// Clear the fallback TX mode.
+    pub fn clear_tx_mode(&self) -> Result<(), JsValue> {
+        self.driver.clear_tx_mode().map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = setTxPacketPowerStep)]
+    /// Set Jaguar2's default TXPWR_OFSET descriptor step.
+    pub fn set_tx_packet_power_step(&self, step: u8) {
+        self.driver.set_tx_packet_power_step(step);
+    }
+
+    #[wasm_bindgen(js_name = setNdpaPeriod)]
+    /// Set hardware sounding cadence; zero disables sounding marks.
+    pub fn set_ndpa_period(&self, period: u32) {
+        self.driver.set_ndpa_period(period);
+    }
+
+    #[wasm_bindgen(js_name = runJaguar2DigStep)]
+    /// Run one Jaguar2 dynamic-initial-gain update.
+    pub async fn run_jaguar2_dig_step(&self) -> Result<u32, JsValue> {
+        self.driver
+            .run_jaguar2_dig_step_async()
             .await
             .map_err(driver_error)
     }

@@ -1,5 +1,6 @@
+use crate::tx::RealtekTxOptions;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::tx::{build_usb_tx_frame, RealtekTxDescriptor, RealtekTxOptions};
+use crate::tx::{build_usb_tx_frame, RealtekTxDescriptor};
 use nusb::descriptors::TransferType;
 #[cfg(not(target_arch = "wasm32"))]
 use nusb::transfer::Buffer;
@@ -7,7 +8,7 @@ use nusb::transfer::{Bulk, In, Out};
 #[cfg(not(target_arch = "wasm32"))]
 use nusb::MaybeFuture;
 use openipc_core::realtek::{parse_rx_aggregate_with_kind, RealtekRxPacket, RxDescriptorKind};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use crate::async_continuous_tx::ContinuousTxState;
@@ -70,6 +71,16 @@ pub struct RealtekDevice {
     pub(crate) beamforming_apply_on: AtomicBool,
     pub(crate) beamforming_report_count: AtomicU32,
     pub(crate) firmware_boot_status: Mutex<crate::FirmwareBootStatus>,
+    pub(crate) tx_mode_default: Mutex<Option<openipc_core::radiotap::TxMode>>,
+    pub(crate) tx_packet_power_step: AtomicU8,
+    pub(crate) ndpa_period: AtomicU32,
+    pub(crate) ndpa_counter: AtomicU64,
+    pub(crate) jaguar3_tx_rf_bw: AtomicU8,
+    pub(crate) jaguar3_nb_dac: AtomicU8,
+    pub(crate) jaguar2_dig_enabled: AtomicBool,
+    pub(crate) tx_endpoint_prepared: AtomicBool,
+    pub(crate) tx_wedged: AtomicBool,
+    pub(crate) jaguar3_rx_wanted: AtomicBool,
     #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
     pub(crate) _usb_lock: Option<UsbDeviceLock>,
 }
@@ -344,6 +355,16 @@ impl RealtekDevice {
             beamforming_apply_on: AtomicBool::new(false),
             beamforming_report_count: AtomicU32::new(0),
             firmware_boot_status: Mutex::new(crate::FirmwareBootStatus::default()),
+            tx_mode_default: Mutex::new(None),
+            tx_packet_power_step: AtomicU8::new(0),
+            ndpa_period: AtomicU32::new(0),
+            ndpa_counter: AtomicU64::new(0),
+            jaguar3_tx_rf_bw: AtomicU8::new(u8::MAX),
+            jaguar3_nb_dac: AtomicU8::new(u8::MAX),
+            jaguar2_dig_enabled: AtomicBool::new(true),
+            tx_endpoint_prepared: AtomicBool::new(false),
+            tx_wedged: AtomicBool::new(false),
+            jaguar3_rx_wanted: AtomicBool::new(true),
             #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
             _usb_lock: usb_lock,
         })
@@ -445,6 +466,36 @@ impl RealtekDevice {
         block_on_ready(self.set_cca_disabled_async(disabled))
     }
 
+    /// Set the device-wide fallback used when radiotap carries no TX rate.
+    pub fn set_tx_mode(&self, mode: openipc_core::radiotap::TxMode) -> Result<(), DriverError> {
+        *self
+            .tx_mode_default
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)? = Some(mode);
+        Ok(())
+    }
+
+    /// Clear the device-wide TX-rate fallback, restoring 1 Mbps legacy mode.
+    pub fn clear_tx_mode(&self) -> Result<(), DriverError> {
+        *self
+            .tx_mode_default
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)? = None;
+        Ok(())
+    }
+
+    /// Set Jaguar2's default descriptor `TXPWR_OFSET` LUT step (`0..=5`).
+    pub fn set_tx_packet_power_step(&self, step: u8) {
+        self.tx_packet_power_step
+            .store(step.min(5), Ordering::Release);
+    }
+
+    /// Set hardware-sounding cadence (`0` disables; `1` marks every frame).
+    pub fn set_ndpa_period(&self, period: u32) {
+        self.ndpa_period.store(period, Ordering::Release);
+        self.ndpa_counter.store(0, Ordering::Release);
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     /// Open and clear the selected bulk-IN endpoint.
     pub fn bulk_in_endpoint(&self) -> Result<nusb::Endpoint<Bulk, In>, DriverError> {
@@ -458,11 +509,7 @@ impl RealtekDevice {
     #[cfg(not(target_arch = "wasm32"))]
     /// Open and clear the selected bulk-OUT endpoint.
     pub fn bulk_out_endpoint(&self) -> Result<nusb::Endpoint<Bulk, Out>, DriverError> {
-        let mut ep = self.open_bulk_out_endpoint()?;
-        ep.clear_halt()
-            .wait()
-            .map_err(|err| DriverError::Nusb(format!("clear halt on bulk OUT failed: {err}")))?;
-        Ok(ep)
+        self.open_bulk_out_endpoint()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -498,20 +545,26 @@ impl RealtekDevice {
         {
             radio = self.fast_retune(channel, true)?.radio;
         }
-        let usb_frame = build_usb_tx_frame(
-            radiotap_packet,
+        let options = self.apply_persistent_tx_options(
+            chip.family,
             RealtekTxOptions {
                 current_channel: radio.channel,
                 configured_channel_width: radio.channel_width,
+                configured_channel_offset: radio.channel_offset,
                 descriptor: RealtekTxDescriptor::for_chip_family(chip.family),
-                legacy_8812_descriptor: std::env::var_os("DEVOURER_TX_LEGACY_8812_DESC").is_some(),
+                legacy_8812_descriptor: crate::types::read_env_flag("DEVOURER_TX_LEGACY_8812_DESC"),
                 capabilities: Some(crate::TxCapabilities::for_chip(chip)),
                 ..RealtekTxOptions::default()
             },
-        )
-        .map_err(DriverError::TxBuild)?;
+        )?;
+        let usb_frame =
+            build_usb_tx_frame(radiotap_packet, options).map_err(DriverError::TxBuild)?;
         let mut ep = self.bulk_out_endpoint()?;
-        self.send_usb_tx_frame_tracked_on(&mut ep, &usb_frame)
+        self.send_usb_tx_frame_tracked_on(
+            &mut ep,
+            &usb_frame,
+            RealtekTxDescriptor::for_chip_family(chip.family).uses_terminated_bulk_out(),
+        )
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -624,6 +677,17 @@ impl RealtekDevice {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Run one Jaguar2 dynamic-initial-gain update.
+    pub fn run_jaguar2_dig_step(&self) -> Result<u32, DriverError> {
+        block_on_ready(self.run_jaguar2_dig_step_async())
+    }
+
+    /// Whether Jaguar2 DIG maintenance is enabled for this session.
+    pub fn jaguar2_dig_enabled(&self) -> bool {
+        self.jaguar2_dig_enabled.load(Ordering::Acquire)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     /// Initialize RTL8812 thermal power tracking state.
     pub fn init_power_tracking_8812(
         &self,
@@ -679,7 +743,11 @@ impl RealtekDevice {
     ) -> Result<usize, DriverError> {
         let usb_frame =
             build_usb_tx_frame(radiotap_packet, options).map_err(DriverError::TxBuild)?;
-        Self::send_usb_tx_frame_on(ep, &usb_frame)
+        Self::send_usb_tx_frame_on_with_termination(
+            ep,
+            &usb_frame,
+            options.descriptor.uses_terminated_bulk_out(),
+        )
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -690,9 +758,15 @@ impl RealtekDevice {
         radiotap_packet: &[u8],
         options: RealtekTxOptions,
     ) -> Result<usize, DriverError> {
+        let chip = self.probe_chip()?;
+        let options = self.apply_persistent_tx_options(chip.family, options)?;
         let usb_frame =
             build_usb_tx_frame(radiotap_packet, options).map_err(DriverError::TxBuild)?;
-        self.send_usb_tx_frame_tracked_on(ep, &usb_frame)
+        self.send_usb_tx_frame_tracked_on(
+            ep,
+            &usb_frame,
+            options.descriptor.uses_terminated_bulk_out(),
+        )
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -701,10 +775,30 @@ impl RealtekDevice {
         ep: &mut nusb::Endpoint<Bulk, Out>,
         usb_frame: &[u8],
     ) -> Result<usize, DriverError> {
+        Self::send_usb_tx_frame_on_with_termination(ep, usb_frame, false)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn send_usb_tx_frame_on_with_termination(
+        ep: &mut nusb::Endpoint<Bulk, Out>,
+        usb_frame: &[u8],
+        terminate: bool,
+    ) -> Result<usize, DriverError> {
         for attempt in 0..BULK_RETRY_ATTEMPTS {
             let completion = ep.transfer_blocking(Buffer::from(usb_frame), tx_timeout());
             match completion.status {
-                Ok(()) => return Ok(completion.actual_len),
+                Ok(()) => {
+                    if terminate
+                        && !usb_frame.is_empty()
+                        && usb_frame.len().is_multiple_of(ep.max_packet_size())
+                    {
+                        let zlp = ep.transfer_blocking(Buffer::new(0), tx_timeout());
+                        if let Err(err) = zlp.status {
+                            return Err(transfer_error("bulk OUT terminating ZLP failed", err));
+                        }
+                    }
+                    return Ok(completion.actual_len);
+                }
                 Err(err) if should_retry_transfer_error(err, attempt, BULK_RETRY_ATTEMPTS) => {
                     // A timed-out blocking nusb transfer is surfaced as
                     // Cancelled. Devourer marks every non-OK async completion
@@ -727,10 +821,38 @@ impl RealtekDevice {
         &self,
         ep: &mut nusb::Endpoint<Bulk, Out>,
         usb_frame: &[u8],
+        terminate: bool,
     ) -> Result<usize, DriverError> {
+        if terminate
+            && (!self.tx_endpoint_prepared.swap(true, Ordering::AcqRel)
+                || self.tx_wedged.swap(false, Ordering::AcqRel))
+        {
+            ep.clear_halt().wait().map_err(|err| {
+                DriverError::Nusb(format!("clear halt on Jaguar1 bulk OUT failed: {err}"))
+            })?;
+        }
         self.record_tx_submission();
-        let result = Self::send_usb_tx_frame_on(ep, usb_frame);
+        let completion = ep.transfer_blocking(Buffer::from(usb_frame), tx_timeout());
+        let result = match completion.status {
+            Ok(()) => {
+                if terminate
+                    && !usb_frame.is_empty()
+                    && usb_frame.len().is_multiple_of(ep.max_packet_size())
+                {
+                    let zlp = ep.transfer_blocking(Buffer::new(0), tx_timeout());
+                    zlp.status
+                        .map(|()| completion.actual_len)
+                        .map_err(|err| transfer_error("bulk OUT terminating ZLP failed", err))
+                } else {
+                    Ok(completion.actual_len)
+                }
+            }
+            Err(err) => Err(transfer_error("bulk OUT transfer failed", err)),
+        };
         if let Err(error) = &result {
+            if terminate {
+                self.tx_wedged.store(true, Ordering::Release);
+            }
             let message = error.to_string();
             self.record_tx_failure(
                 if message.contains("cancelled") || message.contains("timeout") {
@@ -745,6 +867,38 @@ impl RealtekDevice {
             );
         }
         result
+    }
+
+    /// Merge device-wide TX defaults into one packet's explicit options.
+    pub fn apply_persistent_tx_options(
+        &self,
+        family: crate::ChipFamily,
+        mut options: RealtekTxOptions,
+    ) -> Result<RealtekTxOptions, DriverError> {
+        if options.tx_mode_default.is_none() {
+            options.tx_mode_default = *self
+                .tx_mode_default
+                .lock()
+                .map_err(|_| DriverError::DriverStatePoisoned)?;
+        }
+        if options.jaguar2_packet_power_step == 0 {
+            options.jaguar2_packet_power_step = self.tx_packet_power_step.load(Ordering::Acquire);
+        }
+        if !options.beamforming_ndpa {
+            let period = self.ndpa_period.load(Ordering::Acquire);
+            if period != 0 {
+                options.beamforming_ndpa = if family.is_jaguar3() {
+                    self.ndpa_counter
+                        .fetch_add(1, Ordering::Relaxed)
+                        .is_multiple_of(u64::from(period))
+                } else {
+                    true
+                };
+                options.beamforming_ndpa_periodic =
+                    family.is_jaguar3() && period > 1 && options.beamforming_ndpa;
+            }
+        }
+        Ok(options)
     }
 
     /// Return a snapshot of driver-side TX submissions and failures.

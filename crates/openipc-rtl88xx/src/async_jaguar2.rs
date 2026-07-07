@@ -361,17 +361,62 @@ impl RealtekDevice {
         radio: RadioConfig,
         options: MonitorOptions,
     ) -> Result<InitReport, DriverError> {
-        self.pre_init_system_cfg_8822b_async().await?;
-        self.power_on_jaguar2_async(initial_chip.family).await?;
-        let chip = self.probe_chip_async().await?;
-        self.init_system_cfg_8822b_async(chip.family, chip.cut_version)
-            .await?;
-        let firmware = match chip.family {
-            ChipFamily::Rtl8821c => rtl_data::RTL8821C_FW_NIC,
-            _ => rtl_data::RTL8822B_FW_NIC,
+        // Devourer retries the whole power-on + DLFW unit. A warm Jaguar2 can
+        // leave the firmware handshake wedged in a state that a CPU-only reset
+        // cannot recover; rerunning the OFF/ON sequence gives it a clean slate.
+        const BRINGUP_ATTEMPTS: usize = 4;
+        let mut booted_chip = None;
+        let mut last_firmware_error = None;
+        for attempt in 0..BRINGUP_ATTEMPTS {
+            self.pre_init_system_cfg_8822b_async().await?;
+            self.power_on_jaguar2_async(initial_chip.family).await?;
+            let chip = self.probe_chip_async().await?;
+            self.init_system_cfg_8822b_async(chip.family, chip.cut_version)
+                .await?;
+            let firmware = match chip.family {
+                ChipFamily::Rtl8821c => rtl_data::RTL8821C_FW_NIC,
+                _ => rtl_data::RTL8822B_FW_NIC,
+            };
+            const CPU_RESET_ATTEMPTS: usize = 2;
+            let mut firmware_result = None;
+            for cpu_attempt in 0..CPU_RESET_ATTEMPTS {
+                match self
+                    .download_firmware_8822b_async(chip.family, firmware)
+                    .await
+                {
+                    Ok(()) => {
+                        firmware_result = Some(Ok(()));
+                        break;
+                    }
+                    Err(error) => {
+                        if cpu_attempt + 1 < CPU_RESET_ATTEMPTS {
+                            log::warn!(target: "openipc_rtl88xx::firmware", "Jaguar2 firmware download failed; CPU-reset retry {}/{}: {error}", cpu_attempt + 1, CPU_RESET_ATTEMPTS);
+                        }
+                        firmware_result = Some(Err(error));
+                    }
+                }
+            }
+            match firmware_result.expect("CPU-reset attempt loop is non-empty") {
+                Ok(()) => {
+                    booted_chip = Some(chip);
+                    break;
+                }
+                Err(error) => {
+                    if attempt + 1 < BRINGUP_ATTEMPTS {
+                        log::warn!(target: "openipc_rtl88xx::firmware", "Jaguar2 firmware download failed; full power-cycle retry {}/{}: {error}", attempt + 2, BRINGUP_ATTEMPTS);
+                    }
+                    last_firmware_error = Some(error);
+                }
+            }
+        }
+        let chip = match booted_chip {
+            Some(chip) => chip,
+            None => {
+                return Err(last_firmware_error.unwrap_or_else(|| {
+                    DriverError::Nusb("Jaguar2 firmware bring-up failed".to_owned())
+                }));
+            }
         };
-        self.download_firmware_8822b_async(chip.family, firmware)
-            .await?;
         self.init_mac_cfg_8822b_async(chip.family).await?;
         self.init_usb_cfg_8822b_async().await?;
         self.enable_bb_rf_8822b_async(true).await?;
@@ -401,12 +446,16 @@ impl RealtekDevice {
                 self.run_iqk_8822b_async(chip, radio.channel <= 14).await?;
             }
         }
-        self.config_trx_mode_8822b_async(chip).await?;
-        if chip.family == ChipFamily::Rtl8821c {
-            self.bf_init_8821c_async(efuse.rfe_type).await?;
-        } else {
-            self.rfe_init_8822b_async().await?;
-            self.bf_init_8822b_async().await?;
+        if !options.skip_trx_reassert {
+            self.config_trx_mode_8822b_async(chip).await?;
+        }
+        if !options.skip_rfe_init {
+            if chip.family == ChipFamily::Rtl8821c {
+                self.bf_init_8821c_async(efuse.rfe_type).await?;
+            } else {
+                self.rfe_init_8822b_async().await?;
+                self.bf_init_8822b_async().await?;
+            }
         }
         if !options.skip_tx_power {
             if chip.family == ChipFamily::Rtl8821c {
@@ -416,10 +465,16 @@ impl RealtekDevice {
                     .await?;
             }
         }
-        self.coex_wlan_only_8822b_async(chip.family, efuse.rfe_type, radio.channel > 14)
-            .await?;
-        self.enable_rx_8822b_async(options.accept_bad_fcs).await?;
+        if !options.skip_coex {
+            self.coex_wlan_only_8822b_async(chip.family, efuse.rfe_type, radio.channel > 14)
+                .await?;
+        }
+        self.enable_rx_8822b_async(chip.family, options).await?;
         if let Some(gain) = options.cw_tone_gain {
+            if options.beamforming_sounder || options.beamforming_sounder_mac.is_some() {
+                self.arm_beamforming_sounder_async(options.beamforming_sounder_mac)
+                    .await?;
+            }
             self.start_cw_tone_async(radio.channel, gain).await?;
         }
 
@@ -1735,16 +1790,32 @@ impl RealtekDevice {
         Ok(())
     }
 
-    async fn enable_rx_8822b_async(&self, accept_bad_fcs: bool) -> Result<(), DriverError> {
+    async fn enable_rx_8822b_async(
+        &self,
+        family: ChipFamily,
+        options: MonitorOptions,
+    ) -> Result<(), DriverError> {
         self.write_u16_async(REG_CR, 0x06ff).await?;
-        let mut rcr = 0x7000_382f;
-        if accept_bad_fcs {
-            rcr |= (1 << 8) | (1 << 9);
+        // Exact Jaguar2 monitor RCR from Devourer/rtw88. Bits 11/12/13 are
+        // TA/CAM gates on this generation, not Jaguar1's frame-type accepts;
+        // setting them suppresses ambient over-the-air frames.
+        let rcr = jaguar2_monitor_rcr(family, options);
+        if family == ChipFamily::Rtl8821c && options.phy_status_8821c {
+            // HALMAC_DRV_INFO_PHY_STATUS: prepend 32 bytes and make the
+            // descriptor account for them. Without the boundary nibble,
+            // 8821C reports drv_info_size=0 and RX aggregates misalign.
+            self.write_u8_async(REG_RX_DRVINFO_SZ, 4).await?;
+            let boundary = self.read_u8_async(0x0115).await.unwrap_or(0);
+            self.write_u8_async(0x0115, (boundary & 0xf0) | 0x0f)
+                .await?;
         }
         self.write_u32_async(REG_RCR, rcr).await?;
+        let igi = options.jaguar2_igi.unwrap_or(0x40) & 0x7f;
         for register in [0x0c50, 0x0e50] {
-            self.set_bb_reg_async(register, 0x7f, 0x40).await?;
+            self.set_bb_reg_async(register, 0x7f, u32::from(igi))
+                .await?;
         }
+        log::info!(target: "openipc_rtl88xx::rx", "Jaguar2 RX enabled CR=0x06ff RCR=0x{rcr:08x} IGI=0x{igi:02x}");
         Ok(())
     }
 
@@ -2072,6 +2143,17 @@ impl RealtekDevice {
     }
 }
 
+fn jaguar2_monitor_rcr(family: ChipFamily, options: MonitorOptions) -> u32 {
+    let mut rcr = 0x7000_002f;
+    if family == ChipFamily::Rtl8821c && !options.phy_status_8821c {
+        rcr &= !(1 << 28);
+    }
+    if options.accept_bad_fcs {
+        rcr |= (1 << 8) | (1 << 9);
+    }
+    rcr
+}
+
 fn center_channel_8822b(primary: u8, width: u8, primary_index: u8) -> u8 {
     match width {
         1 if primary_index == 2 => primary.saturating_sub(2),
@@ -2241,4 +2323,37 @@ fn validate_firmware_8822b(firmware: &[u8]) -> Result<(), DriverError> {
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod parity_tests {
+    use super::*;
+
+    #[test]
+    fn monitor_rcr_matches_devourer_jaguar2_recipe() {
+        assert_eq!(
+            jaguar2_monitor_rcr(ChipFamily::Rtl8822b, MonitorOptions::default()),
+            0x7000_002f
+        );
+        assert_eq!(
+            jaguar2_monitor_rcr(
+                ChipFamily::Rtl8821c,
+                MonitorOptions {
+                    phy_status_8821c: false,
+                    ..MonitorOptions::default()
+                }
+            ),
+            0x6000_002f
+        );
+        assert_eq!(
+            jaguar2_monitor_rcr(
+                ChipFamily::Rtl8822b,
+                MonitorOptions {
+                    accept_bad_fcs: true,
+                    ..MonitorOptions::default()
+                }
+            ),
+            0x7000_032f
+        );
+    }
 }

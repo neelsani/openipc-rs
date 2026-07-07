@@ -71,8 +71,8 @@ pub use link_health::{
 pub use rx_quality::{RxQuality, RxQualityAccumulator, RxQualitySnapshot};
 pub use tone_mask::{center_frequency_mhz, enumerate_mask_tones, CsiMaskSpec};
 pub use tx::{
-    build_usb_tx_frame, RealtekTxDescriptor, RealtekTxError, RealtekTxOptions, TX_DESC_SIZE,
-    TX_DESC_SIZE_8822C,
+    build_usb_tx_frame, bulk_out_requires_zlp, RealtekTxDescriptor, RealtekTxError,
+    RealtekTxOptions, TX_DESC_SIZE, TX_DESC_SIZE_8822C,
 };
 pub use tx_control::{
     jaguar2_packet_power_db, jaguar2_packet_power_step, quantize_tx_power_offset_qdb,
@@ -140,6 +140,12 @@ mod tests {
         let rtl8821c = ChipInfo::from_probe(0x0bda, 0xc811, 0, 0x09);
         assert_eq!(rtl8821c.family, ChipFamily::Rtl8821c);
         assert_eq!(rtl8821c.rf_type, RfType::OneTOneR);
+
+        // Devourer does not infer Jaguar2 from PID when SYS_CFG2 cannot be read.
+        assert_eq!(
+            ChipInfo::from_probe(0x0bda, 0xb812, 0, 0).family,
+            ChipFamily::Rtl8812
+        );
     }
 
     #[test]
@@ -167,6 +173,21 @@ mod tests {
             ChipInfo::from_probe(0x0bda, 0xc812, 0, 0x17).family,
             ChipFamily::Rtl8822e
         );
+        assert_eq!(
+            ChipInfo::from_probe(0x0bda, 0xa81a, 0, 0).family,
+            ChipFamily::Rtl8812
+        );
+    }
+
+    #[test]
+    fn parses_devourer_mac_address_format() {
+        assert_eq!(
+            types::parse_mac_address("02:11:22:aa:BB:ff"),
+            Some([0x02, 0x11, 0x22, 0xaa, 0xbb, 0xff])
+        );
+        assert_eq!(types::parse_mac_address("02:11:22:33:44"), None);
+        assert_eq!(types::parse_mac_address("02:11:22:33:44:100"), None);
+        assert_eq!(types::parse_mac_address("02:11:22:33:44:55:66"), None);
     }
 
     #[test]

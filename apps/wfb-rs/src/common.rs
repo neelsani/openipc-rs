@@ -30,7 +30,8 @@ impl Default for RadioDeviceConfig {
             driver_options: DriverOptions::from_env(),
             monitor_options: MonitorOptions::from_env(),
             radio: RadioConfig::default(),
-            tx_legacy_8812_descriptor: std::env::var_os("DEVOURER_TX_LEGACY_8812_DESC").is_some(),
+            tx_legacy_8812_descriptor: std::env::var_os("DEVOURER_TX_LEGACY_8812_DESC")
+                .is_some_and(|value| value != "0"),
         }
     }
 }
@@ -115,6 +116,7 @@ pub fn tx_options(config: &RadioDeviceConfig, chip_family: ChipFamily) -> Realte
     RealtekTxOptions {
         current_channel: config.radio.channel,
         configured_channel_width: config.radio.channel_width,
+        configured_channel_offset: config.radio.channel_offset,
         descriptor: RealtekTxDescriptor::for_chip_family(chip_family),
         capabilities: Some(openipc_rtl88xx::TxCapabilities::for_family(chip_family)),
         legacy_8812_descriptor: config.tx_legacy_8812_descriptor,

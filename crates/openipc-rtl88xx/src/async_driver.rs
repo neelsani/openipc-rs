@@ -110,6 +110,16 @@ impl RealtekDevice {
             beamforming_apply_on: std::sync::atomic::AtomicBool::new(false),
             beamforming_report_count: std::sync::atomic::AtomicU32::new(0),
             firmware_boot_status: std::sync::Mutex::new(crate::FirmwareBootStatus::default()),
+            tx_mode_default: std::sync::Mutex::new(None),
+            tx_packet_power_step: std::sync::atomic::AtomicU8::new(0),
+            ndpa_period: std::sync::atomic::AtomicU32::new(0),
+            ndpa_counter: std::sync::atomic::AtomicU64::new(0),
+            jaguar3_tx_rf_bw: std::sync::atomic::AtomicU8::new(u8::MAX),
+            jaguar3_nb_dac: std::sync::atomic::AtomicU8::new(u8::MAX),
+            jaguar2_dig_enabled: std::sync::atomic::AtomicBool::new(true),
+            tx_endpoint_prepared: std::sync::atomic::AtomicBool::new(false),
+            tx_wedged: std::sync::atomic::AtomicBool::new(false),
+            jaguar3_rx_wanted: std::sync::atomic::AtomicBool::new(true),
         })
     }
 
@@ -148,6 +158,27 @@ impl RealtekDevice {
             radio.channel_width
         );
         let chip = self.probe_chip_async().await?;
+        self.jaguar3_tx_rf_bw.store(
+            options.jaguar3_tx_rf_bw.unwrap_or(u8::MAX),
+            std::sync::atomic::Ordering::Release,
+        );
+        self.jaguar3_nb_dac.store(
+            options.jaguar3_nb_dac.unwrap_or(u8::MAX),
+            std::sync::atomic::Ordering::Release,
+        );
+        self.jaguar2_dig_enabled
+            .store(!options.skip_dig, std::sync::atomic::Ordering::Release);
+        self.jaguar3_rx_wanted.store(
+            options.jaguar3_enable_rx,
+            std::sync::atomic::Ordering::Release,
+        );
+        self.set_ndpa_period(options.ndpa_period);
+        if let Some(index) = options.tx_power_index {
+            self.tx_power_control
+                .lock()
+                .map_err(|_| DriverError::DriverStatePoisoned)?
+                .flat_index = Some(index);
+        }
         self.prepare_firmware_boot_status(false)?;
         log::debug!(target: "openipc_rtl88xx::init", "probed Realtek adapter: {chip:?}");
         if chip.family.is_jaguar2() {
@@ -159,6 +190,7 @@ impl RealtekDevice {
                 .await?;
             self.note_full_tune(radio)?;
             self.note_firmware_boot_status(report.firmware_downloaded, true)?;
+            self.apply_post_init_options_async(chip, options).await?;
             return Ok(report);
         }
         let mut firmware_downloaded = false;
@@ -199,6 +231,7 @@ impl RealtekDevice {
                 .await?;
             self.note_full_tune(radio)?;
             self.note_firmware_boot_status(report.firmware_downloaded, true)?;
+            self.apply_post_init_options_async(chip, options).await?;
             return Ok(report);
         }
 
@@ -284,6 +317,10 @@ impl RealtekDevice {
         self.apply_interference_mitigation_async(chip, radio, options)
             .await?;
         if let Some(gain) = options.cw_tone_gain {
+            if options.beamforming_sounder || options.beamforming_sounder_mac.is_some() {
+                self.arm_beamforming_sounder_async(options.beamforming_sounder_mac)
+                    .await?;
+            }
             self.start_cw_tone_async(radio.channel, gain).await?;
         }
 
@@ -301,7 +338,41 @@ impl RealtekDevice {
         );
         self.note_full_tune(radio)?;
         self.note_firmware_boot_status(report.firmware_downloaded, true)?;
+        self.apply_post_init_options_async(chip, options).await?;
         Ok(report)
+    }
+
+    async fn apply_post_init_options_async(
+        &self,
+        chip: ChipInfo,
+        options: MonitorOptions,
+    ) -> Result<(), DriverError> {
+        if options.cw_tone_gain.is_some() {
+            return Ok(());
+        }
+        if options.beamforming_sounder || options.beamforming_sounder_mac.is_some() {
+            self.arm_beamforming_sounder_async(options.beamforming_sounder_mac)
+                .await?;
+        }
+        if let Some(peer) = options.beamformee_of {
+            self.arm_beamformee_async(
+                peer,
+                None,
+                if options.beamformee_mu {
+                    crate::BeamformingFeedback::Mu
+                } else {
+                    crate::BeamformingFeedback::Su
+                },
+            )
+            .await?;
+        }
+        if let Some(peer) = options.transmit_beamforming_peer {
+            if chip.family.is_jaguar3() {
+                self.arm_transmit_beamforming_async(peer, options.beamforming_sounder_mac)
+                    .await?;
+            }
+        }
+        Ok(())
     }
 
     /// Best-effort monitor-mode shutdown.
@@ -730,30 +801,66 @@ impl RealtekDevice {
     /// Write one USB bulk-OUT transfer to the transmit endpoint.
     #[cfg(target_arch = "wasm32")]
     pub async fn write_tx_transfer_async(&self, transfer: &[u8]) -> Result<usize, DriverError> {
+        self.write_tx_transfer_terminated_async(transfer, false)
+            .await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn write_tx_transfer_terminated_async(
+        &self,
+        transfer: &[u8],
+        terminate: bool,
+    ) -> Result<usize, DriverError> {
         let mut endpoint = self
             .interface
             .endpoint::<Bulk, Out>(self.bulk_out_ep)
             .map_err(|err| DriverError::Nusb(format!("open bulk OUT endpoint failed: {err}")))?;
-        endpoint
-            .clear_halt()
-            .await
-            .map_err(|err| DriverError::Nusb(format!("clear halt on bulk OUT failed: {err}")))?;
+        if terminate
+            && (!self
+                .tx_endpoint_prepared
+                .swap(true, std::sync::atomic::Ordering::AcqRel)
+                || self
+                    .tx_wedged
+                    .swap(false, std::sync::atomic::Ordering::AcqRel))
+        {
+            endpoint.clear_halt().await.map_err(|err| {
+                DriverError::Nusb(format!("clear halt on Jaguar1 bulk OUT failed: {err}"))
+            })?;
+        }
         self.record_tx_submission();
-        for attempt in 0..BULK_RETRY_ATTEMPTS {
+        let attempts = 1;
+        for attempt in 0..attempts {
             endpoint.submit(Buffer::from(transfer));
             let completion = endpoint.next_complete().await;
             match completion.status {
                 Ok(()) => {
                     log::trace!(target: "openipc_rtl88xx::usb", "bulk OUT complete endpoint=0x{:02x} bytes={}", self.bulk_out_ep, completion.actual_len);
+                    if terminate
+                        && !transfer.is_empty()
+                        && transfer.len().is_multiple_of(endpoint.max_packet_size())
+                    {
+                        endpoint.submit(Buffer::new(0));
+                        let zlp = endpoint.next_complete().await;
+                        if let Err(err) = zlp.status {
+                            self.tx_wedged
+                                .store(true, std::sync::atomic::Ordering::Release);
+                            self.record_tx_failure(tx_error_kind(err));
+                            return Err(transfer_error("bulk OUT terminating ZLP failed", err));
+                        }
+                    }
                     return Ok(completion.actual_len);
                 }
-                Err(err) if should_retry_transfer_error(err, attempt, BULK_RETRY_ATTEMPTS) => {
+                Err(err) if should_retry_transfer_error(err, attempt, attempts) => {
                     if err == TransferError::Stall {
                         let _ = endpoint.clear_halt().await;
                     }
                     crate::time::sleep_ms(retry_delay_ms(attempt)).await;
                 }
                 Err(err) => {
+                    if terminate {
+                        self.tx_wedged
+                            .store(true, std::sync::atomic::Ordering::Release);
+                    }
                     self.record_tx_failure(tx_error_kind(err));
                     return Err(transfer_error("bulk OUT transfer failed", err));
                 }
@@ -794,28 +901,64 @@ impl RealtekDevice {
     /// Write one USB bulk-OUT transfer to the transmit endpoint.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn write_tx_transfer_async(&self, transfer: &[u8]) -> Result<usize, DriverError> {
+        self.write_tx_transfer_terminated_async(transfer, false)
+            .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn write_tx_transfer_terminated_async(
+        &self,
+        transfer: &[u8],
+        terminate: bool,
+    ) -> Result<usize, DriverError> {
         let mut endpoint = self
             .interface
             .endpoint::<Bulk, Out>(self.bulk_out_ep)
             .map_err(|err| DriverError::Nusb(format!("open bulk OUT endpoint failed: {err}")))?;
-        endpoint
-            .clear_halt()
-            .wait()
-            .map_err(|err| DriverError::Nusb(format!("clear halt on bulk OUT failed: {err}")))?;
+        if terminate
+            && (!self
+                .tx_endpoint_prepared
+                .swap(true, std::sync::atomic::Ordering::AcqRel)
+                || self
+                    .tx_wedged
+                    .swap(false, std::sync::atomic::Ordering::AcqRel))
+        {
+            endpoint.clear_halt().wait().map_err(|err| {
+                DriverError::Nusb(format!("clear halt on Jaguar1 bulk OUT failed: {err}"))
+            })?;
+        }
         self.record_tx_submission();
-        for attempt in 0..BULK_RETRY_ATTEMPTS {
+        let attempts = 1;
+        for attempt in 0..attempts {
             let completion =
                 endpoint.transfer_blocking(Buffer::from(transfer), crate::device::tx_timeout());
             match completion.status {
                 Ok(()) => {
                     log::trace!(target: "openipc_rtl88xx::usb", "bulk OUT complete endpoint=0x{:02x} bytes={}", self.bulk_out_ep, completion.actual_len);
+                    if terminate
+                        && !transfer.is_empty()
+                        && transfer.len().is_multiple_of(endpoint.max_packet_size())
+                    {
+                        let zlp =
+                            endpoint.transfer_blocking(Buffer::new(0), crate::device::tx_timeout());
+                        if let Err(err) = zlp.status {
+                            self.tx_wedged
+                                .store(true, std::sync::atomic::Ordering::Release);
+                            self.record_tx_failure(tx_error_kind(err));
+                            return Err(transfer_error("bulk OUT terminating ZLP failed", err));
+                        }
+                    }
                     return Ok(completion.actual_len);
                 }
-                Err(err) if should_retry_transfer_error(err, attempt, BULK_RETRY_ATTEMPTS) => {
+                Err(err) if should_retry_transfer_error(err, attempt, attempts) => {
                     let _ = endpoint.clear_halt().wait();
                     crate::time::sleep_ms(retry_delay_ms(attempt)).await;
                 }
                 Err(err) => {
+                    if terminate {
+                        self.tx_wedged
+                            .store(true, std::sync::atomic::Ordering::Release);
+                    }
                     self.record_tx_failure(tx_error_kind(err));
                     return Err(transfer_error("bulk OUT transfer failed", err));
                 }
@@ -868,10 +1011,16 @@ impl RealtekDevice {
             let report = self.fast_retune_async(channel, true).await?;
             options.current_channel = report.radio.channel;
             options.configured_channel_width = report.radio.channel_width;
+            options.configured_channel_offset = report.radio.channel_offset;
         }
+        options = self.apply_persistent_tx_options(chip.family, options)?;
         let usb_frame =
             build_usb_tx_frame(radiotap_packet, options).map_err(DriverError::TxBuild)?;
-        self.write_tx_transfer_async(&usb_frame).await
+        self.write_tx_transfer_terminated_async(
+            &usb_frame,
+            options.descriptor.uses_terminated_bulk_out(),
+        )
+        .await
     }
 
     /// Read raw bytes from a Realtek vendor register.

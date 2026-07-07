@@ -144,7 +144,10 @@ behavior for TX modes, multi-transfer RX, RTL8814 firmware bring-up,
 RTL8812BU/RTL8822BU Jaguar2, RTL8812CU/EU and RTL8822CU/EU Jaguar3 descriptors,
 firmware, tables, EFUSE, RFE, calibration, 40/80 MHz and 40-in-80 operation,
 beamforming sounding, CSI/NBI receive masking, per-rate TX power, PHYDM, power
-tracking, IQK, C2H/TX-status packets, and clean shutdown. Driver diagnostics are explicit APIs that apps
+tracking, IQK, C2H/TX-status packets, clean shutdown, runtime quarter-dB power
+control, Jaguar2 per-packet power, TX capability guards/statistics, rolling RX
+quality and link-health classification, adapter-health probes, and self-gated
+Jaguar3 TX beamforming. Driver diagnostics are explicit APIs that apps
 schedule themselves; the library does not create hidden polling threads.
 
 More live adapter testing is still needed: cold-plug runs, register-trace

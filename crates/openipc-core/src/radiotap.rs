@@ -18,6 +18,7 @@ const IEEE80211_RADIOTAP_VHT_CODING_LDPC_USER0: u8 = 0x01;
 
 const RADIOTAP_PRESENT_RATE: u32 = 1 << 2;
 const RADIOTAP_PRESENT_CHANNEL: u32 = 1 << 3;
+const RADIOTAP_PRESENT_DBM_TX_POWER: u32 = 1 << 10;
 const RADIOTAP_PRESENT_TX_FLAGS: u32 = 1 << 15;
 const RADIOTAP_PRESENT_MCS: u32 = 1 << 19;
 const RADIOTAP_PRESENT_VHT: u32 = 1 << 21;
@@ -236,6 +237,11 @@ pub struct RadiotapTxMetadata {
     pub mode: Option<TxMode>,
     /// Requested center frequency from the radiotap CHANNEL field.
     pub frequency_mhz: Option<u16>,
+    /// Signed per-packet TX-power request from `DBM_TX_POWER`.
+    ///
+    /// Injection drivers may interpret this as a relative trim when the
+    /// hardware exposes no absolute-dBm descriptor field.
+    pub dbm_tx_power: Option<i8>,
 }
 
 /// Error returned while parsing a radiotap TX header.
@@ -531,7 +537,7 @@ pub fn parse_radiotap_tx_channel(packet: &[u8]) -> Result<Option<u8>, RadiotapEr
         .and_then(crate::wifi::frequency_to_channel))
 }
 
-/// Parse the supported RATE, CHANNEL, TX_FLAGS, MCS, and VHT fields.
+/// Parse the supported RATE, CHANNEL, DBM_TX_POWER, TX_FLAGS, MCS, and VHT fields.
 pub fn parse_radiotap_tx_metadata(packet: &[u8]) -> Result<RadiotapTxMetadata, RadiotapError> {
     let len = radiotap_len(packet)?;
     if len < 8 || packet.len() < len {
@@ -543,6 +549,7 @@ pub fn parse_radiotap_tx_metadata(packet: &[u8]) -> Result<RadiotapTxMetadata, R
     }
     let supported = RADIOTAP_PRESENT_RATE
         | RADIOTAP_PRESENT_CHANNEL
+        | RADIOTAP_PRESENT_DBM_TX_POWER
         | RADIOTAP_PRESENT_TX_FLAGS
         | RADIOTAP_PRESENT_MCS
         | RADIOTAP_PRESENT_VHT;
@@ -553,6 +560,7 @@ pub fn parse_radiotap_tx_metadata(packet: &[u8]) -> Result<RadiotapTxMetadata, R
     let mut offset = 8usize;
     let mut mode = None;
     let mut frequency_mhz = None;
+    let mut dbm_tx_power = None;
 
     if present & RADIOTAP_PRESENT_RATE != 0 {
         require_field(packet, len, offset, 1)?;
@@ -565,6 +573,12 @@ pub fn parse_radiotap_tx_metadata(packet: &[u8]) -> Result<RadiotapTxMetadata, R
         require_field(packet, len, offset, 4)?;
         frequency_mhz = Some(u16::from_le_bytes([packet[offset], packet[offset + 1]]));
         offset += 4;
+    }
+
+    if present & RADIOTAP_PRESENT_DBM_TX_POWER != 0 {
+        require_field(packet, len, offset, 1)?;
+        dbm_tx_power = Some(packet[offset] as i8);
+        offset += 1;
     }
 
     if present & RADIOTAP_PRESENT_TX_FLAGS != 0 {
@@ -623,6 +637,7 @@ pub fn parse_radiotap_tx_metadata(packet: &[u8]) -> Result<RadiotapTxMetadata, R
     Ok(RadiotapTxMetadata {
         mode,
         frequency_mhz,
+        dbm_tx_power,
     })
 }
 
@@ -719,6 +734,26 @@ mod tests {
         assert!(parsed.short_gi);
         assert!(parsed.ldpc);
         assert_eq!(parsed.stbc, 1);
+    }
+
+    #[test]
+    fn parses_signed_dbm_tx_power() {
+        let present = RADIOTAP_PRESENT_RATE | RADIOTAP_PRESENT_DBM_TX_POWER;
+        let packet = [
+            0,
+            0,
+            10,
+            0,
+            present as u8,
+            (present >> 8) as u8,
+            (present >> 16) as u8,
+            (present >> 24) as u8,
+            12,
+            (-7i8) as u8,
+            0,
+        ];
+        let metadata = parse_radiotap_tx_metadata(&packet).unwrap();
+        assert_eq!(metadata.dbm_tx_power, Some(-7));
     }
 
     #[test]

@@ -1029,7 +1029,8 @@ mod worker {
                                 let result = endpoint.as_mut().map_or_else(
                                     || Err("radio TX endpoint is unavailable".to_owned()),
                                     |endpoint| {
-                                        RealtekDevice::send_packet_on(endpoint, &frame, options)
+                                        device
+                                            .send_packet_on_tracked(endpoint, &frame, options)
                                             .map(|_| ())
                                             .map_err(|error| error.to_string())
                                     },
@@ -1123,6 +1124,7 @@ mod worker {
                     current_channel: request.channel,
                     configured_channel_width: channel_width(request.channel_width_mhz)?,
                     descriptor: RealtekTxDescriptor::for_chip_family(chip),
+                    capabilities: Some(openipc_rtl88xx::TxCapabilities::for_family(chip)),
                     ..RealtekTxOptions::default()
                 },
                 tx_params: TxRadioParams::openipc_uplink_default(),

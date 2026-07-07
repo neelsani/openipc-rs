@@ -161,7 +161,7 @@ impl RealtekDevice {
         })
     }
 
-    async fn read_efuse_logical_map_async(
+    pub(crate) async fn read_efuse_logical_map_async(
         &self,
         chip: ChipInfo,
     ) -> Result<[u8; EFUSE_MAP_LEN_JAGUAR], DriverError> {
@@ -191,6 +191,26 @@ impl RealtekDevice {
             (Err(err), _) => Err(err),
             (Ok(_), Err(err)) => Err(err),
         }
+    }
+
+    /// Repeat fresh physical EFUSE reads and compare them for instability.
+    pub async fn probe_efuse_stability_async(
+        &self,
+        reads: u16,
+    ) -> Result<crate::EfuseStability, DriverError> {
+        let chip = self.probe_chip_async().await?;
+        if reads == 0 || chip.family == ChipFamily::Rtl8822e {
+            // Devourer likewise refuses the post-bring-up 8822E OTP probe:
+            // that generation's physical read path is not reliable live.
+            return Ok(crate::EfuseStability::default());
+        }
+        let mut maps = Vec::with_capacity(usize::from(reads));
+        for _ in 0..reads {
+            maps.push(self.read_efuse_logical_map_async(chip).await?);
+        }
+        Ok(crate::compare_efuse_maps(
+            maps.iter().map(|map| map.as_slice()),
+        ))
     }
 
     pub(crate) async fn efuse_power_cut_8822e_async(

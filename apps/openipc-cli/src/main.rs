@@ -456,12 +456,13 @@ impl AdaptiveRuntime {
     fn tick(
         &mut self,
         now_ms: u64,
+        device: &RealtekDevice,
         ep_out: &mut nusb::Endpoint<Bulk, Out>,
     ) -> Result<usize, Box<dyn std::error::Error>> {
         let frames = self.sender.tick(now_ms)?;
         let count = frames.len();
         for frame in frames {
-            RealtekDevice::send_packet_on(ep_out, &frame, self.tx_options)?;
+            device.send_packet_on_tracked(ep_out, &frame, self.tx_options)?;
         }
         Ok(count)
     }
@@ -489,6 +490,7 @@ impl RecvConfig {
                 current_channel: self.radio.channel,
                 configured_channel_width: self.radio.channel_width,
                 descriptor: openipc_rtl88xx::RealtekTxDescriptor::for_chip_family(chip_family),
+                capabilities: Some(openipc_rtl88xx::TxCapabilities::for_family(chip_family)),
                 legacy_8812_descriptor: self.tx_legacy_8812_descriptor,
                 ..RealtekTxOptions::default()
             },
@@ -562,7 +564,7 @@ fn run_recv(config: RecvConfig) -> Result<(), Box<dyn std::error::Error>> {
 
         let Some(completion) = ep_in.wait_next_complete(Duration::from_millis(1000)) else {
             let now_ms = unix_time_ms();
-            tick_adaptive(&mut adaptive, ep_out.as_mut(), now_ms, &mut stats);
+            tick_adaptive(&mut adaptive, &device, ep_out.as_mut(), now_ms, &mut stats);
             eprintln!("{}", stats.summary());
             continue;
         };
@@ -592,7 +594,7 @@ fn run_recv(config: RecvConfig) -> Result<(), Box<dyn std::error::Error>> {
             if let Some(runtime) = adaptive.as_mut() {
                 runtime.record_pipeline(now_ms, receiver.video_fec_counters());
             }
-            tick_adaptive(&mut adaptive, ep_out.as_mut(), now_ms, &mut stats);
+            tick_adaptive(&mut adaptive, &device, ep_out.as_mut(), now_ms, &mut stats);
         }
         ep_in.submit(completion.buffer);
     }
@@ -682,6 +684,7 @@ fn rx_descriptor_kind(chip_family: ChipFamily) -> RxDescriptorKind {
 
 fn tick_adaptive(
     adaptive: &mut Option<AdaptiveRuntime>,
+    device: &RealtekDevice,
     ep_out: Option<&mut nusb::Endpoint<Bulk, Out>>,
     now_ms: u64,
     stats: &mut StreamStats,
@@ -689,7 +692,7 @@ fn tick_adaptive(
     let (Some(runtime), Some(ep_out)) = (adaptive.as_mut(), ep_out) else {
         return;
     };
-    match runtime.tick(now_ms, ep_out) {
+    match runtime.tick(now_ms, device, ep_out) {
         Ok(frames) => stats.adaptive_tx_frames += frames as u64,
         Err(err) => {
             stats.adaptive_tx_errors += 1;

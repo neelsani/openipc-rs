@@ -1,8 +1,7 @@
-use openipc_core::radiotap::{
-    parse_radiotap_tx_mode, radiotap_len, ChannelBandwidth, RadiotapError, TxMode, TxModeKind,
-};
+use openipc_core::radiotap::{radiotap_len, ChannelBandwidth, RadiotapError, TxMode, TxModeKind};
 
 use crate::types::{ChannelWidth, ChipFamily};
+use crate::{jaguar2_packet_power_step, TxCapabilities};
 
 /// Size of the Realtek USB TX descriptor prepended before injected frames.
 pub const TX_DESC_SIZE: usize = 40;
@@ -65,6 +64,10 @@ pub struct RealtekTxOptions {
     pub configured_channel_width: ChannelWidth,
     /// Mark this frame as an NDPA and disable ordinary sequence/fallback handling.
     pub beamforming_ndpa: bool,
+    /// Session-default Jaguar2 `TXPWR_OFSET` step used when radiotap omits one.
+    pub jaguar2_packet_power_step: u8,
+    /// Probed hardware capabilities used to reject unsupported modulation.
+    pub capabilities: Option<TxCapabilities>,
 }
 
 impl Default for RealtekTxOptions {
@@ -76,6 +79,8 @@ impl Default for RealtekTxOptions {
             tx_mode_default: None,
             configured_channel_width: ChannelWidth::Mhz20,
             beamforming_ndpa: false,
+            jaguar2_packet_power_step: 0,
+            capabilities: None,
         }
     }
 }
@@ -87,6 +92,8 @@ pub enum RealtekTxError {
     Radiotap(RadiotapError),
     /// 802.11 payload does not fit in the descriptor length field.
     PayloadTooLarge,
+    /// Requested STBC cannot be transmitted by this adapter.
+    UnsupportedStbc { spatial_streams: u8 },
 }
 
 impl std::fmt::Display for RealtekTxError {
@@ -94,6 +101,10 @@ impl std::fmt::Display for RealtekTxError {
         match self {
             Self::Radiotap(err) => write!(f, "{err}"),
             Self::PayloadTooLarge => write!(f, "802.11 TX payload is too large for descriptor"),
+            Self::UnsupportedStbc { spatial_streams } => write!(
+                f,
+                "STBC requires at least two TX chains; adapter exposes {spatial_streams}"
+            ),
         }
     }
 }
@@ -112,12 +123,23 @@ pub fn build_usb_tx_frame(
     options: RealtekTxOptions,
 ) -> Result<Vec<u8>, RealtekTxError> {
     let rtap_len = radiotap_len(radiotap_packet)?;
-    let tx_mode = parse_radiotap_tx_mode(radiotap_packet)?
+    let metadata = openipc_core::parse_radiotap_tx_metadata(radiotap_packet)?;
+    let tx_mode = metadata
+        .mode
         .or(options.tx_mode_default)
         .unwrap_or_else(TxMode::legacy_1m);
     let payload = &radiotap_packet[rtap_len..];
     if payload.len() > u16::MAX as usize {
         return Err(RealtekTxError::PayloadTooLarge);
+    }
+    if tx_mode.stbc
+        && options
+            .capabilities
+            .is_some_and(|capabilities| !capabilities.stbc)
+    {
+        return Err(RealtekTxError::UnsupportedStbc {
+            spatial_streams: options.capabilities.map_or(0, |caps| caps.spatial_streams),
+        });
     }
 
     let mut fixed_rate = tx_mode_fixed_rate(tx_mode);
@@ -129,7 +151,13 @@ pub fn build_usb_tx_frame(
         options.descriptor,
         RealtekTxDescriptor::Jaguar2 | RealtekTxDescriptor::Jaguar3
     ) {
-        return build_usb_tx_frame_halmac(payload, tx_mode, fixed_rate, options);
+        return build_usb_tx_frame_halmac(
+            payload,
+            tx_mode,
+            fixed_rate,
+            metadata.dbm_tx_power,
+            options,
+        );
     }
 
     let mut out = vec![0; TX_DESC_SIZE + payload.len()];
@@ -194,6 +222,7 @@ fn build_usb_tx_frame_halmac(
     payload: &[u8],
     tx_mode: TxMode,
     fixed_rate: u8,
+    packet_power_db: Option<i8>,
     options: RealtekTxOptions,
 ) -> Result<Vec<u8>, RealtekTxError> {
     let mut out = vec![0; TX_DESC_SIZE_8822C + payload.len()];
@@ -227,6 +256,12 @@ fn build_usb_tx_frame_halmac(
         set_bits_le32(&mut out, 20, 7, 1, 1);
     }
     set_bits_le32(&mut out, 20, 8, 2, u32::from(tx_mode.stbc));
+    if options.descriptor == RealtekTxDescriptor::Jaguar2 {
+        let step = packet_power_db.map_or(options.jaguar2_packet_power_step, |db| {
+            jaguar2_packet_power_step(db)
+        });
+        set_bits_le32(&mut out, 20, 28, 3, u32::from(step & 0x07));
+    }
     if options.descriptor == RealtekTxDescriptor::Jaguar3
         && options.configured_channel_width == ChannelWidth::Mhz80
         && tx_mode.bandwidth == ChannelBandwidth::Mhz40
@@ -381,6 +416,57 @@ fn bits(word: u32, offset: u8, len: u8) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn radiotap_with_packet_power(db: i8) -> Vec<u8> {
+        let present = (1u32 << 2) | (1u32 << 10);
+        let mut packet = vec![0, 0, 10, 0];
+        packet.extend_from_slice(&present.to_le_bytes());
+        packet.push(12);
+        packet.push(db as u8);
+        packet.extend_from_slice(&[0u8; 24]);
+        packet
+    }
+
+    #[test]
+    fn jaguar2_descriptor_honors_radiotap_packet_power_delta() {
+        let frame = build_usb_tx_frame(
+            &radiotap_with_packet_power(-7),
+            RealtekTxOptions {
+                descriptor: RealtekTxDescriptor::Jaguar2,
+                ..RealtekTxOptions::default()
+            },
+        )
+        .unwrap();
+        let word = u32::from_le_bytes(frame[20..24].try_into().unwrap());
+        assert_eq!((word >> 28) & 0x07, 2);
+    }
+
+    #[test]
+    fn one_stream_capability_rejects_stbc() {
+        let mut mode = TxMode::ht(0);
+        mode.stbc = true;
+        let mut packet = openipc_core::build_stream_radiotap(mode);
+        packet.extend_from_slice(&[0u8; 24]);
+        let error = build_usb_tx_frame(
+            &packet,
+            RealtekTxOptions {
+                capabilities: Some(TxCapabilities {
+                    supported: true,
+                    spatial_streams: 1,
+                    stbc: false,
+                    ldpc: true,
+                    short_gi: true,
+                    max_bandwidth_mhz: 80,
+                }),
+                ..RealtekTxOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            RealtekTxError::UnsupportedStbc { spatial_streams: 1 }
+        ));
+    }
     use openipc_core::ieee80211::build_wfb_header_with_frame_type;
     use openipc_core::radiotap::{
         build_radiotap_header, build_stream_radiotap, build_stream_radiotap_on_channel,

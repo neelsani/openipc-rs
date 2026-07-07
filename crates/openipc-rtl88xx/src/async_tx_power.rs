@@ -3,6 +3,7 @@ use crate::device::RealtekDevice;
 use crate::phy::RfPath;
 use crate::regs::*;
 use crate::types::{ChannelWidth, ChipFamily, ChipInfo, DriverError};
+use crate::{quantize_tx_power_offset_qdb, TxPowerCaps, TxPowerState};
 
 const MGN_1M: u8 = 0x02;
 const MGN_2M: u8 = 0x04;
@@ -137,6 +138,118 @@ const TXAGC_RATES_8812: [[u8; 4]; 12] = [
 ];
 
 impl RealtekDevice {
+    /// Return runtime TX-power capabilities for the probed chipset.
+    pub async fn tx_power_caps_async(&self) -> Result<TxPowerCaps, DriverError> {
+        Ok(TxPowerCaps::for_chip(self.probe_chip_async().await?))
+    }
+
+    /// Shift the calibrated per-rate TX-power table by a relative quarter-dB amount.
+    pub async fn set_tx_power_offset_qdb_async(&self, qdb: i16) -> Result<i16, DriverError> {
+        if self
+            .cw_tone
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)?
+            .is_active()
+        {
+            return Ok(0);
+        }
+        let caps = self.tx_power_caps_async().await?;
+        let (applied, steps) = quantize_tx_power_offset_qdb(qdb, caps);
+        {
+            let mut control = self
+                .tx_power_control
+                .lock()
+                .map_err(|_| DriverError::DriverStatePoisoned)?;
+            control.offset_qdb = applied;
+            control.offset_steps = steps;
+        }
+        self.reapply_runtime_tx_power_async().await?;
+        Ok(applied)
+    }
+
+    /// Force a flat TXAGC index, or clear it to restore calibrated per-rate power.
+    pub async fn set_tx_power_index_override_async(
+        &self,
+        index: Option<u8>,
+    ) -> Result<(), DriverError> {
+        if self
+            .cw_tone
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)?
+            .is_active()
+        {
+            return Ok(());
+        }
+        let caps = self.tx_power_caps_async().await?;
+        if let Some(index) = index {
+            validate_tx_power(self.probe_chip_async().await?.family, index)?;
+            if index > caps.index_max {
+                return Err(DriverError::InvalidTxPower(index));
+            }
+        }
+        self.tx_power_control
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)?
+            .flat_index = index;
+        self.reapply_runtime_tx_power_async().await
+    }
+
+    /// Reapply the current runtime TX-power controls at the active channel.
+    pub async fn reapply_runtime_tx_power_async(&self) -> Result<(), DriverError> {
+        let radio = self
+            .current_radio_config()?
+            .ok_or(DriverError::RadioNotInitialized)?;
+        let chip = self.probe_chip_async().await?;
+        self.begin_tx_power_apply()?;
+        match chip.family {
+            ChipFamily::Rtl8822b => {
+                let rfe = self.efuse_info.get().map_or(0, |efuse| efuse.rfe_type);
+                self.apply_tx_power_8822b_async(chip, radio, rfe).await
+            }
+            ChipFamily::Rtl8821c => self.apply_tx_power_8821c_async(radio).await,
+            ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
+                self.set_default_tx_power_jaguar3_async(chip, radio.channel)
+                    .await
+            }
+            ChipFamily::Rtl8812 | ChipFamily::Rtl8814 | ChipFamily::Rtl8821 => {
+                let efuse = self
+                    .efuse_info
+                    .get()
+                    .copied()
+                    .ok_or(DriverError::RadioNotInitialized)?;
+                self.set_tx_power_level_from_efuse_for_chip_async(
+                    chip,
+                    radio.channel,
+                    radio.channel_width,
+                    efuse,
+                    16,
+                )
+                .await
+            }
+        }
+    }
+
+    /// Return the current runtime power controls and representative indexes.
+    pub async fn tx_power_state_async(&self) -> Result<TxPowerState, DriverError> {
+        let chip = self.probe_chip_async().await?;
+        let mut control = *self
+            .tx_power_control
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)?;
+        if matches!(chip.family, ChipFamily::Rtl8812 | ChipFamily::Rtl8821) {
+            control.cck_index = Some(self.read_u32_async(0x0c20).await? as u8);
+            control.ofdm_index = Some(self.read_u32_async(0x0c24).await? as u8);
+            control.mcs7_index = Some((self.read_u32_async(0x0c30).await? >> 24) as u8);
+            control.hardware_readback = true;
+        } else if chip.family.is_jaguar3() {
+            control.ofdm_index = Some(((self.read_u32_async(0x18e8).await? >> 10) & 0x7f) as u8);
+            control.mcs7_index = control.ofdm_index;
+            control.cck_index = Some(((self.read_u32_async(0x18a0).await? >> 16) & 0x7f) as u8);
+            control.hardware_readback = true;
+        }
+        Ok(control.public(true))
+    }
+
     /// Override TX power indexes for the current channel.
     ///
     /// `power` is the Realtek TXAGC index. Jaguar1 accepts `0..=63`; Jaguar3
@@ -148,21 +261,15 @@ impl RealtekDevice {
     ) -> Result<(), DriverError> {
         let chip = self.probe_chip_async().await?;
         validate_tx_power(chip.family, power)?;
-        match chip.family {
-            ChipFamily::Rtl8822b | ChipFamily::Rtl8821c => {
-                self.set_tx_power_flat_8822b_async(power).await
-            }
-            ChipFamily::Rtl8814 => {
-                self.set_tx_power_override_8814_async(chip, current_channel, power)
-                    .await
-            }
-            ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
-                self.set_tx_power_override_8822c_async(power).await
-            }
-            ChipFamily::Rtl8812 | ChipFamily::Rtl8821 => {
-                self.set_tx_power_override_8812_family_async(chip, current_channel, power)
-                    .await
-            }
+        self.tx_power_control
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)?
+            .flat_index = Some(power);
+        if self.current_radio_config()?.is_some() {
+            self.reapply_runtime_tx_power_async().await
+        } else {
+            self.apply_flat_tx_power_async(chip, current_channel, power)
+                .await
         }
     }
 
@@ -199,7 +306,15 @@ impl RealtekDevice {
         efuse: EfuseInfo,
         fallback_power: u8,
     ) -> Result<(), DriverError> {
-        if !efuse.tx_power.loaded {
+        self.begin_tx_power_apply()?;
+        if self
+            .tx_power_control
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)?
+            .flat_index
+            .is_some()
+            || !efuse.tx_power.loaded
+        {
             return self
                 .set_tx_power_level_for_chip_async(chip, current_channel, fallback_power)
                 .await;
@@ -260,6 +375,7 @@ impl RealtekDevice {
                         current_channel,
                     )
                     .unwrap_or(fallback_power);
+                    let power = self.controlled_tx_power_index(i16::from(power), chip.family)?;
                     word |= u32::from(power & !1) << (byte_idx * 8);
                 }
                 self.write_u32_async(register, word).await?;
@@ -273,6 +389,8 @@ impl RealtekDevice {
                 current_channel,
             )
             .unwrap_or(fallback_power);
+            let training_power =
+                self.controlled_tx_power_index(i16::from(training_power), chip.family)?;
             self.write_tx_power_training_8812_async(path, training_power)
                 .await?;
         }
@@ -312,6 +430,7 @@ impl RealtekDevice {
                         current_channel,
                     )
                     .unwrap_or(16);
+                    let power = self.controlled_tx_power_index(i16::from(power), chip.family)?;
                     self.write_txagc_table_8814_async(path, *rate, power)
                         .await?;
                 }
@@ -326,6 +445,7 @@ impl RealtekDevice {
         current_channel: u8,
         power: u8,
     ) -> Result<(), DriverError> {
+        let power = self.controlled_tx_power_index(i16::from(power), chip.family)?;
         let word = txagc_word(power);
         let include_cck = is_2ghz_channel(current_channel);
         for path in RfPath::iter(chip.total_rf_paths().min(2)) {
@@ -368,6 +488,7 @@ impl RealtekDevice {
         current_channel: u8,
         power: u8,
     ) -> Result<(), DriverError> {
+        let power = self.controlled_tx_power_index(i16::from(power), chip.family)?;
         let include_cck = is_2ghz_channel(current_channel);
         for path in RfPath::iter(chip.total_rf_paths()) {
             if include_cck {
@@ -395,7 +516,7 @@ impl RealtekDevice {
     }
 
     async fn set_tx_power_override_8822c_async(&self, power: u8) -> Result<(), DriverError> {
-        let power = power.min(0x7f);
+        let power = self.controlled_tx_power_index(i16::from(power), ChipFamily::Rtl8822c)?;
         for (register, mask) in [
             (0x18e8, 0x0001_fc00),
             (0x41e8, 0x0001_fc00),
@@ -440,6 +561,60 @@ impl RealtekDevice {
             self.set_bb_reg_async(0x1998, B_MASK_DWORD, value).await?;
         }
         Ok(())
+    }
+
+    async fn apply_flat_tx_power_async(
+        &self,
+        chip: ChipInfo,
+        channel: u8,
+        power: u8,
+    ) -> Result<(), DriverError> {
+        match chip.family {
+            ChipFamily::Rtl8822b | ChipFamily::Rtl8821c => {
+                self.set_tx_power_flat_8822b_async(power).await
+            }
+            ChipFamily::Rtl8814 => {
+                self.set_tx_power_override_8814_async(chip, channel, power)
+                    .await
+            }
+            ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
+                self.set_tx_power_override_8822c_async(power).await
+            }
+            ChipFamily::Rtl8812 | ChipFamily::Rtl8821 => {
+                self.set_tx_power_override_8812_family_async(chip, channel, power)
+                    .await
+            }
+        }
+    }
+
+    pub(crate) fn begin_tx_power_apply(&self) -> Result<(), DriverError> {
+        let mut control = self
+            .tx_power_control
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)?;
+        control.saturated_low = false;
+        control.saturated_high = false;
+        control.cck_index = None;
+        control.ofdm_index = None;
+        control.mcs7_index = None;
+        control.hardware_readback = false;
+        Ok(())
+    }
+
+    pub(crate) fn controlled_tx_power_index(
+        &self,
+        baseline: i16,
+        family: ChipFamily,
+    ) -> Result<u8, DriverError> {
+        let mut control = self
+            .tx_power_control
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)?;
+        let maximum = if family.is_jaguar3() { 0x7f } else { 0x3f };
+        let (index, low, high) = control.apply(baseline, maximum);
+        control.saturated_low |= low;
+        control.saturated_high |= high;
+        Ok(index)
     }
 }
 

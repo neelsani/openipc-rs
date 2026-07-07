@@ -5,6 +5,7 @@
 //! monitor-mode RX setup, and bulk-IN receive transfers. Packet parsing and the
 //! OpenIPC/WFB/RTP pipeline live in `openipc-core`.
 
+mod adapter_health;
 mod async_continuous_tx;
 mod async_cw;
 mod async_diagnostics;
@@ -31,14 +32,17 @@ mod beamforming;
 mod device;
 mod firmware;
 mod hop_prof;
+mod link_health;
 mod phy;
 mod power;
 mod regs;
 mod retune_state;
 mod rtl_data;
+mod rx_quality;
 mod time;
 mod tone_mask;
 mod tx;
+mod tx_control;
 mod tx_power_defaults;
 mod types;
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
@@ -46,6 +50,10 @@ mod usb_lock;
 mod usb_recovery;
 mod usb_transport;
 
+pub use adapter_health::{
+    classify_adapter_health, compare_efuse_maps, AdapterHealthInput, AdapterHealthReasons,
+    AdapterVerdict, EfuseStability, FirmwareBootStatus, REALTEK_EEPROM_ID,
+};
 pub use async_diagnostics::{BbDbgportRead, ThermalBucket, ThermalStatus};
 pub use async_iqk::IqkReport;
 pub use async_jaguar3_iqk::{Jaguar3PowerTrackingReport, Jaguar3PowerTrackingState};
@@ -57,10 +65,18 @@ pub use beamforming::{
     BeamformingReport,
 };
 pub use device::RealtekDevice;
+pub use link_health::{
+    classify_link_health, LinkHealth, LinkHealthInput, LinkHealthThresholds, LinkVerdict,
+};
+pub use rx_quality::{RxQuality, RxQualityAccumulator, RxQualitySnapshot};
 pub use tone_mask::{center_frequency_mhz, enumerate_mask_tones, CsiMaskSpec};
 pub use tx::{
     build_usb_tx_frame, RealtekTxDescriptor, RealtekTxError, RealtekTxOptions, TX_DESC_SIZE,
     TX_DESC_SIZE_8822C,
+};
+pub use tx_control::{
+    jaguar2_packet_power_db, jaguar2_packet_power_step, quantize_tx_power_offset_qdb,
+    TxCapabilities, TxErrorKind, TxPowerCaps, TxPowerState, TxStats,
 };
 pub use types::{
     is_supported_id, list_devices, list_supported_devices, supported_device, supported_family_hint,

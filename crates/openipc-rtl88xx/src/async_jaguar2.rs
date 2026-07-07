@@ -1314,7 +1314,7 @@ impl RealtekDevice {
         self.write_u32_async(0x0cb8, cb8).await
     }
 
-    async fn set_channel_bw_8821c_async(
+    pub(crate) async fn set_channel_bw_8821c_async(
         &self,
         chip: ChipInfo,
         radio: RadioConfig,
@@ -1748,7 +1748,7 @@ impl RealtekDevice {
         Ok(())
     }
 
-    async fn apply_tx_power_8822b_async(
+    pub(crate) async fn apply_tx_power_8822b_async(
         &self,
         chip: ChipInfo,
         radio: RadioConfig,
@@ -1757,6 +1757,7 @@ impl RealtekDevice {
         let Some(map) = self.efuse_logical_map.get() else {
             return Ok(());
         };
+        self.begin_tx_power_apply()?;
         let channel = radio.channel;
         if channel == 0 {
             return Ok(());
@@ -1804,14 +1805,33 @@ impl RealtekDevice {
             let bw20_diff1 = signed_nibble_8822b(diff1 & 0x0f);
             let ht_diff0 = if bandwidth == 0 { bw20_diff0 } else { 0 };
             let ht_diff1 = if bandwidth == 0 { bw20_diff1 } else { 0 };
-            let clamp = |value: i16, limit: i8| value.clamp(0, i16::from(limit.min(63))) as u8;
-            let cck = clamp(i16::from(cck_base), limit_cck);
-            let ofdm = clamp(i16::from(bw40_base) + i16::from(ofdm_diff), limit_ofdm);
-            let ht1 = clamp(i16::from(bw40_base) + i16::from(ht_diff0), limit_ht);
-            let ht2 = clamp(
-                i16::from(bw40_base) + i16::from(ht_diff0) + i16::from(ht_diff1),
-                limit_ht,
-            );
+            let clamp = |value: i16, limit: i8| value.clamp(0, i16::from(limit.min(63)));
+            let cck =
+                self.controlled_tx_power_index(clamp(i16::from(cck_base), limit_cck), chip.family)?;
+            let ofdm = self.controlled_tx_power_index(
+                clamp(i16::from(bw40_base) + i16::from(ofdm_diff), limit_ofdm),
+                chip.family,
+            )?;
+            let ht1 = self.controlled_tx_power_index(
+                clamp(i16::from(bw40_base) + i16::from(ht_diff0), limit_ht),
+                chip.family,
+            )?;
+            let ht2 = self.controlled_tx_power_index(
+                clamp(
+                    i16::from(bw40_base) + i16::from(ht_diff0) + i16::from(ht_diff1),
+                    limit_ht,
+                ),
+                chip.family,
+            )?;
+            if path == 0 {
+                let mut control = self
+                    .tx_power_control
+                    .lock()
+                    .map_err(|_| DriverError::DriverStatePoisoned)?;
+                control.cck_index = (!is_5g).then_some(cck);
+                control.ofdm_index = Some(ofdm);
+                control.mcs7_index = Some(ht1);
+            }
             let base = 0x1d00 + path as u16 * 0x80;
             if !is_5g {
                 self.write_u32_async(base, u32::from(cck) * 0x0101_0101)
@@ -1832,10 +1852,14 @@ impl RealtekDevice {
         Ok(())
     }
 
-    async fn apply_tx_power_8821c_async(&self, radio: RadioConfig) -> Result<(), DriverError> {
+    pub(crate) async fn apply_tx_power_8821c_async(
+        &self,
+        radio: RadioConfig,
+    ) -> Result<(), DriverError> {
         let Some(map) = self.efuse_logical_map.get() else {
             return Ok(());
         };
+        self.begin_tx_power_apply()?;
         let channel = radio.channel;
         if channel == 0 {
             return Ok(());
@@ -1896,6 +1920,28 @@ impl RealtekDevice {
         let band = u8::from(is_5g);
         let limit = |section| tx_power_limit_8821c(band, bandwidth, section, channel);
 
+        let control = *self
+            .tx_power_control
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)?;
+        if let Some(flat) = control.flat_index {
+            let (index, low, high) = control.apply(i16::from(flat), 63);
+            self.set_tx_power_flat_8822b_async(index).await?;
+            let mut state = self
+                .tx_power_control
+                .lock()
+                .map_err(|_| DriverError::DriverStatePoisoned)?;
+            state.saturated_low = low;
+            state.saturated_high = high;
+            state.cck_index = (!is_5g).then_some(index);
+            state.ofdm_index = Some(index);
+            state.mcs7_index = Some(index);
+            return Ok(());
+        }
+        let offset = control.offset_steps;
+        let cck_base = cck_base + offset;
+        let ofdm_base = ofdm_base + offset;
+        let ht_base = ht_base + offset;
         if !is_5g {
             self.write_tx_power_section_8821c_async(0x00, cck_base, 50, limit(0), &[0x3234_3638])
                 .await?;
@@ -1949,6 +1995,15 @@ impl RealtekDevice {
             )
             .await?;
         }
+        let mut state = self
+            .tx_power_control
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)?;
+        state.cck_index = (!is_5g).then_some(cck_base.clamp(0, 63) as u8);
+        state.ofdm_index = Some(ofdm_base.clamp(0, 63) as u8);
+        state.mcs7_index = Some(ht_base.clamp(0, 63) as u8);
+        state.saturated_low = cck_base < 0 || ofdm_base < 0 || ht_base < 0;
+        state.saturated_high = cck_base > 63 || ofdm_base > 63 || ht_base > 63;
         Ok(())
     }
 

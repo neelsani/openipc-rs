@@ -7,6 +7,7 @@
 use crate::device::RealtekDevice;
 use crate::regs::{BIT11, BIT19, BIT28, BIT29, BIT30, BIT8};
 use crate::types::{ChipFamily, DriverError};
+use std::sync::atomic::Ordering;
 
 const TXBF_CTRL: u16 = 0x042c;
 const RX_FILTER_MAP0: u16 = 0x06a0;
@@ -20,6 +21,8 @@ const SOUNDING_PROTOCOL_CONTROL: u16 = 0x0718;
 const NDP_STANDBY: u16 = 0x071b;
 const SELF_MAC: u16 = 0x0610;
 const OUR_AID: u16 = 0x1680;
+const BBPSF_CONTROL: u16 = 0x06dc;
+const CSI_RESPONSE_RATE_SET: u16 = 0x1678;
 
 /// Feedback format emitted by an armed beamformee.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -205,6 +208,105 @@ impl<'a> LsbBitReader<'a> {
 }
 
 impl RealtekDevice {
+    /// Configure Jaguar3's beamformer entry for closed-loop steering.
+    ///
+    /// The V-matrix apply bit remains off until [`Self::observe_beamforming_report`]
+    /// sees a compressed report from `peer_mac`. This avoids Devourer's measured
+    /// degradation from enabling TXBF before hardware has a valid matrix.
+    pub async fn arm_transmit_beamforming_async(
+        &self,
+        peer_mac: [u8; 6],
+        own_mac: Option<[u8; 6]>,
+    ) -> Result<(), DriverError> {
+        let chip = self.probe_chip_async().await?;
+        if !chip.family.is_jaguar3() {
+            return Err(DriverError::UnsupportedBeamformingMode(chip.family));
+        }
+        self.arm_beamforming_sounder_async(own_mac).await?;
+        self.write_mac_address_async(BEAMFORMER_INFO0, peer_mac)
+            .await?;
+        let receive_streams = chip.total_rf_paths().clamp(1, 2) as u16;
+        let columns = receive_streams - 1;
+        let csi_param = (3 << 10) | (1 << 8) | (1 << 3) | columns;
+        self.write_u16_async(CSI_REPORT_PARAM_20, csi_param).await?;
+        self.write_u8_async(NDP_STANDBY, 0x70).await?;
+        let bbpsf = self.read_u32_async(BBPSF_CONTROL).await? | (1 << 30);
+        self.write_u32_async(BBPSF_CONTROL, bbpsf).await?;
+        self.write_u32_async(CSI_RESPONSE_RATE_SET, 0x0550).await?;
+        *self
+            .beamforming_peer
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)? = Some(peer_mac);
+        self.beamforming_report_ready
+            .store(false, Ordering::Release);
+        self.beamforming_apply_on.store(false, Ordering::Release);
+        Ok(())
+    }
+
+    /// Observe one received IEEE 802.11 frame for the TXBF self-gating path.
+    pub fn observe_beamforming_report(&self, frame: &[u8]) -> bool {
+        let Some(report) = parse_beamforming_report(frame) else {
+            return false;
+        };
+        let matches = self
+            .beamforming_peer
+            .lock()
+            .ok()
+            .and_then(|peer| *peer)
+            .is_some_and(|peer| report.vht && report.source == peer);
+        if matches {
+            self.beamforming_report_count
+                .fetch_add(1, Ordering::Relaxed);
+            self.beamforming_report_ready.store(true, Ordering::Release);
+        }
+        matches
+    }
+
+    /// Number of matching compressed beamforming reports observed.
+    pub fn beamforming_report_count(&self) -> u32 {
+        self.beamforming_report_count.load(Ordering::Relaxed)
+    }
+
+    /// Whether Jaguar3 is currently applying its hardware V matrix.
+    pub fn transmit_beamforming_active(&self) -> bool {
+        self.beamforming_apply_on.load(Ordering::Acquire)
+    }
+
+    pub(crate) async fn apply_pending_beamforming_async(&self) -> Result<(), DriverError> {
+        if self.beamforming_apply_on.load(Ordering::Acquire)
+            || !self.beamforming_report_ready.load(Ordering::Acquire)
+        {
+            return Ok(());
+        }
+        let chip = self.probe_chip_async().await?;
+        if !chip.family.is_jaguar3() {
+            return Ok(());
+        }
+        let width = self
+            .current_radio_config()?
+            .map_or(0, |radio| match radio.channel_width {
+                crate::ChannelWidth::Mhz20
+                | crate::ChannelWidth::Mhz10
+                | crate::ChannelWidth::Mhz5 => 0,
+                crate::ChannelWidth::Mhz40 => 1,
+                crate::ChannelWidth::Mhz80 => 2,
+            });
+        let mut control = self.read_u16_async(TXBF_CTRL).await?;
+        control &= !((1 << 9) | (1 << 10) | (1 << 11));
+        control |= 1 << 9;
+        if width >= 1 {
+            control |= 1 << 10;
+        }
+        if width >= 2 {
+            control |= 1 << 11;
+        }
+        control |= 1 << 15;
+        self.write_u16_async(TXBF_CTRL, control).await?;
+        self.beamforming_apply_on.store(true, Ordering::Release);
+        log::info!(target: "openipc_rtl88xx::beamforming", "compressed report ingested; Jaguar3 TXBF V-matrix apply enabled");
+        Ok(())
+    }
+
     /// Arm the adapter as an explicit-sounding beamformer.
     ///
     /// `own_mac` must match the transmitter address in injected NDPA frames.

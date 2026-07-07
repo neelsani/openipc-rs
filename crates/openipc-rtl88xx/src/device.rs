@@ -7,7 +7,7 @@ use nusb::transfer::{Bulk, In, Out};
 #[cfg(not(target_arch = "wasm32"))]
 use nusb::MaybeFuture;
 use openipc_core::realtek::{parse_rx_aggregate_with_kind, RealtekRxPacket, RxDescriptorKind};
-use std::sync::atomic::AtomicU8;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8};
 use std::sync::{Mutex, OnceLock};
 
 use crate::async_continuous_tx::ContinuousTxState;
@@ -60,6 +60,16 @@ pub struct RealtekDevice {
     pub(crate) cw_tone: Mutex<CwToneState>,
     pub(crate) continuous_tx: Mutex<ContinuousTxState>,
     pub(crate) retune_state: Mutex<FastRetuneState>,
+    pub(crate) rx_path_mask: Mutex<Option<u8>>,
+    pub(crate) tx_stats: Mutex<crate::TxStats>,
+    pub(crate) tx_power_control: Mutex<crate::tx_control::TxPowerControl>,
+    pub(crate) rx_quality: crate::RxQualityAccumulator,
+    pub(crate) cca_disabled: Mutex<bool>,
+    pub(crate) beamforming_peer: Mutex<Option<[u8; 6]>>,
+    pub(crate) beamforming_report_ready: AtomicBool,
+    pub(crate) beamforming_apply_on: AtomicBool,
+    pub(crate) beamforming_report_count: AtomicU32,
+    pub(crate) firmware_boot_status: Mutex<crate::FirmwareBootStatus>,
     #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
     pub(crate) _usb_lock: Option<UsbDeviceLock>,
 }
@@ -324,6 +334,16 @@ impl RealtekDevice {
             cw_tone: Mutex::new(CwToneState::default()),
             continuous_tx: Mutex::new(ContinuousTxState::default()),
             retune_state: Mutex::new(FastRetuneState::default()),
+            rx_path_mask: Mutex::new(None),
+            tx_stats: Mutex::new(crate::TxStats::default()),
+            tx_power_control: Mutex::new(crate::tx_control::TxPowerControl::default()),
+            rx_quality: crate::RxQualityAccumulator::default(),
+            cca_disabled: Mutex::new(false),
+            beamforming_peer: Mutex::new(None),
+            beamforming_report_ready: AtomicBool::new(false),
+            beamforming_apply_on: AtomicBool::new(false),
+            beamforming_report_count: AtomicU32::new(0),
+            firmware_boot_status: Mutex::new(crate::FirmwareBootStatus::default()),
             #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
             _usb_lock: usb_lock,
         })
@@ -414,6 +434,18 @@ impl RealtekDevice {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Read the currently programmed Jaguar1 receive-chain mask.
+    pub fn rx_path_mask(&self) -> Result<u8, DriverError> {
+        block_on_ready(self.rx_path_mask_async())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Disable or restore Jaguar3's MAC EDCCA transmit-deferral gate.
+    pub fn set_cca_disabled(&self, disabled: bool) -> Result<(), DriverError> {
+        block_on_ready(self.set_cca_disabled_async(disabled))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     /// Open and clear the selected bulk-IN endpoint.
     pub fn bulk_in_endpoint(&self) -> Result<nusb::Endpoint<Bulk, In>, DriverError> {
         let mut ep = self.open_bulk_in_endpoint()?;
@@ -460,6 +492,7 @@ impl RealtekDevice {
         mut radio: crate::types::RadioConfig,
     ) -> Result<usize, DriverError> {
         let chip = self.probe_chip()?;
+        block_on_ready(self.apply_pending_beamforming_async())?;
         if let Some(channel) = openipc_core::parse_radiotap_tx_channel(radiotap_packet)
             .map_err(|error| DriverError::TxBuild(error.into()))?
         {
@@ -472,18 +505,43 @@ impl RealtekDevice {
                 configured_channel_width: radio.channel_width,
                 descriptor: RealtekTxDescriptor::for_chip_family(chip.family),
                 legacy_8812_descriptor: std::env::var_os("DEVOURER_TX_LEGACY_8812_DESC").is_some(),
+                capabilities: Some(crate::TxCapabilities::for_chip(chip)),
                 ..RealtekTxOptions::default()
             },
         )
         .map_err(DriverError::TxBuild)?;
         let mut ep = self.bulk_out_endpoint()?;
-        Self::send_usb_tx_frame_on(&mut ep, &usb_frame)
+        self.send_usb_tx_frame_tracked_on(&mut ep, &usb_frame)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     /// Override the Realtek TXAGC index used for adaptive-link uplink packets.
     pub fn set_tx_power_override(&self, current_channel: u8, power: u8) -> Result<(), DriverError> {
         block_on_ready(self.set_tx_power_override_async(current_channel, power))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Shift calibrated TX power by a relative quarter-dB amount.
+    pub fn set_tx_power_offset_qdb(&self, qdb: i16) -> Result<i16, DriverError> {
+        block_on_ready(self.set_tx_power_offset_qdb_async(qdb))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Force a flat TXAGC index, or pass `None` to restore per-rate calibration.
+    pub fn set_tx_power_index_override(&self, index: Option<u8>) -> Result<(), DriverError> {
+        block_on_ready(self.set_tx_power_index_override_async(index))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Read runtime TX-power capabilities.
+    pub fn tx_power_caps(&self) -> Result<crate::TxPowerCaps, DriverError> {
+        block_on_ready(self.tx_power_caps_async())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Read active TX-power controls and representative hardware indexes.
+    pub fn tx_power_state(&self) -> Result<crate::TxPowerState, DriverError> {
+        block_on_ready(self.tx_power_state_async())
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -502,6 +560,18 @@ impl RealtekDevice {
     /// Read current thermal status.
     pub fn read_thermal_status(&self) -> Result<ThermalStatus, DriverError> {
         block_on_ready(self.read_thermal_status_async())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Drain accumulated per-frame quality and sample frame-free RX energy.
+    pub fn read_rx_quality(&self) -> Result<crate::RxQuality, DriverError> {
+        block_on_ready(self.read_rx_quality_async())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Perform repeated fresh physical EFUSE reads for adapter diagnostics.
+    pub fn probe_efuse_stability(&self, reads: u16) -> Result<crate::EfuseStability, DriverError> {
+        block_on_ready(self.probe_efuse_stability_async(reads))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -613,6 +683,19 @@ impl RealtekDevice {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Send through a pre-opened endpoint and include the transfer in this device's TX stats.
+    pub fn send_packet_on_tracked(
+        &self,
+        ep: &mut nusb::Endpoint<Bulk, Out>,
+        radiotap_packet: &[u8],
+        options: RealtekTxOptions,
+    ) -> Result<usize, DriverError> {
+        let usb_frame =
+            build_usb_tx_frame(radiotap_packet, options).map_err(DriverError::TxBuild)?;
+        self.send_usb_tx_frame_tracked_on(ep, &usb_frame)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     /// Send a fully-built Realtek USB TX frame on an existing endpoint.
     pub fn send_usb_tx_frame_on(
         ep: &mut nusb::Endpoint<Bulk, Out>,
@@ -639,13 +722,74 @@ impl RealtekDevice {
         unreachable!("retry loop either returns or reports the final USB error")
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn send_usb_tx_frame_tracked_on(
+        &self,
+        ep: &mut nusb::Endpoint<Bulk, Out>,
+        usb_frame: &[u8],
+    ) -> Result<usize, DriverError> {
+        self.record_tx_submission();
+        let result = Self::send_usb_tx_frame_on(ep, usb_frame);
+        if let Err(error) = &result {
+            let message = error.to_string();
+            self.record_tx_failure(
+                if message.contains("cancelled") || message.contains("timeout") {
+                    crate::TxErrorKind::Timeout
+                } else if message.contains("stall") {
+                    crate::TxErrorKind::Stall
+                } else if message.contains("disconnect") {
+                    crate::TxErrorKind::Disconnected
+                } else {
+                    crate::TxErrorKind::Other
+                },
+            );
+        }
+        result
+    }
+
+    /// Return a snapshot of driver-side TX submissions and failures.
+    pub fn tx_stats(&self) -> crate::TxStats {
+        self.tx_stats
+            .lock()
+            .map_or_else(|_| crate::TxStats::default(), |stats| *stats)
+    }
+
+    pub(crate) fn record_tx_submission(&self) {
+        if let Ok(mut stats) = self.tx_stats.lock() {
+            stats.submitted = stats.submitted.saturating_add(1);
+        }
+    }
+
+    pub(crate) fn record_tx_failure(&self, kind: crate::TxErrorKind) {
+        if let Ok(mut stats) = self.tx_stats.lock() {
+            stats.failed = stats.failed.saturating_add(1);
+            stats.last_was_timeout = kind == crate::TxErrorKind::Timeout;
+            stats.last_error = Some(kind);
+        }
+    }
+
     /// Parse a Realtek RX aggregate using the shared core parser.
     pub fn parse_rx_transfer<'a>(
         &self,
         transfer: &'a [u8],
     ) -> Result<Vec<RealtekRxPacket<'a>>, DriverError> {
-        parse_rx_aggregate_with_kind(transfer, self.rx_descriptor_kind())
-            .map_err(DriverError::InvalidTransfer)
+        let packets = parse_rx_aggregate_with_kind(transfer, self.rx_descriptor_kind())
+            .map_err(DriverError::InvalidTransfer)?;
+        for packet in &packets {
+            if packet.attrib.pkt_rpt_type == openipc_core::realtek::RxPacketType::NormalRx {
+                self.rx_quality.observe(&packet.attrib);
+                self.observe_beamforming_report(packet.data);
+            }
+        }
+        Ok(packets)
+    }
+
+    /// Drain the rolling RX quality window and combine it with frame-free energy.
+    pub async fn read_rx_quality_async(&self) -> Result<crate::RxQuality, DriverError> {
+        let energy = self.read_rx_energy_async().await?;
+        Ok(self
+            .rx_quality
+            .quality(Some(energy), crate::LinkHealthThresholds::default()))
     }
 
     /// Return the RX descriptor layout implied by this adapter's VID/PID.

@@ -116,6 +116,7 @@ pub fn tx_options(config: &RadioDeviceConfig, chip_family: ChipFamily) -> Realte
         current_channel: config.radio.channel,
         configured_channel_width: config.radio.channel_width,
         descriptor: RealtekTxDescriptor::for_chip_family(chip_family),
+        capabilities: Some(openipc_rtl88xx::TxCapabilities::for_family(chip_family)),
         legacy_8812_descriptor: config.tx_legacy_8812_descriptor,
         ..RealtekTxOptions::default()
     }

@@ -484,6 +484,11 @@ pub struct MonitorOptions {
     pub disable_iqk: bool,
     /// Skip RTL8822E TX gain calibration after IQK.
     pub skip_txgapk: bool,
+    /// Disable Jaguar3's MAC EDCCA transmit-deferral gate.
+    ///
+    /// This deliberately does not apply the vendor BB `dis_cca` writes, which
+    /// Devourer measured to make monitor RX deaf to OFDM.
+    pub disable_cca: bool,
     /// RTL8814 firmware download path.
     pub firmware_8814_mode: Firmware8814Mode,
     /// Optional RTL8814 firmware chunk size override.
@@ -513,6 +518,7 @@ impl Default for MonitorOptions {
             force_iqk: false,
             disable_iqk: false,
             skip_txgapk: false,
+            disable_cca: false,
             firmware_8814_mode: Firmware8814Mode::Kernel,
             firmware_8814_chunk: None,
             rx_path_mask: None,
@@ -539,6 +545,7 @@ impl MonitorOptions {
                 disable_iqk: std::env::var_os("DEVOURER_DISABLE_IQK").is_some()
                     || std::env::var_os("DEVOURER_SKIP_IQK").is_some(),
                 skip_txgapk: std::env::var_os("DEVOURER_SKIP_TXGAPK").is_some(),
+                disable_cca: std::env::var_os("DEVOURER_DIS_CCA").is_some(),
                 firmware_8814_mode: std::env::var("DEVOURER_8814_FWDL")
                     .ok()
                     .and_then(|value| Firmware8814Mode::from_env_value(&value))
@@ -644,6 +651,8 @@ pub enum DriverError {
     UnsupportedIqkPath(ChipFamily),
     /// RX-chain masking is only supported by the Jaguar1 register layout.
     UnsupportedRxPathMask(ChipFamily),
+    /// EDCCA control is only available on Jaguar3.
+    UnsupportedCcaControl(ChipFamily),
     /// Requested beamforming feedback mode is unsupported on this generation.
     UnsupportedBeamformingMode(ChipFamily),
     /// TX power override was outside the Realtek TXAGC range.
@@ -694,6 +703,9 @@ impl fmt::Display for DriverError {
             }
             Self::UnsupportedRxPathMask(chip) => {
                 write!(f, "{} does not use the Jaguar1 RX-path mask", chip.name())
+            }
+            Self::UnsupportedCcaControl(chip) => {
+                write!(f, "{} does not support Jaguar3 EDCCA control", chip.name())
             }
             Self::UnsupportedBeamformingMode(chip) => {
                 write!(

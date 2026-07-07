@@ -39,6 +39,18 @@ OpenIPC/devourer 57cec5d Animated NHM documentation
 OpenIPC/devourer b27da75/df98688 Visual RF, TX, sounding, diversity, and hopping documentation
 OpenIPC/devourer bd44411 FastRetune on all generations and active two-ended sounding sweep
 OpenIPC/devourer 3ec1ab1 Write-only compose caches and kickless FHSS retuning
+OpenIPC/devourer d19035d Runtime TX-power and all-generation thermal API
+OpenIPC/devourer 31fac7b Sticky Jaguar1 runtime RX-path masks
+OpenIPC/devourer 686c42f Link-health classifier
+OpenIPC/devourer c0f7609 Jaguar2 per-packet TXPWR_OFSET
+OpenIPC/devourer aabb011 TX capabilities and 1T1R STBC guard
+OpenIPC/devourer 50e125a Safe Jaguar3 MAC EDCCA research control
+OpenIPC/devourer 61a9912 Driver-side TX submission statistics
+OpenIPC/devourer e0e5307 Rolling RX quality and passive noise floor
+OpenIPC/devourer d7addaa Self-gated Jaguar3 TX beamforming apply
+OpenIPC/devourer 645eed0 Typed construction-time device configuration
+OpenIPC/devourer a84a6f0 Adapter-health/EFUSE stability diagnostics
+OpenIPC/devourer 40e3a2a Bus-neutral refactor and Linux VFIO PCIe transport
 ```
 
 ## Audit Plan
@@ -234,7 +246,7 @@ limited to demo environment variables:
   markers, matching the useful behavior of devourer's MCS-headroom probe while
   retaining the Rust per-packet radiotap TX path.
 - `fast_retune[_async]` mirrors Devourer's generation-specific lean hop path
-  through `3ec1ab1`.
+  through `40e3a2a`.
   Jaguar1 caches per-path RF18 and channel buckets; Jaguar2 also applies its
   RF-BE/DF channel constants while omitting the hardware-validated unnecessary
   per-hop RX/IGI kick; Jaguar3 preserves the RF18/RXBB ordering,
@@ -255,6 +267,44 @@ limited to demo environment variables:
   bundles. Active two-ended sounding remains application policy: callers
   combine these primitives with their own probe traffic and dwell schedule
   instead of starting a hidden driver thread.
+
+### Runtime Link And Adapter Health
+
+The `3ec1ab1..40e3a2a` runtime APIs are represented directly in Rust:
+
+- `TxPowerCaps`, `set_tx_power_offset_qdb[_async]`,
+  `set_tx_power_index_override[_async]`, and `TxPowerState` implement the
+  sticky calibrated-table offset plus optional flat-index model. Offsets are
+  quantized in quarter-dB, folded after the calibrated/regulatory table, and
+  expose rail saturation.
+- Jaguar2 reads radiotap `DBM_TX_POWER` as a relative per-frame trim and maps
+  it to the measured descriptor LUT: `0, -3, -7, -11, +3, +6 dB`.
+- `TxCapabilities` reports stream count, STBC, LDPC, SGI, and maximum width.
+  Descriptor building rejects STBC on a 1T1R adapter.
+- `TxStats` tracks submissions and final failures, retaining whether the last
+  failure was timeout/backpressure, stall, disconnect, or another error.
+- `RxQualityAccumulator` drains windowed RSSI/SNR/EVM, computes the passive
+  `RSSI - SNR` noise floor, and combines it with `RxEnergy` through the measured
+  `LinkHealth` classifier.
+- `probe_efuse_stability[_async]` compares fresh physical EFUSE reads;
+  `FirmwareBootStatus` preserves the last initialization result; and
+  `classify_adapter_health` grades those with an application RX smoke test.
+- `arm_transmit_beamforming_async` programs Jaguar3's beamformer entry. The
+  apply bit is self-gated until `observe_beamforming_report` sees a VHT
+  compressed report from the configured peer.
+- `set_cca_disabled[_async]` contains only Devourer's safe MAC EDCCA writes.
+  The vendor BB recipe is intentionally absent because it was measured to make
+  monitor RX deaf to OFDM.
+
+These are explicit calls and state objects. The crate does not start thermal,
+quality, health, or control threads. Native apps normally schedule them on the
+radio worker; WASM apps schedule the same async calls from their event loop.
+
+The final upstream commit also introduces a VFIO PCIe transport for RTL8821CE.
+That is not copied into `openipc-rtl88xx`: this crate is the cross-platform
+`nusb`/WebUSB driver for USB ground-station adapters. A future PCIe backend
+belongs behind a separate Linux-only transport crate so VFIO does not leak into
+Windows, macOS, Android, or browser builds.
 
 The July 4 USB hardening is also mirrored. Desktop open helpers take a
 topology-keyed process lock before opening the adapter, claim interface 0 before

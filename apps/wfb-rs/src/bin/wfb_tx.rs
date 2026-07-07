@@ -842,7 +842,11 @@ fn send_radio_packet_with_retry(
 ) -> CliResult<usize> {
     let mut attempt = 0u32;
     loop {
-        match RealtekDevice::send_packet_on(&mut output.ep_out, radio_packet, output.tx_options) {
+        match output.device.send_packet_on_tracked(
+            &mut output.ep_out,
+            radio_packet,
+            output.tx_options,
+        ) {
             Ok(written) => return Ok(written),
             Err(err) if attempt < config.inject_retries => {
                 attempt += 1;

@@ -1387,17 +1387,31 @@ impl RealtekDevice {
             .await
     }
 
-    async fn set_default_tx_power_jaguar3_async(
+    pub(crate) async fn set_default_tx_power_jaguar3_async(
         &self,
         chip: ChipInfo,
         channel: u8,
     ) -> Result<(), DriverError> {
-        if chip.family == ChipFamily::Rtl8822c {
+        self.begin_tx_power_apply()?;
+        let control = *self
+            .tx_power_control
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)?;
+        if let Some(flat) = control.flat_index {
+            let index = self.controlled_tx_power_index(i16::from(flat), chip.family)?;
             return self
-                .set_tx_power_ref_jaguar3_async(0x28, 0x28, true, false)
+                .set_tx_power_ref_jaguar3_async(index, index, true, false)
+                .await;
+        }
+        if chip.family == ChipFamily::Rtl8822c {
+            let index = self.controlled_tx_power_index(0x28, chip.family)?;
+            return self
+                .set_tx_power_ref_jaguar3_async(index, index, true, false)
                 .await;
         }
         let (base_a, base_b) = self.tx_power_refs_8822e(channel);
+        let base_a = self.controlled_tx_power_index(i16::from(base_a), chip.family)?;
+        let base_b = self.controlled_tx_power_index(i16::from(base_b), chip.family)?;
         // On 8822E, touching path-B's OFDM reference while RX is enabled
         // desensitizes the receiver. Keep the table-programmed value for this
         // one field during combined TX/RX bring-up; explicit TX overrides still

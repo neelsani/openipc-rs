@@ -100,6 +100,16 @@ impl RealtekDevice {
                 crate::async_continuous_tx::ContinuousTxState::default(),
             ),
             retune_state: std::sync::Mutex::new(crate::retune_state::FastRetuneState::default()),
+            rx_path_mask: std::sync::Mutex::new(None),
+            tx_stats: std::sync::Mutex::new(crate::TxStats::default()),
+            tx_power_control: std::sync::Mutex::new(crate::tx_control::TxPowerControl::default()),
+            rx_quality: crate::RxQualityAccumulator::default(),
+            cca_disabled: std::sync::Mutex::new(false),
+            beamforming_peer: std::sync::Mutex::new(None),
+            beamforming_report_ready: std::sync::atomic::AtomicBool::new(false),
+            beamforming_apply_on: std::sync::atomic::AtomicBool::new(false),
+            beamforming_report_count: std::sync::atomic::AtomicU32::new(0),
+            firmware_boot_status: std::sync::Mutex::new(crate::FirmwareBootStatus::default()),
         })
     }
 
@@ -138,14 +148,17 @@ impl RealtekDevice {
             radio.channel_width
         );
         let chip = self.probe_chip_async().await?;
+        self.prepare_firmware_boot_status(false)?;
         log::debug!(target: "openipc_rtl88xx::init", "probed Realtek adapter: {chip:?}");
         if chip.family.is_jaguar2() {
+            self.prepare_firmware_boot_status(true)?;
             let report = self
                 .initialize_monitor_jaguar2_async(chip, radio, options)
                 .await?;
             self.apply_interference_mitigation_async(chip, radio, options)
                 .await?;
             self.note_full_tune(radio)?;
+            self.note_firmware_boot_status(report.firmware_downloaded, true)?;
             return Ok(report);
         }
         let mut firmware_downloaded = false;
@@ -175,12 +188,17 @@ impl RealtekDevice {
         );
 
         if chip.family.is_jaguar3() {
+            self.prepare_firmware_boot_status(!fw_already_running)?;
             let report = self
                 .initialize_monitor_jaguar3_async(chip, radio, options, fw_already_running)
                 .await?;
+            if options.disable_cca {
+                self.set_cca_disabled_async(true).await?;
+            }
             self.apply_interference_mitigation_async(chip, radio, options)
                 .await?;
             self.note_full_tune(radio)?;
+            self.note_firmware_boot_status(report.firmware_downloaded, true)?;
             return Ok(report);
         }
 
@@ -191,6 +209,7 @@ impl RealtekDevice {
         let should_run_boot_path =
             !fw_already_running || matches!(chip.family, ChipFamily::Rtl8812 | ChipFamily::Rtl8821);
         if should_run_boot_path {
+            self.prepare_firmware_boot_status(true)?;
             match chip.family {
                 ChipFamily::Rtl8812 | ChipFamily::Rtl8821 => {
                     self.power_on_jaguar_async(chip).await?;
@@ -251,8 +270,15 @@ impl RealtekDevice {
         if options.should_run_iqk(chip.family) {
             let _ = self.run_iqk_async(chip, radio.channel).await?;
         }
+        if options.disable_cca && chip.family.is_jaguar3() {
+            self.set_cca_disabled_async(true).await?;
+        }
         if let Some(mask) = options.rx_path_mask {
             self.set_rx_path_mask_for_chip_async(chip, mask).await?;
+            *self
+                .rx_path_mask
+                .lock()
+                .map_err(|_| DriverError::DriverStatePoisoned)? = Some(mask);
         }
         self.set_monitor_mode_async(options.accept_bad_fcs).await?;
         self.apply_interference_mitigation_async(chip, radio, options)
@@ -274,6 +300,7 @@ impl RealtekDevice {
             report.firmware_downloaded
         );
         self.note_full_tune(radio)?;
+        self.note_firmware_boot_status(report.firmware_downloaded, true)?;
         Ok(report)
     }
 
@@ -303,6 +330,8 @@ impl RealtekDevice {
                 radio.channel_width,
             )
             .await?;
+            self.set_default_tx_power_jaguar3_async(chip, radio.channel)
+                .await?;
         } else if chip.family.is_jaguar2() {
             let efuse = if let Some(efuse) = self.efuse_info.get().copied() {
                 efuse
@@ -311,8 +340,16 @@ impl RealtekDevice {
                 let _ = self.efuse_info.set(efuse);
                 efuse
             };
-            self.set_channel_bw_8822b_async(chip, radio, efuse.rfe_type)
-                .await?;
+            if chip.family == ChipFamily::Rtl8821c {
+                self.set_channel_bw_8821c_async(chip, radio, efuse.rfe_type)
+                    .await?;
+                self.apply_tx_power_8821c_async(radio).await?;
+            } else {
+                self.set_channel_bw_8822b_async(chip, radio, efuse.rfe_type)
+                    .await?;
+                self.apply_tx_power_8822b_async(chip, radio, efuse.rfe_type)
+                    .await?;
+            }
         } else {
             let efuse = if let Some(efuse) = self.efuse_info.get().copied() {
                 efuse
@@ -323,6 +360,24 @@ impl RealtekDevice {
             };
             self.set_channel_with_options_async(chip, radio, efuse, false)
                 .await?;
+        }
+        if chip.family.is_jaguar3() {
+            let disabled = *self
+                .cca_disabled
+                .lock()
+                .map_err(|_| DriverError::DriverStatePoisoned)?;
+            if disabled {
+                self.apply_cca_disabled_async(true).await?;
+            }
+        }
+        if !chip.family.uses_halmac_descriptor() {
+            let mask = *self
+                .rx_path_mask
+                .lock()
+                .map_err(|_| DriverError::DriverStatePoisoned)?;
+            if let Some(mask) = mask {
+                self.write_u8_async(0x0808, mask).await?;
+            }
         }
         self.note_full_tune(radio)
     }
@@ -398,6 +453,39 @@ impl RealtekDevice {
         Ok(())
     }
 
+    fn note_firmware_boot_status(&self, attempted: bool, ready: bool) -> Result<(), DriverError> {
+        *self
+            .firmware_boot_status
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)? = crate::FirmwareBootStatus {
+            supported: true,
+            attempted,
+            checksum_ok: attempted && ready,
+            ready: attempted && ready,
+        };
+        Ok(())
+    }
+
+    fn prepare_firmware_boot_status(&self, attempted: bool) -> Result<(), DriverError> {
+        *self
+            .firmware_boot_status
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)? = crate::FirmwareBootStatus {
+            supported: true,
+            attempted,
+            checksum_ok: false,
+            ready: false,
+        };
+        Ok(())
+    }
+
+    /// Return the retained outcome of the latest successful initialization.
+    pub fn firmware_boot_status(&self) -> crate::FirmwareBootStatus {
+        self.firmware_boot_status
+            .lock()
+            .map_or_else(|_| crate::FirmwareBootStatus::default(), |status| *status)
+    }
+
     pub(crate) fn invalidate_jaguar3_fast_cache(&self) -> Result<(), DriverError> {
         self.retune_state
             .lock()
@@ -412,7 +500,49 @@ impl RealtekDevice {
     /// IQK may restore register `0x808`, so call it after those operations.
     pub async fn set_rx_path_mask_async(&self, mask: u8) -> Result<(), DriverError> {
         let chip = self.probe_chip_async().await?;
-        self.set_rx_path_mask_for_chip_async(chip, mask).await
+        self.set_rx_path_mask_for_chip_async(chip, mask).await?;
+        *self
+            .rx_path_mask
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)? = Some(mask);
+        Ok(())
+    }
+
+    /// Read the active Jaguar1 RX-chain mask from register `0x808`.
+    pub async fn rx_path_mask_async(&self) -> Result<u8, DriverError> {
+        let chip = self.probe_chip_async().await?;
+        if chip.family.uses_halmac_descriptor() {
+            return Err(DriverError::UnsupportedRxPathMask(chip.family));
+        }
+        self.read_u8_async(0x0808).await
+    }
+
+    /// Disable or restore Jaguar3's safe MAC EDCCA transmit-deferral gate.
+    pub async fn set_cca_disabled_async(&self, disabled: bool) -> Result<(), DriverError> {
+        let chip = self.probe_chip_async().await?;
+        if !chip.family.is_jaguar3() {
+            return Err(DriverError::UnsupportedCcaControl(chip.family));
+        }
+        self.apply_cca_disabled_async(disabled).await?;
+        *self
+            .cca_disabled
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)? = disabled;
+        Ok(())
+    }
+
+    pub(crate) async fn apply_cca_disabled_async(&self, disabled: bool) -> Result<(), DriverError> {
+        let mut reg_520 = self.read_u32_async(0x0520).await?;
+        let mut reg_524 = self.read_u32_async(0x0524).await?;
+        if disabled {
+            reg_520 |= 1 << 15;
+            reg_524 &= !(1 << 11);
+        } else {
+            reg_520 &= !(1 << 15);
+            reg_524 |= 1 << 11;
+        }
+        self.write_u32_async(0x0520, reg_520).await?;
+        self.write_u32_async(0x0524, reg_524).await
     }
 
     async fn set_rx_path_mask_for_chip_async(
@@ -608,6 +738,7 @@ impl RealtekDevice {
             .clear_halt()
             .await
             .map_err(|err| DriverError::Nusb(format!("clear halt on bulk OUT failed: {err}")))?;
+        self.record_tx_submission();
         for attempt in 0..BULK_RETRY_ATTEMPTS {
             endpoint.submit(Buffer::from(transfer));
             let completion = endpoint.next_complete().await;
@@ -622,7 +753,10 @@ impl RealtekDevice {
                     }
                     crate::time::sleep_ms(retry_delay_ms(attempt)).await;
                 }
-                Err(err) => return Err(transfer_error("bulk OUT transfer failed", err)),
+                Err(err) => {
+                    self.record_tx_failure(tx_error_kind(err));
+                    return Err(transfer_error("bulk OUT transfer failed", err));
+                }
             }
         }
         unreachable!("retry loop either returns or reports the final USB error")
@@ -668,6 +802,7 @@ impl RealtekDevice {
             .clear_halt()
             .wait()
             .map_err(|err| DriverError::Nusb(format!("clear halt on bulk OUT failed: {err}")))?;
+        self.record_tx_submission();
         for attempt in 0..BULK_RETRY_ATTEMPTS {
             let completion =
                 endpoint.transfer_blocking(Buffer::from(transfer), crate::device::tx_timeout());
@@ -680,7 +815,10 @@ impl RealtekDevice {
                     let _ = endpoint.clear_halt().wait();
                     crate::time::sleep_ms(retry_delay_ms(attempt)).await;
                 }
-                Err(err) => return Err(transfer_error("bulk OUT transfer failed", err)),
+                Err(err) => {
+                    self.record_tx_failure(tx_error_kind(err));
+                    return Err(transfer_error("bulk OUT transfer failed", err));
+                }
             }
         }
         unreachable!("retry loop either returns or reports the final USB error")
@@ -721,6 +859,9 @@ impl RealtekDevice {
         radiotap_packet: &[u8],
         mut options: RealtekTxOptions,
     ) -> Result<usize, DriverError> {
+        self.apply_pending_beamforming_async().await?;
+        let chip = self.probe_chip_async().await?;
+        options.capabilities = Some(crate::TxCapabilities::for_chip(chip));
         if let Some(channel) = openipc_core::parse_radiotap_tx_channel(radiotap_packet)
             .map_err(|error| DriverError::TxBuild(error.into()))?
         {
@@ -881,6 +1022,15 @@ impl RealtekDevice {
     pub async fn write_u32_async(&self, register: u16, value: u32) -> Result<(), DriverError> {
         self.write_register_async(register, &value.to_le_bytes())
             .await
+    }
+}
+
+fn tx_error_kind(error: TransferError) -> crate::TxErrorKind {
+    match error {
+        TransferError::Cancelled => crate::TxErrorKind::Timeout,
+        TransferError::Stall => crate::TxErrorKind::Stall,
+        TransferError::Disconnected => crate::TxErrorKind::Disconnected,
+        _ => crate::TxErrorKind::Other,
     }
 }
 

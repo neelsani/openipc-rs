@@ -23,7 +23,6 @@ pub(crate) struct CwToneState {
 }
 
 impl CwToneState {
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) const fn is_active(&self) -> bool {
         self.snapshot.is_some()
     }

@@ -124,6 +124,14 @@ Platform-specific filters are derived from this table:
   RX packet retention for diagnostics,
 - TX bulk writes, TX-mode/radiotap parsing for legacy/HT/VHT injection,
   descriptors, and TX power overrides for adaptive-link feedback,
+- sticky quarter-dB relative TX-power control, flat-index override, saturation
+  reporting, Jaguar2 per-packet descriptor power, TX capability validation,
+  and driver-side submission statistics,
+- rolling RSSI/SNR/EVM and passive noise-floor windows, frame-free energy
+  fusion, link-health classification, physical EFUSE stability checks, and
+  adapter-health classification,
+- sticky Jaguar1 RX-path masks, safe Jaguar3 MAC EDCCA control, and self-gated
+  Jaguar3 TX beamforming apply,
 - devourer-compatible VID/PID targeting, bulk-OUT endpoint override, RTL8814
   firmware path/chunk controls, IQK policy switches, TX-power skip switch, and
   RTL8814 legacy-descriptor escape hatch,
@@ -337,13 +345,13 @@ Current status:
 - RTL8812 thermal power tracking, RTL8812 IQK, RTL8814 IQK, and the PHYDM
   false-alarm/DIG watchdog have Rust implementations. They are exposed natively
   and through WASM, but still need register-trace comparison on real adapters.
-- Jaguar2 support is audited through devourer `3ec1ab1`.
+- Jaguar2 support is audited through devourer `40e3a2a`.
   Both firmware images and their MAC/PHY/AGC/RF/TX-limit tables reproduce from
   checked-in importers. Both chips have their variant-specific software IQK
   state machines; RTL8821C uses its one-path BTG/WLG/WLA LOK/TXK/RXK flow.
   Live cold-plug/on-air validation is required.
 - RTL8812CU/EU and RTL8822CU/EU Jaguar3 support is audited through devourer
-  `3ec1ab1`. The RTL8822E firmware and generated table arrays are
+  `40e3a2a`. The RTL8822E firmware and generated table arrays are
   byte-for-byte equal to the reference commit. Chip-ID dispatch, V1 EFUSE,
   PA-bias, RFE defaults/pinmux, DACK, IQK, TXGAPK, DPK bypass, per-rate TXAGC,
   thermal tracking, descriptors, coex/H2C, and shutdown are implemented. This
@@ -358,7 +366,7 @@ Current status:
   RTL8812 TX-power EFUSE rereads with IC-default fallback, Jaguar3 DACK/IQK
   retries, persistent timeout-free RX submissions, and desktop
   topology-lock/claim-before-reset ownership.
-- Devourer `3ec1ab1` fast retuning is represented for Jaguar1, Jaguar2, and
+- Devourer `40e3a2a` fast retuning is represented for Jaguar1, Jaguar2, and
   Jaguar3, including automatic full fallback, per-packet radiotap CHANNEL
   selection, shared channel/frequency and sweep-list grammar, write-only
   Jaguar2/Jaguar3 compose caches, and the hardware-validated kickless Jaguar2
@@ -372,6 +380,11 @@ Current status:
   wrapper: thermal bucket, false-alarm counters, 8814 queue-depth registers,
   BB register reads, BB dbgport snapshots, Jaguar3 thermal tracking ticks, C2H
   payloads, and RTL8814 TX-status reports.
+- Devourer's runtime controller feeds are available as typed Rust APIs:
+  quarter-dB relative TX power and flat overrides, TX capabilities and
+  submission failures, rolling RX quality/passive noise floor, link-health
+  verdicts, firmware status, and repeated physical EFUSE comparison. Jaguar2
+  per-frame power and Jaguar3 self-gated beamforming are included.
 - Software-only hardening tests now cover malformed RX aggregates, zero-length
   descriptors, aggregate tail handling, C2H driver-info/shift offsets, PHY
   status byte boundaries, CRC/ICV flag surfacing, firmware-header stripping,

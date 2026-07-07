@@ -48,10 +48,28 @@ lists.
   timeout churn on macOS while retaining explicit queue cancellation in apps.
 - TX bulk writes, runtime TX-mode/radiotap parsing, descriptors, and TX power
   overrides for adaptive-link feedback frames.
+- Devourer-compatible runtime TX-power controls: a sticky calibrated-table
+  offset in quarter-dB, an optional flat TXAGC override, per-family capability
+  reporting, saturation flags, thermal status, and representative index
+  readback. Jaguar2 also maps radiotap `DBM_TX_POWER` to its measured
+  per-packet `TXPWR_OFSET` descriptor LUT.
+- TX capability validation rejects STBC on 1T1R RTL8821/RTL8821C adapters
+  instead of transmitting an undecodable descriptor.
+- Driver-side TX submission statistics distinguish timeout/backpressure from
+  stalls, disconnects, and other transport errors.
 - Explicit Jaguar1/2/3 SU/MU beamformee and sounding-engine controls, NDPA TX
   descriptor support, and compressed beamforming report angle decoding.
+- Jaguar3 closed-loop TX beamforming entry/apply support. Steering remains
+  disabled until a compressed report from the configured peer is observed.
+- Sticky Jaguar1 RX-chain masks with hardware readback, plus the safe MAC-only
+  Jaguar3 EDCCA research control. The RX-deafening vendor BB `dis_cca` writes
+  are deliberately not applied.
 - Frame-free FA/CCA/IGI energy snapshots and 12-bucket NHM measurements across
   all three generations.
+- Rolling RX RSSI/SNR/EVM and passive noise-floor aggregation, with Devourer's
+  weak/interference/saturation/healthy link classifier.
+- Adapter-health evidence and classification, including repeated fresh
+  physical EFUSE-map comparison and retained firmware-boot status.
 - Modulated hardware continuous-TX controls with state restoration.
 - RX CSI tone masks and NBI notch filters across Jaguar1/2/3, with pure
   center-frequency and subcarrier-index helpers.
@@ -203,6 +221,7 @@ DEVOURER_FORCE_IQK                run IQK even where it is normally opt-in
 DEVOURER_DISABLE_IQK              suppress IQK
 DEVOURER_SKIP_IQK                 suppress IQK (newer devourer spelling)
 DEVOURER_SKIP_TXGAPK              skip RTL8822E TX gain calibration
+DEVOURER_DIS_CCA                  disable only Jaguar3's safe MAC EDCCA gate
 DEVOURER_8814_FWDL=kernel|rtw88   select RTL8814 firmware download path
 DEVOURER_8814_FWDL_CHUNK=<n>      override RTL8814 kernel-path chunk size
 DEVOURER_RX_PATHS=<mask>          select Jaguar1 RX chains, for example 0x11 or 0xff
@@ -285,6 +304,33 @@ modulated continuous TX. It does not start hidden polling threads. Applications
 should schedule these from their own event loop or worker so RX/TX timing,
 browser WebUSB constraints, and UI responsiveness stay under their control.
 
+Runtime link and power controls are explicit as well:
+
+```rust
+let caps = device.tx_power_caps()?;
+let applied_qdb = device.set_tx_power_offset_qdb(-8)?; // back off 2 dB
+let power = device.tx_power_state()?;
+let tx = device.tx_stats();
+
+// parse_rx_transfer feeds the device-owned rolling quality accumulator.
+for packet in device.parse_rx_transfer(&usb_bytes)? {
+    handle_frame(packet.data);
+}
+let quality = device.read_rx_quality()?;
+println!("{}: {}", quality.health.label, quality.health.cause);
+```
+
+Applications that parse aggregates directly through `openipc-core` can own an
+`RxQualityAccumulator` and call `observe(&packet.attrib)` themselves. This is
+useful for multiple-adapter diversity because each radio can retain an
+independent quality window while recovered WFB payloads share a higher-level
+pipeline.
+
+For a suspect adapter, `probe_efuse_stability(4)` performs four physical reads,
+not four reads of the cached map. Combine that result, `firmware_boot_status()`,
+and an app-owned RX smoke count with `classify_adapter_health`. RTL8822E refuses
+the live EFUSE probe because its post-bring-up OTP path is not reliable.
+
 ## Validation Notes
 
 The crate is standalone and does not build against devourer. It was written
@@ -292,14 +338,23 @@ using devourer, aviateur, and openipc-zig as references. The cold-start path now
 includes EFUSE-backed RFE selection and devourer-style band switching for
 RTL8812/RTL8821/RTL8814, plus the newer devourer TX power, PHYDM, power
 tracking, IQK, C2H, TX-status, RTL8814 firmware controls, and the complete
-`rtl8822e` Jaguar3 path through devourer `3ec1ab1`. This audit also includes
+`rtl8822e` Jaguar3 path through devourer `40e3a2a`. This audit also includes
 RTL8822B Jaguar2, Jaguar3 40/80 MHz and 40-in-80, RX CSI/NBI masking,
 beamforming self-sounding, concurrent TX/RX behavior, Jaguar1's unified
 in-flight USB RX queue, all-generation CW control, EFUSE/calibration retries,
 infinite RX submissions, exclusive claim-before-reset ownership, all-generation
-fast retuning, and radiotap-driven per-packet hopping. Hardware bring-up still
+fast retuning, radiotap-driven per-packet hopping, runtime power/thermal controls,
+RX/TX health feeds, adapter-health probes, Jaguar2 per-packet power, STBC guards,
+and self-gated Jaguar3 TX beamforming. Hardware bring-up still
 needs live adapter testing and register-trace comparison per chip family before
 the support matrix should be treated as final.
+
+Devourer's `40e3a2a` also added a Linux-only VFIO PCIe transport for RTL8821CE.
+That transport is intentionally outside this USB crate: `openipc-rtl88xx`
+keeps `nusb` as its native/WebUSB transport and supports the USB rtl88xx
+families used by OpenIPC ground stations. The portable driver behavior above is
+shared across native and WASM; adding PCIe later should be a separate transport
+crate rather than introducing VFIO assumptions into browser and mobile builds.
 
 Set `DEVOURER_HOP_PROF=1` or `OPENIPC_HOP_PROF=1` on native builds to emit one
 machine-readable `openipc_rtl88xx::hop_prof` log record per fast hop. Trace

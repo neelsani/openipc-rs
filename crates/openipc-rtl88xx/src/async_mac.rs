@@ -233,6 +233,13 @@ impl RealtekDevice {
         let mut cr = self.read_u8_async(REG_CR).await.unwrap_or(0);
         cr |= (MACTXEN | MACRXEN) as u8;
         self.write_u8_async(REG_CR, cr).await?;
+        if chip.family == ChipFamily::Rtl8821 {
+            let sys_cfg3 = self.read_u8_async(REG_SYS_CFG + 3).await?;
+            if sys_cfg3 & BIT0 as u8 != 0 {
+                let value = self.read_u8_async(0x007c).await?;
+                self.write_u8_async(0x007c, value | BIT6 as u8).await?;
+            }
+        }
         self.write_u16_async(REG_PKT_VO_VI_LIFE_TIME, 0x0400)
             .await?;
         self.write_u16_async(REG_PKT_BE_BK_LIFE_TIME, 0x0400).await
@@ -487,13 +494,22 @@ impl RealtekDevice {
             }
             ChipFamily::Rtl8814 => {
                 let sys_func = self.read_u8_async(REG_SYS_FUNC_EN).await.unwrap_or(0);
-                self.write_u8_async(REG_SYS_FUNC_EN, sys_func | BIT2 as u8)
-                    .await?;
+                let usb_enabled = sys_func | BIT2 as u8;
+                self.write_u8_async(REG_SYS_FUNC_EN, usb_enabled).await?;
                 let bb_reset = self.read_u8_async(0x1002).await.unwrap_or(0);
                 self.write_u8_async(0x1002, bb_reset | 0x03).await?;
                 for register in [0x001f, 0x0020, 0x0021, 0x0076] {
                     self.write_u8_async(register, 0x07).await?;
                 }
+
+                // PHY_BBConfig8812 runs immediately after the 8814-specific
+                // domain power-on above and repeats this common Jaguar1
+                // reset/RF sequence before applying the BB tables.
+                self.write_u8_async(REG_SYS_FUNC_EN, usb_enabled).await?;
+                self.write_u8_async(REG_SYS_FUNC_EN, usb_enabled | BIT1 as u8 | BIT0 as u8)
+                    .await?;
+                self.write_u8_async(REG_RF_CTRL, 0x07).await?;
+                self.write_u8_async(REG_RF_B_CTRL_8812, 0x07).await?;
             }
             ChipFamily::Rtl8822b
             | ChipFamily::Rtl8821c

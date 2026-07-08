@@ -99,6 +99,23 @@ pub struct PhydmWatchdogReport {
 }
 
 impl RealtekDevice {
+    pub(crate) async fn set_igi_floor_jaguar1_async(
+        &self,
+        chip: crate::types::ChipInfo,
+    ) -> Result<(), DriverError> {
+        self.set_bb_reg_async(0x0c50, 0xff, u32::from(DIG_MIN))
+            .await?;
+        self.set_bb_reg_async(0x0e50, 0xff, u32::from(DIG_MIN))
+            .await?;
+        if chip.family == crate::types::ChipFamily::Rtl8814 {
+            self.set_bb_reg_async(0x1850, 0xff, u32::from(DIG_MIN))
+                .await?;
+            self.set_bb_reg_async(0x1a50, 0xff, u32::from(DIG_MIN))
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Read PHY false-alarm and CRC counters used by DIG/watchdog logic.
     pub async fn read_false_alarm_counters_async(&self) -> Result<FalseAlarmCounters, DriverError> {
         let _ = self

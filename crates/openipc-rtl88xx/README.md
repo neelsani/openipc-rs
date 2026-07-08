@@ -269,6 +269,18 @@ are kept aligned with the hardware-tested Devourer source. A particular adapter
 model is still only considered validated after cold-plug and sustained on-air
 testing with that physical board revision.
 
+Maintainers can verify every checked-in firmware and register payload against
+a local Devourer checkout without making it a build dependency:
+
+```bash
+python3 scripts/audit-devourer-reference-data.py ../devourer
+```
+
+The audit uses exact symbol names, regenerates the Jaguar2 payload files, and
+checks the Jaguar1/Jaguar3 arrays plus RTL8812 power tables. Unit tests also
+lock reviewed payload lengths and fingerprints so a normal table cannot be
+silently replaced by a similarly named manufacturing override.
+
 One naming caveat: the native `*_async` methods are async-shaped compatibility
 APIs around blocking `nusb` calls (`wait` and blocking bulk transfers). They are
 useful for sharing HAL sequences with WebUSB, but native apps should run them on

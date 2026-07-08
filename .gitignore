@@ -9,6 +9,8 @@
 /docs/.wrangler/
 /release-assets/
 package-lock.json
+__pycache__/
+*.pyc
 .env
 .env.*
 .DS_Store

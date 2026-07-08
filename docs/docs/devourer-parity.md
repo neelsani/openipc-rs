@@ -204,6 +204,11 @@ The Rust code tracks the devourer behavior that matters for OpenIPC use:
   manufacturing-test override is not used for receiver initialization,
 - the pre-table BB/RF domain enable sequence, PHY/AGC inter-write delays, and
   RF-table `0xfe`/`0xffe` delay markers,
+- chip-specific crystal-cap masks for RTL8812 (`0x7ff80000`), RTL8821
+  (`0x00fff000`), and RTL8814 (`0x07ff8000`),
+- RTL8821's cut-specific `SYS_CFG+3` MAC adjustment and 1T1R BB path setup,
+- RTL8814's complete two-stage BB/RF reset sequence and post-table RF RCK1
+  copy from path A to paths B, C, and D,
 - RFE-aware table selection,
 - EFUSE TX power data,
 - monitor filters and RX aggregate parsing,
@@ -399,9 +404,12 @@ drift early:
   after stalls or cancelled transfers while failing fast on disconnect,
 - recovery-classifier tests for transient stalls/timeouts versus fatal USB
   errors,
-- generated-table sanity tests for known lengths and boundary values, plus an
-  audit-time full-array/hash comparison of RTL8822B and RTL8822E
-  firmware/table values,
+- generated-table tests that lock every Jaguar1/2/3 firmware and register
+  payload by reviewed length and FNV fingerprint,
+- exact table-dispatch tests that distinguish each normal PHY table from
+  similarly named manufacturing and RFE variants,
+- an audit-time source comparison of all firmware, MAC, PHY, AGC, RF, RFK,
+  IQK, PHY-PG, and RTL8812 TX-power data against a Devourer checkout,
 - pure tone-mask vectors copied from devourer's headless test, Jaguar3
   primary/central-channel plans, 40-in-80 DATA_SC, NDPA fields, Jaguar2's
   first-32-byte checksum, and beamforming report detection,
@@ -415,6 +423,24 @@ drift early:
 The hardware tests are still required before claiming a specific adapter model
 is proven. Matching source code and byte-level tests greatly reduce risk, but
 they do not replace checking real USB timing, EFUSE variants, and RF behavior.
+
+### Re-running the source audit
+
+The parity audit uses exact C and Rust symbol matching. This matters because
+Devourer contains both `array_mp_8812a_phy_reg` (the normal 470-word table) and
+`array_mp_8812a_phy_reg_mp` (a four-word manufacturing override). Prefix
+matching is forbidden and tested inside the audit tool.
+
+With a current Devourer checkout next to this repository, run:
+
+```bash
+python3 scripts/audit-devourer-reference-data.py ../devourer
+```
+
+The command compares all Jaguar1 and Jaguar3 numeric payloads scalar for
+scalar, regenerates both Jaguar2 data files and checks them byte for byte, and
+compares RTL8812 PHY-PG and regulatory TX-power rows semantically. It is a
+maintainer check only; Devourer is never read or linked during a normal build.
 
 ## Remaining Validation Boundary
 

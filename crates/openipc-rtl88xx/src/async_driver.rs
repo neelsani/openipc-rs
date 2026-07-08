@@ -281,28 +281,29 @@ impl RealtekDevice {
         self.enable_bb_rf_domain_async(chip).await?;
         self.load_phy_tables_async(chip, efuse_info).await?;
         self.load_rf_tables_async(chip, efuse_info).await?;
+        self.set_igi_floor_jaguar1_async(chip).await?;
+        let mut power_tracking = if chip.family == ChipFamily::Rtl8812 {
+            let mut state = PowerTrackingState::default();
+            self.init_power_tracking_8812_async(&mut state).await?;
+            Some(state)
+        } else {
+            None
+        };
         self.configure_single_tx_path_async(chip).await?;
-        self.finalize_mac_rx_async(chip, efuse_info).await?;
-        self.enable_rx_bar_async().await?;
         self.set_channel_with_options_async(chip, radio, efuse_info, options.skip_tx_power)
             .await?;
-        if chip.family == ChipFamily::Rtl8812 {
-            let mut power_tracking = PowerTrackingState::default();
-            self.init_power_tracking_8812_async(&mut power_tracking)
-                .await?;
-            self.clear_power_tracking_8812_async(&mut power_tracking)
-                .await?;
+        if let Some(state) = power_tracking.as_mut() {
             let _ = self
-                .tick_power_tracking_8812_async(
-                    &mut power_tracking,
-                    radio.channel,
-                    radio.channel_width,
-                )
+                .tick_power_tracking_8812_async(state, radio.channel, radio.channel_width)
                 .await?;
         }
         if options.should_run_iqk(chip.family) {
             let _ = self.run_iqk_async(chip, radio.channel).await?;
         }
+        // Match Devourer's post-channel MAC tail so tuning and IQK cannot
+        // overwrite the final queue, RX-filter, NAV, and RTL8814 trace state.
+        self.finalize_mac_rx_async(chip, efuse_info).await?;
+        self.enable_rx_bar_async().await?;
         if options.disable_cca && chip.family.is_jaguar3() {
             self.set_cca_disabled_async(true).await?;
         }

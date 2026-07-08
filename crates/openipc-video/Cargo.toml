@@ -1,6 +1,6 @@
 [package]
 name = "openipc-video"
-version = "0.1.33"
+version = "0.1.34"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -30,7 +30,7 @@ path = "src/lib.rs"
 bytes = "1"
 cros-codecs = { version = "0.0.6", default-features = false }
 log.workspace = true
-openipc-core = { path = "../openipc-core", version = "0.1.33" }
+openipc-core = { path = "../openipc-core", version = "0.1.34" }
 thiserror = "2"
 
 [target.'cfg(target_os = "android")'.dependencies]

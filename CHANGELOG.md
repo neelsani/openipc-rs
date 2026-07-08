@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.34 - 2026-07-08
+
+### Changes
+- Sync Realtek USB driver with latest Devourer (e0c39a8)
+- Match Devourer hardware behavior (7918f72)
+- Fix RTL8812 PHY initialization parity (58a1cd7)
+- Harden Realtek initialization parity with Devourer (fbb7c73)
+
+
 ## 0.1.33 - 2026-07-06
 
 ### Changes

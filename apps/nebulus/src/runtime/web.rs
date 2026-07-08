@@ -538,11 +538,13 @@ mod worker {
     const VIDEO_ROUTE: PayloadRouteId = PayloadRouteId::new(1);
     const RX_TRANSFERS_IN_FLIGHT: usize = 8;
     const TX_TRANSFERS_IN_FLIGHT: usize = 8;
+    const FIRST_RX_WARNING_AFTER_MS: u128 = 2_000;
     const MAX_BROWSER_RECORDING_BYTES: usize = 512 * 1024 * 1024;
 
     struct WebRadio {
         source_id: u16,
         descriptor: openipc_core::RxDescriptorKind,
+        endpoint_address: u8,
         endpoint: nusb::Endpoint<Bulk, In>,
         consecutive_errors: u8,
         metrics: Rc<RefCell<AdapterRuntimeMetrics>>,
@@ -1173,6 +1175,7 @@ mod worker {
                     continue;
                 }
             };
+            log_rx_register_snapshot(events, context, &id, &device).await;
             let source_id = u16::try_from(devices.len())
                 .map_err(|_| "too many diversity adapters selected".to_owned())?;
             let mut endpoint = device
@@ -1185,6 +1188,19 @@ mod worker {
             while endpoint.pending() < RX_TRANSFERS_IN_FLIGHT {
                 endpoint.submit(endpoint.allocate(request.transfer_size));
             }
+            log(
+                events,
+                context,
+                LogLevel::Info,
+                "usb",
+                format!(
+                    "{id}: bulk-IN queue armed endpoint=0x{:02x} pending={} transfer_size={} max_packet_size={}",
+                    device.bulk_in_endpoint_address(),
+                    endpoint.pending(),
+                    request.transfer_size,
+                    endpoint.max_packet_size(),
+                ),
+            );
             let metrics = Rc::new(RefCell::new(AdapterRuntimeMetrics {
                 source_id,
                 device_id: id.clone(),
@@ -1198,6 +1214,7 @@ mod worker {
             radios.push(WebRadio {
                 source_id,
                 descriptor: device.rx_descriptor_kind(),
+                endpoint_address: device.bulk_in_endpoint_address(),
                 endpoint,
                 consecutive_errors: 0,
                 metrics: Rc::clone(&metrics),
@@ -1296,6 +1313,8 @@ mod worker {
         let mut source_quality = (0..devices.len())
             .map(|_| AdaptiveLink::new())
             .collect::<Vec<_>>();
+        let receive_started = Instant::now();
+        let mut first_rx_warning_emitted = false;
         while !cancel.get() {
             if radio_futures.is_empty() {
                 return Err("all WebUSB receive adapters disconnected".to_owned());
@@ -1304,6 +1323,34 @@ mod worker {
                 select_all(radio_futures).await;
             radio_futures = remaining;
             let Some(completion) = completion else {
+                if !first_rx_warning_emitted
+                    && receive_started.elapsed().as_millis() >= FIRST_RX_WARNING_AFTER_MS
+                    && metric_handles
+                        .iter()
+                        .all(|metrics| metrics.borrow().transfers == 0)
+                {
+                    first_rx_warning_emitted = true;
+                    log(
+                        events,
+                        context,
+                        LogLevel::Warn,
+                        "usb",
+                        format!(
+                            "no bulk-IN completion after {} ms; radio {} still has {} WebUSB reads pending on endpoint 0x{:02x}. No data has reached 802.11, WFB, RTP, or the decoder; verify the VTX channel/width and power-cycle the adapter if another receiver used it first",
+                            receive_started.elapsed().as_millis(),
+                            radio.source_id + 1,
+                            radio.endpoint.pending(),
+                            radio.endpoint_address,
+                        ),
+                    );
+                    emit_diversity_update(
+                        events,
+                        context,
+                        &diversity,
+                        &metric_handles,
+                        &mut source_quality,
+                    );
+                }
                 radio_futures.push(wait_for_radio(radio));
                 if let Some(metrics) = metrics_throttle.flush() {
                     emit_metrics(
@@ -2124,6 +2171,58 @@ mod worker {
 
     async fn next_with_timeout(endpoint: &mut nusb::Endpoint<Bulk, In>) -> Option<Completion> {
         next_with_timeout_ms(endpoint, 10).await
+    }
+
+    async fn log_rx_register_snapshot(
+        events: &Rc<RefCell<VecDeque<RuntimeEvent>>>,
+        context: &eframe::egui::Context,
+        device_id: &str,
+        device: &RealtekDevice,
+    ) {
+        // These are the minimum registers needed to distinguish a bad chip
+        // dispatch or disabled RX DMA from a healthy radio on a quiet channel.
+        let chip_id = device.read_u8_async(0x00fc).await;
+        let firmware = device.read_u32_async(0x0080).await;
+        let command = device.read_u16_async(0x0100).await;
+        let receive_config = device.read_u32_async(0x0608).await;
+        let receive_filter = device.read_u16_async(0x06a4).await;
+        let receive_dma = device.read_u32_async(0x0288).await;
+        log(
+            events,
+            context,
+            LogLevel::Info,
+            "usb",
+            format!(
+                "{device_id}: post-init RX registers SYS_CFG2={} MCUFWDL={} CR={} RCR={} RXFLTMAP2={} RXDMA_STATUS={}",
+                register_u8(chip_id),
+                register_u32(firmware),
+                register_u16(command),
+                register_u32(receive_config),
+                register_u16(receive_filter),
+                register_u32(receive_dma),
+            ),
+        );
+    }
+
+    fn register_u8(value: Result<u8, openipc_rtl88xx::DriverError>) -> String {
+        value.map_or_else(
+            |error| format!("error({error})"),
+            |value| format!("0x{value:02x}"),
+        )
+    }
+
+    fn register_u16(value: Result<u16, openipc_rtl88xx::DriverError>) -> String {
+        value.map_or_else(
+            |error| format!("error({error})"),
+            |value| format!("0x{value:04x}"),
+        )
+    }
+
+    fn register_u32(value: Result<u32, openipc_rtl88xx::DriverError>) -> String {
+        value.map_or_else(
+            |error| format!("error({error})"),
+            |value| format!("0x{value:08x}"),
+        )
     }
 
     async fn next_with_timeout_ms(

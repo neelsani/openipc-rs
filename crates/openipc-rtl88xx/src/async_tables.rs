@@ -65,14 +65,8 @@ impl RealtekDevice {
                     rtl_data::RTL8812_RADIO_A,
                     phy_context(chip, efuse),
                     |addr, value| async move {
-                        self.set_rf_reg_async(
-                            chip,
-                            RfPath::A,
-                            addr as u16,
-                            B_LSSI_WRITE_DATA,
-                            value,
-                        )
-                        .await
+                        self.config_rf_table_entry_async(chip, RfPath::A, addr, value)
+                            .await
                     },
                 )
                 .await?;
@@ -81,14 +75,8 @@ impl RealtekDevice {
                         rtl_data::RTL8812_RADIO_B,
                         phy_context(chip, efuse),
                         |addr, value| async move {
-                            self.set_rf_reg_async(
-                                chip,
-                                RfPath::B,
-                                addr as u16,
-                                B_LSSI_WRITE_DATA,
-                                value,
-                            )
-                            .await
+                            self.config_rf_table_entry_async(chip, RfPath::B, addr, value)
+                                .await
                         },
                     )
                     .await?;
@@ -99,14 +87,8 @@ impl RealtekDevice {
                     rtl_data::RTL8821_RADIO_A,
                     phy_context(chip, efuse),
                     |addr, value| async move {
-                        self.set_rf_reg_async(
-                            chip,
-                            RfPath::A,
-                            addr as u16,
-                            B_LSSI_WRITE_DATA,
-                            value,
-                        )
-                        .await
+                        self.config_rf_table_entry_async(chip, RfPath::A, addr, value)
+                            .await
                     },
                 )
                 .await?;
@@ -122,7 +104,7 @@ impl RealtekDevice {
                         table,
                         phy_context(chip, efuse),
                         |addr, value| async move {
-                            self.set_rf_reg_async(chip, path, addr as u16, B_LSSI_WRITE_DATA, value)
+                            self.config_rf_table_entry_async(chip, path, addr, value)
                                 .await
                         },
                     )
@@ -141,7 +123,7 @@ impl RealtekDevice {
                         table,
                         phy_context(chip, efuse),
                         |addr, value| async move {
-                            self.set_rf_reg_async(chip, path, addr as u16, B_LSSI_WRITE_DATA, value)
+                            self.config_rf_table_entry_async(chip, path, addr, value)
                                 .await
                         },
                     )
@@ -153,14 +135,8 @@ impl RealtekDevice {
                     rtl_data::RTL8821C_RADIO_A,
                     phy_context(chip, efuse),
                     |addr, value| async move {
-                        self.set_rf_reg_async(
-                            chip,
-                            RfPath::A,
-                            addr as u16,
-                            B_LSSI_WRITE_DATA,
-                            value,
-                        )
-                        .await
+                        self.config_rf_table_entry_async(chip, RfPath::A, addr, value)
+                            .await
                     },
                 )
                 .await?;
@@ -224,9 +200,28 @@ impl RealtekDevice {
             0xf9 => sleep_micros(1).await,
             _ => {
                 self.set_bb_reg_async(addr as u16, B_MASK_DWORD, value)
-                    .await?
+                    .await?;
+                sleep_micros(1).await;
             }
         }
+        Ok(())
+    }
+
+    async fn config_rf_table_entry_async(
+        &self,
+        chip: ChipInfo,
+        path: RfPath,
+        addr: u32,
+        value: u32,
+    ) -> Result<(), DriverError> {
+        if matches!(addr, 0xfe | 0xffe) {
+            sleep_ms(50).await;
+            return Ok(());
+        }
+
+        self.set_rf_reg_async(chip, path, addr as u16, B_LSSI_WRITE_DATA, value)
+            .await?;
+        sleep_micros(1).await;
         Ok(())
     }
 

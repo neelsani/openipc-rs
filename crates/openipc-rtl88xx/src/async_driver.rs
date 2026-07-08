@@ -278,7 +278,7 @@ impl RealtekDevice {
         self.load_mac_tables_async(chip, efuse_info).await?;
         self.init_queue_fifo_async(chip).await?;
         self.init_mac_rx_async(chip).await?;
-        self.enable_bb_rf_domain_8814_async(chip).await?;
+        self.enable_bb_rf_domain_async(chip).await?;
         self.load_phy_tables_async(chip, efuse_info).await?;
         self.load_rf_tables_async(chip, efuse_info).await?;
         self.configure_single_tx_path_async(chip).await?;

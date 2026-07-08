@@ -199,6 +199,11 @@ The Rust code tracks the devourer behavior that matters for OpenIPC use:
 
 - supported Realtek/OEM VID/PID discovery,
 - firmware load and MAC/RF bring-up,
+- the normal 470-word RTL8812 `CONFIG_BB_PHY_REG` table used by both the
+  original browser fork and current devourer; the separate four-word
+  manufacturing-test override is not used for receiver initialization,
+- the pre-table BB/RF domain enable sequence, PHY/AGC inter-write delays, and
+  RF-table `0xfe`/`0xffe` delay markers,
 - RFE-aware table selection,
 - EFUSE TX power data,
 - monitor filters and RX aggregate parsing,

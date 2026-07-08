@@ -469,21 +469,36 @@ impl RealtekDevice {
         }
     }
 
-    pub(crate) async fn enable_bb_rf_domain_8814_async(
+    pub(crate) async fn enable_bb_rf_domain_async(
         &self,
         chip: ChipInfo,
     ) -> Result<(), DriverError> {
-        if chip.family != ChipFamily::Rtl8814 {
-            return Ok(());
-        }
-
-        let sys_func = self.read_u8_async(REG_SYS_FUNC_EN).await.unwrap_or(0);
-        self.write_u8_async(REG_SYS_FUNC_EN, sys_func | BIT2 as u8)
-            .await?;
-        let bb_reset = self.read_u8_async(0x1002).await.unwrap_or(0);
-        self.write_u8_async(0x1002, bb_reset | 0x03).await?;
-        for register in [0x001f, 0x0020, 0x0021, 0x0076] {
-            self.write_u8_async(register, 0x07).await?;
+        match chip.family {
+            ChipFamily::Rtl8812 | ChipFamily::Rtl8821 => {
+                // PHY_BBConfig8812 repeats this immediately before loading the
+                // BB tables, after firmware and MAC initialization have run.
+                let sys_func = self.read_u8_async(REG_SYS_FUNC_EN).await.unwrap_or(0);
+                let usb_enabled = sys_func | BIT2 as u8;
+                self.write_u8_async(REG_SYS_FUNC_EN, usb_enabled).await?;
+                self.write_u8_async(REG_SYS_FUNC_EN, usb_enabled | BIT1 as u8 | BIT0 as u8)
+                    .await?;
+                self.write_u8_async(REG_RF_CTRL, 0x07).await?;
+                self.write_u8_async(REG_RF_B_CTRL_8812, 0x07).await?;
+            }
+            ChipFamily::Rtl8814 => {
+                let sys_func = self.read_u8_async(REG_SYS_FUNC_EN).await.unwrap_or(0);
+                self.write_u8_async(REG_SYS_FUNC_EN, sys_func | BIT2 as u8)
+                    .await?;
+                let bb_reset = self.read_u8_async(0x1002).await.unwrap_or(0);
+                self.write_u8_async(0x1002, bb_reset | 0x03).await?;
+                for register in [0x001f, 0x0020, 0x0021, 0x0076] {
+                    self.write_u8_async(register, 0x07).await?;
+                }
+            }
+            ChipFamily::Rtl8822b
+            | ChipFamily::Rtl8821c
+            | ChipFamily::Rtl8822c
+            | ChipFamily::Rtl8822e => {}
         }
         Ok(())
     }

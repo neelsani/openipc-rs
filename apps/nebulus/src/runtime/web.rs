@@ -511,7 +511,10 @@ mod worker {
     };
     use nusb::transfer::{Buffer, Bulk, Completion, In, Out, TransferError};
     use openipc_core::{
-        realtek::{parse_rx_aggregate_with_kind, RxPacketType},
+        realtek::{
+            parse_rx_aggregate_with_kind, parse_rx_aggregate_with_kind_diagnostics, AggregateError,
+            RxPacketType,
+        },
         AdaptiveLink, ChannelId, DiversityCombiner, DiversityDecision, DiversitySourceId,
         FecCounters, FrameLayout, PayloadRouteId, ReceiverRuntime, TxRadioParams, WfbKeypair,
         WfbTransmitter, WfbTxKeypair,
@@ -1152,9 +1155,24 @@ mod worker {
         let mut metric_handles = Vec::new();
         let mut adapter_errors = Vec::new();
         for (id, label, info) in discovered {
+            let vendor_id = info.vendor_id();
+            let product_id = info.product_id();
+            let source_id = u16::try_from(devices.len()).unwrap_or(u16::MAX);
             let opened = match info.open().await {
                 Ok(opened) => opened,
                 Err(error) => {
+                    super::emit(
+                        events,
+                        context,
+                        RuntimeEvent::ReceiverAttempt(crate::runtime::ReceiverInfo::open_failed(
+                            id.clone(),
+                            source_id,
+                            label.clone(),
+                            Some(vendor_id),
+                            Some(product_id),
+                            error.to_string(),
+                        )),
+                    );
                     adapter_errors.push(format!("{id}: open failed: {error}"));
                     continue;
                 }
@@ -1164,6 +1182,20 @@ mod worker {
                 {
                     Ok(device) => Rc::new(device),
                     Err(error) => {
+                        super::emit(
+                            events,
+                            context,
+                            RuntimeEvent::ReceiverAttempt(
+                                crate::runtime::ReceiverInfo::open_failed(
+                                    id.clone(),
+                                    source_id,
+                                    label.clone(),
+                                    Some(vendor_id),
+                                    Some(product_id),
+                                    error.to_string(),
+                                ),
+                            ),
+                        );
                         adapter_errors.push(format!("{id}: claim failed: {error}"));
                         continue;
                     }
@@ -1171,6 +1203,17 @@ mod worker {
             let report = match device.initialize_monitor_async(radio_config, false).await {
                 Ok(report) => report,
                 Err(error) => {
+                    super::emit(
+                        events,
+                        context,
+                        RuntimeEvent::ReceiverAttempt(crate::runtime::ReceiverInfo::failed(
+                            id.clone(),
+                            source_id,
+                            label.clone(),
+                            &device,
+                            error.to_string(),
+                        )),
+                    );
                     adapter_errors.push(format!("{id}: initialization failed: {error}"));
                     continue;
                 }
@@ -1178,6 +1221,18 @@ mod worker {
             log_rx_register_snapshot(events, context, &id, &device).await;
             let source_id = u16::try_from(devices.len())
                 .map_err(|_| "too many diversity adapters selected".to_owned())?;
+            let receiver_info = crate::runtime::ReceiverInfo::initialized(
+                id.clone(),
+                source_id,
+                label.clone(),
+                &device,
+                &report,
+            );
+            super::emit(
+                events,
+                context,
+                RuntimeEvent::ReceiverAttempt(receiver_info.clone()),
+            );
             let mut endpoint = device
                 .open_bulk_in_endpoint()
                 .map_err(|error| error.to_string())?;
@@ -1206,11 +1261,10 @@ mod worker {
                 device_id: id.clone(),
                 label: label.clone(),
                 online: true,
+                descriptor_kind: format!("{:?}", device.rx_descriptor_kind()),
                 ..AdapterRuntimeMetrics::default()
             }));
-            receiver_infos.push(crate::runtime::ReceiverInfo::initialized(
-                id, source_id, label, &device, &report,
-            ));
+            receiver_infos.push(receiver_info);
             radios.push(WebRadio {
                 source_id,
                 descriptor: device.rx_descriptor_kind(),
@@ -1315,6 +1369,9 @@ mod worker {
             .collect::<Vec<_>>();
         let receive_started = Instant::now();
         let mut first_rx_warning_emitted = false;
+        let mut first_usb_completion = false;
+        let mut first_non_empty_aggregate = false;
+        let mut first_rx_descriptor = false;
         while !cancel.get() {
             if radio_futures.is_empty() {
                 return Err("all WebUSB receive adapters disconnected".to_owned());
@@ -1399,8 +1456,39 @@ mod worker {
                 continue;
             };
             let actual_len = completion.actual_len;
+            if !first_usb_completion {
+                first_usb_completion = true;
+                super::emit(
+                    events,
+                    context,
+                    RuntimeEvent::Milestone("first_usb_completion"),
+                );
+            }
+            if !first_non_empty_aggregate && actual_len > 0 {
+                first_non_empty_aggregate = true;
+                super::emit(
+                    events,
+                    context,
+                    RuntimeEvent::Milestone("first_non_empty_aggregate"),
+                );
+            }
             if let Err(error) = completion.status {
-                radio.metrics.borrow_mut().usb_errors += 1;
+                {
+                    let mut metrics = radio.metrics.borrow_mut();
+                    metrics.usb_errors = metrics.usb_errors.saturating_add(1);
+                    metrics.last_usb_error = Some(error.to_string());
+                    match error {
+                        TransferError::Stall => {
+                            metrics.usb_stalls = metrics.usb_stalls.saturating_add(1);
+                        }
+                        TransferError::Disconnected => {
+                            metrics.usb_disconnects = metrics.usb_disconnects.saturating_add(1);
+                        }
+                        _ => {
+                            metrics.usb_other_errors = metrics.usb_other_errors.saturating_add(1);
+                        }
+                    }
+                }
                 if error == TransferError::Disconnected {
                     radio.metrics.borrow_mut().online = false;
                     log(
@@ -1467,31 +1555,93 @@ mod worker {
                 let mut metrics = radio.metrics.borrow_mut();
                 metrics.transfers = metrics.transfers.saturating_add(1);
                 metrics.transfer_bytes = metrics.transfer_bytes.saturating_add(actual_len as u64);
+                if actual_len == 0 {
+                    metrics.zero_length_transfers = metrics.zero_length_transfers.saturating_add(1);
+                }
+                if metrics.first_transfer_len.is_none() {
+                    metrics.first_transfer_len = Some(actual_len);
+                    metrics.first_transfer_latency_ms = Some(usb_latency_ms);
+                    metrics.first_transfer_sample =
+                        Some(hex_sample(&completion.buffer[..actual_len]));
+                }
             }
 
             let batch_start = Instant::now();
             let parse_start = Instant::now();
-            let packets = match parse_rx_aggregate_with_kind(
+            let (packets, aggregate_diagnostics) = match parse_rx_aggregate_with_kind_diagnostics(
                 &completion.buffer[..actual_len],
                 radio.descriptor,
             ) {
-                Ok(packets) => packets,
+                Ok(parsed) => parsed,
                 Err(error) => {
-                    log(
-                        events,
-                        context,
-                        LogLevel::Warn,
-                        "usb",
-                        format!(
-                            "radio {} RX aggregate rejected: {error}",
-                            radio.source_id + 1
-                        ),
+                    let count = record_parse_error(
+                        &mut radio.metrics.borrow_mut(),
+                        &error,
+                        &completion.buffer[..actual_len],
                     );
+                    if count == 1 || count.is_power_of_two() {
+                        log(
+                            events,
+                            context,
+                            LogLevel::Warn,
+                            "usb",
+                            format!(
+                                "radio {} RX aggregate rejected count={count}: {error}; sample={}",
+                                radio.source_id + 1,
+                                hex_sample(&completion.buffer[..actual_len])
+                            ),
+                        );
+                    }
                     radio.endpoint.submit(completion.buffer);
                     radio_futures.push(wait_for_radio(radio));
                     continue;
                 }
             };
+            {
+                let mut metrics = radio.metrics.borrow_mut();
+                if !packets.is_empty() && metrics.first_descriptor_sample.is_none() {
+                    metrics.first_descriptor_sample =
+                        Some(hex_sample(&completion.buffer[..actual_len]));
+                }
+                metrics.aggregate_descriptors = metrics
+                    .aggregate_descriptors
+                    .saturating_add(aggregate_diagnostics.descriptors as u64);
+                if aggregate_diagnostics.trailing_bytes > 0 {
+                    metrics.aggregate_trailing_events =
+                        metrics.aggregate_trailing_events.saturating_add(1);
+                }
+                metrics.aggregate_trailing_bytes = metrics
+                    .aggregate_trailing_bytes
+                    .saturating_add(aggregate_diagnostics.trailing_bytes as u64);
+                metrics.aggregate_trailing_nonzero_bytes = metrics
+                    .aggregate_trailing_nonzero_bytes
+                    .saturating_add(aggregate_diagnostics.trailing_nonzero_bytes as u64);
+                metrics.alignment_padding_bytes = metrics
+                    .alignment_padding_bytes
+                    .saturating_add(aggregate_diagnostics.alignment_padding_bytes as u64);
+                metrics.final_alignment_shortfall_bytes = metrics
+                    .final_alignment_shortfall_bytes
+                    .saturating_add(aggregate_diagnostics.final_alignment_shortfall_bytes as u64);
+                for packet in &packets {
+                    if packet.attrib.crc_err {
+                        metrics.crc_packets = metrics.crc_packets.saturating_add(1);
+                    }
+                    if packet.attrib.icv_err {
+                        metrics.icv_packets = metrics.icv_packets.saturating_add(1);
+                    }
+                    if packet.attrib.pkt_rpt_type != RxPacketType::NormalRx {
+                        metrics.report_packets = metrics.report_packets.saturating_add(1);
+                    }
+                }
+            }
+            if !first_rx_descriptor && !packets.is_empty() {
+                first_rx_descriptor = true;
+                super::emit(
+                    events,
+                    context,
+                    RuntimeEvent::Milestone("first_rx_descriptor"),
+                );
+            }
             let parse_latency_ms = parse_start.elapsed().as_secs_f64() * 1_000.0;
             let now = now_ms();
             let source_index = usize::from(radio.source_id);
@@ -1504,6 +1654,10 @@ mod worker {
                     return Some((packet, None));
                 }
                 let frame = openipc_core::WifiFrame::parse(packet.data, FrameLayout::WithFcs).ok();
+                if frame.is_none() {
+                    let mut metrics = radio.metrics.borrow_mut();
+                    metrics.wifi_parse_errors = metrics.wifi_parse_errors.saturating_add(1);
+                }
                 let is_video = frame.is_some_and(|frame| {
                     frame.matches_channel_id(ChannelId::new(request.channel_id))
                 });
@@ -1629,6 +1783,12 @@ mod worker {
                 decoder_errors: stats.decode_errors,
                 fec: batch.fec_counters,
                 counters: batch.counters,
+                pipeline_errors: batch
+                    .route_error
+                    .clone()
+                    .into_iter()
+                    .map(|error| (error, 1))
+                    .collect(),
                 rtp: worker_snapshot.rtp,
                 reorder: worker_snapshot.reorder,
                 uplink: uplink.as_ref().map_or_else(
@@ -1715,6 +1875,39 @@ mod worker {
             ));
         }
         Ok(())
+    }
+
+    fn record_parse_error(
+        metrics: &mut AdapterRuntimeMetrics,
+        error: &AggregateError,
+        bytes: &[u8],
+    ) -> u64 {
+        let count = match error {
+            AggregateError::DescriptorTooShort => {
+                metrics.descriptor_too_short = metrics.descriptor_too_short.saturating_add(1);
+                metrics.descriptor_too_short
+            }
+            AggregateError::InvalidPacketLength { .. } => {
+                metrics.invalid_packet_length = metrics.invalid_packet_length.saturating_add(1);
+                metrics.invalid_packet_length
+            }
+        };
+        if metrics.first_parse_error.is_none() {
+            metrics.first_parse_error = Some(error.to_string());
+            metrics.first_parse_error_sample = Some(hex_sample(bytes));
+        }
+        count
+    }
+
+    fn hex_sample(bytes: &[u8]) -> String {
+        use std::fmt::Write as _;
+
+        let sample = &bytes[..bytes.len().min(64)];
+        let mut output = String::with_capacity(sample.len().saturating_mul(2));
+        for byte in sample {
+            let _ = write!(output, "{byte:02x}");
+        }
+        output
     }
 
     fn emit_diversity_update(
@@ -1890,6 +2083,12 @@ mod worker {
                     metrics.merge(BatchMetrics {
                         routes: route_updates,
                         counters: batch.counters,
+                        pipeline_errors: batch
+                            .route_error
+                            .clone()
+                            .into_iter()
+                            .map(|error| (error, 1))
+                            .collect(),
                         telemetry,
                         ..BatchMetrics::default()
                     });

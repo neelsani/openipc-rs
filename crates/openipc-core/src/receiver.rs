@@ -90,6 +90,12 @@ pub struct ReceiverBatchCounters {
     pub packets: usize,
     /// Packets accepted after Realtek descriptor filtering.
     pub accepted_packets: usize,
+    /// Structurally valid IEEE 802.11 frames parsed from accepted packets.
+    pub wifi_frames: usize,
+    /// Parsed frames whose channel id matched at least one configured runtime.
+    pub matched_frames: usize,
+    /// Accepted packets whose IEEE 802.11 frame could not be parsed.
+    pub wifi_parse_dropped: usize,
     /// Packets dropped by descriptor filtering.
     pub dropped_packets: usize,
     /// Packets dropped because the Realtek descriptor reported a CRC error.
@@ -131,6 +137,8 @@ pub struct ReceiverBatch {
     pub rtp_status: RtpDepacketizerStatus,
     /// Current RTP reorder-buffer diagnostics.
     pub rtp_reorder_status: RtpReorderStatus,
+    /// First WFB/route error observed in this batch, if any.
+    pub route_error: Option<String>,
 }
 
 impl ReceiverRuntime {
@@ -446,14 +454,25 @@ impl ReceiverRuntime {
 
         batch.counters.accepted_packets += 1;
         let Some(parsed) = parsed else {
+            batch.counters.wifi_parse_dropped += 1;
             batch.counters.ignored_frames += 1;
             return;
         };
+        batch.counters.wifi_frames += 1;
+        if parsed
+            .channel_id()
+            .is_some_and(|channel_id| self.routes.accepts_channel_id(channel_id))
+        {
+            batch.counters.matched_frames += 1;
+        }
         match self.routes.push_wifi_frame_into(parsed, route_events) {
             Ok(()) => self.apply_route_events(route_events.drain(..), options, batch),
-            Err(_) => {
+            Err(error) => {
                 batch.counters.ignored_frames += 1;
                 batch.counters.route_errors += 1;
+                if batch.route_error.is_none() {
+                    batch.route_error = Some(error.to_string());
+                }
             }
         }
     }
@@ -564,6 +583,7 @@ impl ReceiverRuntime {
             fec_counters: self.video_fec_counters(),
             rtp_status: self.rtp_status(),
             rtp_reorder_status: self.rtp_reorder_status(),
+            route_error: None,
         }
     }
 

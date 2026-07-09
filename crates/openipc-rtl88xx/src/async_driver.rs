@@ -93,6 +93,9 @@ impl RealtekDevice {
             detected_family: OnceLock::new(),
             efuse_logical_map: OnceLock::new(),
             efuse_info: OnceLock::new(),
+            diagnostics: std::sync::Mutex::new(
+                crate::diagnostics::DriverDiagnosticsState::default(),
+            ),
             cck_filter_8821c: OnceLock::new(),
             h2c_box: AtomicU8::new(0),
             cw_tone: std::sync::Mutex::new(crate::async_cw::CwToneState::default()),
@@ -129,6 +132,7 @@ impl RealtekDevice {
         let chip_id = self.read_u8_async(0x00fc).await.unwrap_or(0);
         let chip = ChipInfo::from_probe(self.vendor_id, self.product_id, sys_cfg, chip_id);
         let _ = self.detected_family.set(chip.family);
+        self.record_probe_diagnostics(sys_cfg, chip_id, chip);
         Ok(chip)
     }
 
@@ -149,6 +153,25 @@ impl RealtekDevice {
         radio: RadioConfig,
         options: MonitorOptions,
     ) -> Result<InitReport, DriverError> {
+        self.begin_diagnostics(radio, options);
+        let result = self
+            .initialize_monitor_with_options_inner_async(radio, options)
+            .await;
+        if result.is_ok() {
+            self.capture_post_init_registers().await;
+        }
+        match &result {
+            Ok(_) => self.finish_diagnostics(Ok(())),
+            Err(error) => self.finish_diagnostics(Err(error)),
+        }
+        result
+    }
+
+    async fn initialize_monitor_with_options_inner_async(
+        &self,
+        radio: RadioConfig,
+        options: MonitorOptions,
+    ) -> Result<InitReport, DriverError> {
         log::info!(
             target: "openipc_rtl88xx::init",
             "starting Realtek monitor initialization vid={:04x} pid={:04x} channel={} width={:?}",
@@ -157,7 +180,9 @@ impl RealtekDevice {
             radio.channel,
             radio.channel_width
         );
-        let chip = self.probe_chip_async().await?;
+        let chip = self
+            .diagnostic_stage("probe", self.probe_chip_async())
+            .await?;
         self.jaguar3_tx_rf_bw.store(
             options.jaguar3_tx_rf_bw.unwrap_or(u8::MAX),
             std::sync::atomic::Ordering::Release,
@@ -186,19 +211,27 @@ impl RealtekDevice {
             let report = self
                 .initialize_monitor_jaguar2_async(chip, radio, options)
                 .await?;
-            self.apply_interference_mitigation_async(chip, radio, options)
-                .await?;
+            self.diagnostic_stage(
+                "interference_mitigation",
+                self.apply_interference_mitigation_async(chip, radio, options),
+            )
+            .await?;
             self.note_full_tune(radio)?;
             self.note_firmware_boot_status(report.firmware_downloaded, true)?;
-            self.apply_post_init_options_async(chip, options).await?;
+            self.diagnostic_stage(
+                "post_init_options",
+                self.apply_post_init_options_async(chip, options),
+            )
+            .await?;
             return Ok(report);
         }
         let mut firmware_downloaded = false;
         let mut status = InitStatus::Initialized;
         let early_efuse_info = match chip.family {
-            ChipFamily::Rtl8812 | ChipFamily::Rtl8821 => {
-                Some(self.read_efuse_info_async(chip).await?)
-            }
+            ChipFamily::Rtl8812 | ChipFamily::Rtl8821 => Some(
+                self.diagnostic_stage("efuse", self.read_efuse_info_async(chip))
+                    .await?,
+            ),
             ChipFamily::Rtl8814
             | ChipFamily::Rtl8822b
             | ChipFamily::Rtl8821c
@@ -227,11 +260,18 @@ impl RealtekDevice {
             if options.disable_cca {
                 self.set_cca_disabled_async(true).await?;
             }
-            self.apply_interference_mitigation_async(chip, radio, options)
-                .await?;
+            self.diagnostic_stage(
+                "interference_mitigation",
+                self.apply_interference_mitigation_async(chip, radio, options),
+            )
+            .await?;
             self.note_full_tune(radio)?;
             self.note_firmware_boot_status(report.firmware_downloaded, true)?;
-            self.apply_post_init_options_async(chip, options).await?;
+            self.diagnostic_stage(
+                "post_init_options",
+                self.apply_post_init_options_async(chip, options),
+            )
+            .await?;
             return Ok(report);
         }
 
@@ -245,16 +285,29 @@ impl RealtekDevice {
             self.prepare_firmware_boot_status(true)?;
             match chip.family {
                 ChipFamily::Rtl8812 | ChipFamily::Rtl8821 => {
-                    self.power_on_jaguar_async(chip).await?;
-                    self.init_llt_table_async(chip).await?;
-                    self.init_hardware_drop_incorrect_bulk_out_async().await?;
-                    self.download_firmware_8812_family_async(chip).await?;
+                    self.diagnostic_stage("power_on", self.power_on_jaguar_async(chip))
+                        .await?;
+                    self.diagnostic_stage("llt", self.init_llt_table_async(chip))
+                        .await?;
+                    self.diagnostic_stage(
+                        "bulk_out_hardware",
+                        self.init_hardware_drop_incorrect_bulk_out_async(),
+                    )
+                    .await?;
+                    self.diagnostic_stage(
+                        "firmware_download",
+                        self.download_firmware_8812_family_async(chip),
+                    )
+                    .await?;
                     firmware_downloaded = true;
                 }
                 ChipFamily::Rtl8814 => {
-                    self.download_firmware_8814_with_options_async(
-                        options.firmware_8814_mode,
-                        options.firmware_8814_chunk,
+                    self.diagnostic_stage(
+                        "firmware_download",
+                        self.download_firmware_8814_with_options_async(
+                            options.firmware_8814_mode,
+                            options.firmware_8814_chunk,
+                        ),
                     )
                     .await?;
                     firmware_downloaded = true;
@@ -271,58 +324,96 @@ impl RealtekDevice {
         let efuse_info = if let Some(efuse_info) = early_efuse_info {
             efuse_info
         } else {
-            self.read_efuse_info_async(chip).await?
+            self.diagnostic_stage("efuse", self.read_efuse_info_async(chip))
+                .await?
         };
         let _ = self.efuse_info.set(efuse_info);
 
-        self.load_mac_tables_async(chip, efuse_info).await?;
-        self.init_queue_fifo_async(chip).await?;
-        self.init_mac_rx_async(chip).await?;
-        self.enable_bb_rf_domain_async(chip).await?;
-        self.load_phy_tables_async(chip, efuse_info).await?;
-        self.load_rf_tables_async(chip, efuse_info).await?;
-        self.set_igi_floor_jaguar1_async(chip).await?;
+        self.diagnostic_stage("mac_tables", self.load_mac_tables_async(chip, efuse_info))
+            .await?;
+        self.diagnostic_stage("queue_fifo", self.init_queue_fifo_async(chip))
+            .await?;
+        self.diagnostic_stage("mac_rx", self.init_mac_rx_async(chip))
+            .await?;
+        self.diagnostic_stage("bb_rf_domain", self.enable_bb_rf_domain_async(chip))
+            .await?;
+        self.diagnostic_stage("phy_tables", self.load_phy_tables_async(chip, efuse_info))
+            .await?;
+        self.diagnostic_stage("rf_tables", self.load_rf_tables_async(chip, efuse_info))
+            .await?;
+        self.diagnostic_stage("igi_floor", self.set_igi_floor_jaguar1_async(chip))
+            .await?;
         let mut power_tracking = if chip.family == ChipFamily::Rtl8812 {
             let mut state = PowerTrackingState::default();
-            self.init_power_tracking_8812_async(&mut state).await?;
+            self.diagnostic_stage(
+                "power_tracking_init",
+                self.init_power_tracking_8812_async(&mut state),
+            )
+            .await?;
             Some(state)
         } else {
             None
         };
-        self.configure_single_tx_path_async(chip).await?;
-        self.set_channel_with_options_async(chip, radio, efuse_info, options.skip_tx_power)
+        self.diagnostic_stage("tx_path", self.configure_single_tx_path_async(chip))
             .await?;
+        self.diagnostic_stage(
+            "channel_and_tx_power",
+            self.set_channel_with_options_async(chip, radio, efuse_info, options.skip_tx_power),
+        )
+        .await?;
         if let Some(state) = power_tracking.as_mut() {
             let _ = self
-                .tick_power_tracking_8812_async(state, radio.channel, radio.channel_width)
+                .diagnostic_stage(
+                    "power_tracking_tick",
+                    self.tick_power_tracking_8812_async(state, radio.channel, radio.channel_width),
+                )
                 .await?;
         }
         if options.should_run_iqk(chip.family) {
-            let _ = self.run_iqk_async(chip, radio.channel).await?;
+            let _ = self
+                .diagnostic_stage("iqk", self.run_iqk_async(chip, radio.channel))
+                .await?;
         }
         // Match Devourer's post-channel MAC tail so tuning and IQK cannot
         // overwrite the final queue, RX-filter, NAV, and RTL8814 trace state.
-        self.finalize_mac_rx_async(chip, efuse_info).await?;
-        self.enable_rx_bar_async().await?;
+        self.diagnostic_stage(
+            "mac_rx_finalize",
+            self.finalize_mac_rx_async(chip, efuse_info),
+        )
+        .await?;
+        self.diagnostic_stage("rx_bar", self.enable_rx_bar_async())
+            .await?;
         if options.disable_cca && chip.family.is_jaguar3() {
             self.set_cca_disabled_async(true).await?;
         }
         if let Some(mask) = options.rx_path_mask {
-            self.set_rx_path_mask_for_chip_async(chip, mask).await?;
+            self.diagnostic_stage(
+                "rx_path_mask",
+                self.set_rx_path_mask_for_chip_async(chip, mask),
+            )
+            .await?;
             *self
                 .rx_path_mask
                 .lock()
                 .map_err(|_| DriverError::DriverStatePoisoned)? = Some(mask);
         }
-        self.set_monitor_mode_async(options.accept_bad_fcs).await?;
-        self.apply_interference_mitigation_async(chip, radio, options)
-            .await?;
+        self.diagnostic_stage(
+            "monitor_filters",
+            self.set_monitor_mode_async(options.accept_bad_fcs),
+        )
+        .await?;
+        self.diagnostic_stage(
+            "interference_mitigation",
+            self.apply_interference_mitigation_async(chip, radio, options),
+        )
+        .await?;
         if let Some(gain) = options.cw_tone_gain {
             if options.beamforming_sounder || options.beamforming_sounder_mac.is_some() {
                 self.arm_beamforming_sounder_async(options.beamforming_sounder_mac)
                     .await?;
             }
-            self.start_cw_tone_async(radio.channel, gain).await?;
+            self.diagnostic_stage("cw_tone", self.start_cw_tone_async(radio.channel, gain))
+                .await?;
         }
 
         let report = InitReport {
@@ -339,7 +430,11 @@ impl RealtekDevice {
         );
         self.note_full_tune(radio)?;
         self.note_firmware_boot_status(report.firmware_downloaded, true)?;
-        self.apply_post_init_options_async(chip, options).await?;
+        self.diagnostic_stage(
+            "post_init_options",
+            self.apply_post_init_options_async(chip, options),
+        )
+        .await?;
         Ok(report)
     }
 
@@ -1047,11 +1142,22 @@ impl RealtekDevice {
                 )
                 .await
             {
-                Ok(bytes) => return Ok(bytes),
+                Ok(bytes) => {
+                    self.record_register_read(register, &bytes);
+                    log::trace!(target: "openipc_rtl88xx::register", "read register=0x{register:04x} len={} value={}", bytes.len(), hex_bytes(&bytes));
+                    return Ok(bytes);
+                }
                 Err(err) if should_retry_transfer_error(err, attempt, CONTROL_RETRY_ATTEMPTS) => {
+                    self.record_register_failure(
+                        b'R',
+                        register,
+                        format!("attempt {}: {err}", attempt + 1),
+                    );
+                    log::warn!(target: "openipc_rtl88xx::usb", "retrying failed register read register=0x{register:04x} attempt={}: {err}", attempt + 1);
                     crate::time::sleep_ms(retry_delay_ms(attempt)).await;
                 }
                 Err(err) => {
+                    self.record_register_failure(b'R', register, err.to_string());
                     return Err(transfer_error(
                         format!("vendor read 0x{register:04x} failed"),
                         err,
@@ -1069,7 +1175,17 @@ impl RealtekDevice {
         register: u16,
         len: u16,
     ) -> Result<Vec<u8>, DriverError> {
-        read_register_with_recovery(&self.interface, register, len)
+        match read_register_with_recovery(&self.interface, register, len) {
+            Ok(bytes) => {
+                self.record_register_read(register, &bytes);
+                log::trace!(target: "openipc_rtl88xx::register", "read register=0x{register:04x} len={} value={}", bytes.len(), hex_bytes(&bytes));
+                Ok(bytes)
+            }
+            Err(error) => {
+                self.record_register_failure(b'R', register, error.to_string());
+                Err(error)
+            }
+        }
     }
 
     /// Write raw bytes to a Realtek vendor register.
@@ -1095,11 +1211,22 @@ impl RealtekDevice {
                 )
                 .await
             {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    self.record_register_write(register, bytes);
+                    log::trace!(target: "openipc_rtl88xx::register", "write register=0x{register:04x} len={} value={}", bytes.len(), hex_bytes(bytes));
+                    return Ok(());
+                }
                 Err(err) if should_retry_transfer_error(err, attempt, CONTROL_RETRY_ATTEMPTS) => {
+                    self.record_register_failure(
+                        b'W',
+                        register,
+                        format!("attempt {}: {err}", attempt + 1),
+                    );
+                    log::warn!(target: "openipc_rtl88xx::usb", "retrying failed register write register=0x{register:04x} attempt={}: {err}", attempt + 1);
                     crate::time::sleep_ms(retry_delay_ms(attempt)).await;
                 }
                 Err(err) => {
+                    self.record_register_failure(b'W', register, err.to_string());
                     return Err(transfer_error(
                         format!("vendor write 0x{register:04x} failed"),
                         err,
@@ -1117,7 +1244,17 @@ impl RealtekDevice {
         register: u16,
         bytes: &[u8],
     ) -> Result<(), DriverError> {
-        write_register_with_recovery(&self.interface, register, bytes)
+        match write_register_with_recovery(&self.interface, register, bytes) {
+            Ok(()) => {
+                self.record_register_write(register, bytes);
+                log::trace!(target: "openipc_rtl88xx::register", "write register=0x{register:04x} len={} value={}", bytes.len(), hex_bytes(bytes));
+                Ok(())
+            }
+            Err(error) => {
+                self.record_register_failure(b'W', register, error.to_string());
+                Err(error)
+            }
+        }
     }
 
     /// Read an 8-bit little-endian Realtek register value.
@@ -1173,6 +1310,16 @@ impl RealtekDevice {
         self.write_register_async(register, &value.to_le_bytes())
             .await
     }
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut output = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
 }
 
 fn tx_error_kind(error: TransferError) -> crate::TxErrorKind {

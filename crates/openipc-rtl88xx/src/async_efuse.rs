@@ -94,6 +94,7 @@ pub(crate) struct EfuseInfo {
     pub(crate) external_pa_2g: bool,
     pub(crate) external_pa_5g: bool,
     pub(crate) external_lna_2g: bool,
+    pub(crate) external_lna_5g: bool,
     pub(crate) board_type: u8,
     pub(crate) type_gpa: u16,
     pub(crate) type_apa: u16,
@@ -104,6 +105,7 @@ pub(crate) struct EfuseInfo {
     pub(crate) crystal_cap: u8,
     pub(crate) thermal_meter: u8,
     pub(crate) thermal_meter_paths: [u8; 2],
+    pub(crate) tx_power_defaults: bool,
     pub(crate) tx_power: TxPowerInfo,
 }
 
@@ -141,12 +143,15 @@ impl RealtekDevice {
         }
         let amplifiers = amplifier_flags_from_efuse_map(&map);
         let bluetooth_coexist = bluetooth_coexist_from_efuse_map(&map);
-        Ok(EfuseInfo {
+        let tx_power_defaults =
+            chip.family == ChipFamily::Rtl8812 && !has_valid_8812_tx_power_pg(&map);
+        let info = EfuseInfo {
             mac: mac_from_efuse_map(chip, &map),
             rfe_type: rfe_type_from_efuse_map(chip, &map, amplifiers),
             external_pa_2g: amplifiers.external_pa_2g,
             external_pa_5g: amplifiers.external_pa_5g,
             external_lna_2g: amplifiers.external_lna_2g,
+            external_lna_5g: amplifiers.external_lna_5g,
             board_type: board_type_from_amplifiers(amplifiers, bluetooth_coexist),
             type_gpa: amplifiers.type_gpa,
             type_apa: amplifiers.type_apa,
@@ -157,8 +162,11 @@ impl RealtekDevice {
             crystal_cap: crystal_cap_from_efuse_map(&map),
             thermal_meter: thermal_meter_from_efuse_map(chip, &map),
             thermal_meter_paths: thermal_meter_paths_from_efuse_map(chip, &map),
+            tx_power_defaults,
             tx_power: tx_power_info_from_efuse_map(chip, &map),
-        })
+        };
+        self.record_efuse_diagnostics(&map, info);
+        Ok(info)
     }
 
     pub(crate) async fn read_efuse_logical_map_async(
@@ -183,9 +191,7 @@ impl RealtekDevice {
         let power_off = self.efuse_power_switch_async(false, false).await;
         match (result, power_off) {
             (Ok(map), Ok(())) => {
-                if chip.family.is_jaguar2() {
-                    let _ = self.efuse_logical_map.set(map);
-                }
+                let _ = self.efuse_logical_map.set(map);
                 Ok(map)
             }
             (Err(err), _) => Err(err),

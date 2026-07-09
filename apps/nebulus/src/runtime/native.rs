@@ -312,7 +312,7 @@ mod worker {
         sync::{
             atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
             mpsc::{self, SyncSender, TrySendError},
-            Arc, Mutex,
+            Arc, Mutex, OnceLock,
         },
         thread::JoinHandle,
         time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -321,7 +321,10 @@ mod worker {
     use nusb::transfer::{Buffer, TransferError};
     use nusb::MaybeFuture;
     use openipc_core::{
-        realtek::{parse_rx_aggregate_with_kind, RxPacketType},
+        realtek::{
+            parse_rx_aggregate_with_kind, parse_rx_aggregate_with_kind_diagnostics, AggregateError,
+            RxAggregateDiagnostics, RxDescriptorKind, RxPacketType,
+        },
         AdaptiveLink, ChannelId, DiversityCombiner, DiversityDecision, DiversitySourceId,
         DiversityStats, FecCounters, FrameLayout, PayloadRouteId, RadioPort, ReceiverRuntime,
         TxRadioParams, WfbKeypair, WfbTransmitter, WfbTxKeypair, WifiFrame,
@@ -690,10 +693,36 @@ mod worker {
         transfer_bytes: AtomicU64,
         queue_drops: AtomicU64,
         usb_errors: AtomicU64,
+        descriptor_kind: String,
+        first_descriptor_sample: OnceLock<String>,
+        first_transfer: OnceLock<(usize, f64, String)>,
+        zero_length_transfers: AtomicU64,
+        aggregate_descriptors: AtomicU64,
+        aggregate_trailing_events: AtomicU64,
+        aggregate_trailing_bytes: AtomicU64,
+        aggregate_trailing_nonzero_bytes: AtomicU64,
+        alignment_padding_bytes: AtomicU64,
+        final_alignment_shortfall_bytes: AtomicU64,
+        descriptor_too_short: AtomicU64,
+        invalid_packet_length: AtomicU64,
+        crc_packets: AtomicU64,
+        icv_packets: AtomicU64,
+        report_packets: AtomicU64,
+        wifi_parse_errors: AtomicU64,
+        first_parse_error: OnceLock<(String, String)>,
+        usb_stalls: AtomicU64,
+        usb_disconnects: AtomicU64,
+        usb_other_errors: AtomicU64,
+        last_usb_error: Mutex<Option<String>>,
     }
 
     impl CaptureMetrics {
-        fn new(source_id: u16, device_id: String, label: String) -> Self {
+        fn new(
+            source_id: u16,
+            device_id: String,
+            label: String,
+            descriptor: RxDescriptorKind,
+        ) -> Self {
             Self {
                 source_id,
                 device_id,
@@ -703,10 +732,70 @@ mod worker {
                 transfer_bytes: AtomicU64::new(0),
                 queue_drops: AtomicU64::new(0),
                 usb_errors: AtomicU64::new(0),
+                descriptor_kind: format!("{descriptor:?}"),
+                first_descriptor_sample: OnceLock::new(),
+                first_transfer: OnceLock::new(),
+                zero_length_transfers: AtomicU64::new(0),
+                aggregate_descriptors: AtomicU64::new(0),
+                aggregate_trailing_events: AtomicU64::new(0),
+                aggregate_trailing_bytes: AtomicU64::new(0),
+                aggregate_trailing_nonzero_bytes: AtomicU64::new(0),
+                alignment_padding_bytes: AtomicU64::new(0),
+                final_alignment_shortfall_bytes: AtomicU64::new(0),
+                descriptor_too_short: AtomicU64::new(0),
+                invalid_packet_length: AtomicU64::new(0),
+                crc_packets: AtomicU64::new(0),
+                icv_packets: AtomicU64::new(0),
+                report_packets: AtomicU64::new(0),
+                wifi_parse_errors: AtomicU64::new(0),
+                first_parse_error: OnceLock::new(),
+                usb_stalls: AtomicU64::new(0),
+                usb_disconnects: AtomicU64::new(0),
+                usb_other_errors: AtomicU64::new(0),
+                last_usb_error: Mutex::new(None),
             }
         }
 
+        fn record_parse_error(&self, error: &AggregateError, bytes: &[u8]) -> u64 {
+            let count = match error {
+                AggregateError::DescriptorTooShort => self
+                    .descriptor_too_short
+                    .fetch_add(1, Ordering::Relaxed)
+                    .saturating_add(1),
+                AggregateError::InvalidPacketLength { .. } => self
+                    .invalid_packet_length
+                    .fetch_add(1, Ordering::Relaxed)
+                    .saturating_add(1),
+            };
+            self.first_parse_error
+                .get_or_init(|| (error.to_string(), hex_sample(bytes)));
+            count
+        }
+
+        fn record_aggregate_diagnostics(&self, diagnostics: RxAggregateDiagnostics) {
+            self.aggregate_descriptors
+                .fetch_add(diagnostics.descriptors as u64, Ordering::Relaxed);
+            if diagnostics.trailing_bytes > 0 {
+                self.aggregate_trailing_events
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            self.aggregate_trailing_bytes
+                .fetch_add(diagnostics.trailing_bytes as u64, Ordering::Relaxed);
+            self.aggregate_trailing_nonzero_bytes
+                .fetch_add(diagnostics.trailing_nonzero_bytes as u64, Ordering::Relaxed);
+            self.alignment_padding_bytes.fetch_add(
+                diagnostics.alignment_padding_bytes as u64,
+                Ordering::Relaxed,
+            );
+            self.final_alignment_shortfall_bytes.fetch_add(
+                diagnostics.final_alignment_shortfall_bytes as u64,
+                Ordering::Relaxed,
+            );
+        }
+
         fn snapshot(&self) -> AdapterRuntimeMetrics {
+            let first_transfer = self.first_transfer.get();
+            let first_parse_error = self.first_parse_error.get();
             AdapterRuntimeMetrics {
                 source_id: self.source_id,
                 device_id: self.device_id.clone(),
@@ -716,6 +805,38 @@ mod worker {
                 transfer_bytes: self.transfer_bytes.load(Ordering::Relaxed),
                 queue_drops: self.queue_drops.load(Ordering::Relaxed),
                 usb_errors: self.usb_errors.load(Ordering::Relaxed),
+                descriptor_kind: self.descriptor_kind.clone(),
+                first_descriptor_sample: self.first_descriptor_sample.get().cloned(),
+                first_transfer_len: first_transfer.map(|first| first.0),
+                first_transfer_latency_ms: first_transfer.map(|first| first.1),
+                first_transfer_sample: first_transfer.map(|first| first.2.clone()),
+                zero_length_transfers: self.zero_length_transfers.load(Ordering::Relaxed),
+                aggregate_descriptors: self.aggregate_descriptors.load(Ordering::Relaxed),
+                aggregate_trailing_events: self.aggregate_trailing_events.load(Ordering::Relaxed),
+                aggregate_trailing_bytes: self.aggregate_trailing_bytes.load(Ordering::Relaxed),
+                aggregate_trailing_nonzero_bytes: self
+                    .aggregate_trailing_nonzero_bytes
+                    .load(Ordering::Relaxed),
+                alignment_padding_bytes: self.alignment_padding_bytes.load(Ordering::Relaxed),
+                final_alignment_shortfall_bytes: self
+                    .final_alignment_shortfall_bytes
+                    .load(Ordering::Relaxed),
+                descriptor_too_short: self.descriptor_too_short.load(Ordering::Relaxed),
+                invalid_packet_length: self.invalid_packet_length.load(Ordering::Relaxed),
+                crc_packets: self.crc_packets.load(Ordering::Relaxed),
+                icv_packets: self.icv_packets.load(Ordering::Relaxed),
+                report_packets: self.report_packets.load(Ordering::Relaxed),
+                wifi_parse_errors: self.wifi_parse_errors.load(Ordering::Relaxed),
+                first_parse_error: first_parse_error.map(|first| first.0.clone()),
+                first_parse_error_sample: first_parse_error.map(|first| first.1.clone()),
+                usb_stalls: self.usb_stalls.load(Ordering::Relaxed),
+                usb_disconnects: self.usb_disconnects.load(Ordering::Relaxed),
+                usb_other_errors: self.usb_other_errors.load(Ordering::Relaxed),
+                last_usb_error: self
+                    .last_usb_error
+                    .lock()
+                    .expect("USB diagnostics poisoned")
+                    .clone(),
                 ..AdapterRuntimeMetrics::default()
             }
         }
@@ -731,13 +852,14 @@ mod worker {
             stop: Arc<AtomicBool>,
             completions: SyncSender<CaptureEvent>,
         ) -> Result<Self, String> {
+            let descriptor = device.rx_descriptor_kind();
             let mut endpoint = device
                 .bulk_in_endpoint()
                 .map_err(|error| error.to_string())?;
             while endpoint.pending() < RX_TRANSFERS_IN_FLIGHT {
                 endpoint.submit(endpoint.allocate(transfer_size));
             }
-            let metrics = Arc::new(CaptureMetrics::new(source_id, device_id, label));
+            let metrics = Arc::new(CaptureMetrics::new(source_id, device_id, label, descriptor));
             let thread_metrics = Arc::clone(&metrics);
             let (return_buffer, returned_buffers) = mpsc::channel();
             let worker = std::thread::Builder::new()
@@ -764,6 +886,18 @@ mod worker {
                                 thread_metrics
                                     .transfer_bytes
                                     .fetch_add(actual_len as u64, Ordering::Relaxed);
+                                if actual_len == 0 {
+                                    thread_metrics
+                                        .zero_length_transfers
+                                        .fetch_add(1, Ordering::Relaxed);
+                                }
+                                thread_metrics.first_transfer.get_or_init(|| {
+                                    (
+                                        actual_len,
+                                        usb_latency_ms,
+                                        hex_sample(&completion.buffer[..actual_len]),
+                                    )
+                                });
                                 let event = CaptureEvent {
                                     source_id,
                                     buffer: completion.buffer,
@@ -784,16 +918,37 @@ mod worker {
                             }
                             Err(TransferError::Disconnected) => {
                                 thread_metrics.usb_errors.fetch_add(1, Ordering::Relaxed);
+                                thread_metrics
+                                    .usb_disconnects
+                                    .fetch_add(1, Ordering::Relaxed);
+                                *thread_metrics
+                                    .last_usb_error
+                                    .lock()
+                                    .expect("USB diagnostics poisoned") =
+                                    Some("Disconnected".to_owned());
                                 break;
                             }
                             Err(TransferError::Stall) => {
                                 thread_metrics.usb_errors.fetch_add(1, Ordering::Relaxed);
+                                thread_metrics.usb_stalls.fetch_add(1, Ordering::Relaxed);
+                                *thread_metrics
+                                    .last_usb_error
+                                    .lock()
+                                    .expect("USB diagnostics poisoned") = Some("Stall".to_owned());
                                 let _ = endpoint.clear_halt().wait();
                                 endpoint.submit(completion.buffer);
                                 consecutive_errors = 0;
                             }
-                            Err(_) => {
+                            Err(error) => {
                                 thread_metrics.usb_errors.fetch_add(1, Ordering::Relaxed);
+                                thread_metrics
+                                    .usb_other_errors
+                                    .fetch_add(1, Ordering::Relaxed);
+                                *thread_metrics
+                                    .last_usb_error
+                                    .lock()
+                                    .expect("USB diagnostics poisoned") =
+                                    Some(format!("{error:?}"));
                                 endpoint.submit(completion.buffer);
                                 consecutive_errors = consecutive_errors.saturating_add(1);
                                 if consecutive_errors >= 8 {
@@ -1347,6 +1502,23 @@ mod worker {
                 let device = match opened {
                     Ok(device) => device,
                     Err(error) => {
+                        let id = requested_id
+                            .clone()
+                            .unwrap_or_else(|| "automatic".to_owned());
+                        send(
+                            events,
+                            context,
+                            RuntimeEvent::ReceiverAttempt(
+                                crate::runtime::ReceiverInfo::open_failed(
+                                    id.clone(),
+                                    u16::try_from(adapters.len()).unwrap_or(u16::MAX),
+                                    id,
+                                    None,
+                                    None,
+                                    error.to_string(),
+                                ),
+                            ),
+                        );
                         log(
                             events,
                             context,
@@ -1378,6 +1550,23 @@ mod worker {
                 let opened = match crate::android::open_device(requested_id.as_deref()) {
                     Ok(opened) => opened,
                     Err(error) => {
+                        let id = requested_id
+                            .clone()
+                            .unwrap_or_else(|| "automatic".to_owned());
+                        send(
+                            events,
+                            context,
+                            RuntimeEvent::ReceiverAttempt(
+                                crate::runtime::ReceiverInfo::open_failed(
+                                    id.clone(),
+                                    u16::try_from(adapters.len()).unwrap_or(u16::MAX),
+                                    id,
+                                    None,
+                                    None,
+                                    error.clone(),
+                                ),
+                            ),
+                        );
                         log(
                             events,
                             context,
@@ -1397,9 +1586,25 @@ mod worker {
                 };
                 let id = opened.info.id.clone();
                 let label = opened.info.label.clone();
+                let vendor_id = opened.info.vendor_id;
+                let product_id = opened.info.product_id;
                 let device = match RealtekDevice::from_nusb_device(opened.device, driver) {
                     Ok(device) => device,
                     Err(error) => {
+                        send(
+                            events,
+                            context,
+                            RuntimeEvent::ReceiverAttempt(
+                                crate::runtime::ReceiverInfo::open_failed(
+                                    id.clone(),
+                                    u16::try_from(adapters.len()).unwrap_or(u16::MAX),
+                                    label.clone(),
+                                    Some(vendor_id),
+                                    Some(product_id),
+                                    error.to_string(),
+                                ),
+                            ),
+                        );
                         log(
                             events,
                             context,
@@ -1426,6 +1631,18 @@ mod worker {
             {
                 Ok(report) => report,
                 Err(error) => {
+                    let source_id = u16::try_from(adapters.len()).unwrap_or(u16::MAX);
+                    send(
+                        events,
+                        context,
+                        RuntimeEvent::ReceiverAttempt(crate::runtime::ReceiverInfo::failed(
+                            id.clone(),
+                            source_id,
+                            label.clone(),
+                            &device,
+                            error.to_string(),
+                        )),
+                    );
                     log(
                         events,
                         context,
@@ -1439,16 +1656,22 @@ mod worker {
             };
             let source_id = u16::try_from(adapters.len())
                 .map_err(|_| "too many diversity adapters selected".to_owned())?;
+            let receiver_info = crate::runtime::ReceiverInfo::initialized(
+                id.clone(),
+                source_id,
+                label.clone(),
+                &device,
+                &report,
+            );
+            send(
+                events,
+                context,
+                RuntimeEvent::ReceiverAttempt(receiver_info.clone()),
+            );
             adapters.push(ActiveAdapter {
                 descriptor: device.rx_descriptor_kind(),
                 chip: report.chip.family,
-                receiver_info: crate::runtime::ReceiverInfo::initialized(
-                    id.clone(),
-                    source_id,
-                    label.clone(),
-                    &device,
-                    &report,
-                ),
+                receiver_info,
                 id,
                 label,
                 device,
@@ -1607,6 +1830,9 @@ mod worker {
             .map(|_| AdaptiveLink::new())
             .collect::<Vec<_>>();
         let mut last_online_count = captures.online_count();
+        let mut first_usb_completion = false;
+        let mut first_non_empty_aggregate = false;
+        let mut first_rx_descriptor = false;
         while !stop.load(Ordering::Relaxed) {
             let wait = if uplink.is_some() {
                 Duration::from_millis(10)
@@ -1682,24 +1908,78 @@ mod worker {
                 continue;
             };
             let bytes = &event.buffer[..event.actual_len];
+            if !first_usb_completion {
+                first_usb_completion = true;
+                send(
+                    events,
+                    context,
+                    RuntimeEvent::Milestone("first_usb_completion"),
+                );
+            }
+            if !first_non_empty_aggregate && !bytes.is_empty() {
+                first_non_empty_aggregate = true;
+                send(
+                    events,
+                    context,
+                    RuntimeEvent::Milestone("first_non_empty_aggregate"),
+                );
+            }
             let batch_start = Instant::now();
             let parse_start = Instant::now();
-            let packets = match parse_rx_aggregate_with_kind(bytes, adapter.descriptor) {
-                Ok(packets) => packets,
-                Err(error) => {
-                    log(
+            let (packets, aggregate_diagnostics) =
+                match parse_rx_aggregate_with_kind_diagnostics(bytes, adapter.descriptor) {
+                    Ok(parsed) => parsed,
+                    Err(error) => {
+                        let count = captures.workers[source_index]
+                            .metrics
+                            .record_parse_error(&error, bytes);
+                        if count == 1 || count.is_power_of_two() {
+                            log(
+                                events,
+                                context,
+                                LogLevel::Warn,
+                                "usb",
+                                format!(
+                                    "{} RX aggregate rejected count={count}: {error}; sample={}",
+                                    adapter.label,
+                                    hex_sample(bytes)
+                                ),
+                            );
+                        }
+                        let _ = captures.workers[source_index]
+                            .return_buffer
+                            .send(event.buffer);
+                        continue;
+                    }
+                };
+            let capture_metrics = &captures.workers[source_index].metrics;
+            capture_metrics.record_aggregate_diagnostics(aggregate_diagnostics);
+            if !packets.is_empty() {
+                if !first_rx_descriptor {
+                    first_rx_descriptor = true;
+                    send(
                         events,
                         context,
-                        LogLevel::Warn,
-                        "usb",
-                        format!("{} RX aggregate rejected: {error}", adapter.label),
+                        RuntimeEvent::Milestone("first_rx_descriptor"),
                     );
-                    let _ = captures.workers[source_index]
-                        .return_buffer
-                        .send(event.buffer);
-                    continue;
                 }
-            };
+                capture_metrics
+                    .first_descriptor_sample
+                    .get_or_init(|| hex_sample(bytes));
+            }
+            for packet in &packets {
+                if packet.attrib.crc_err {
+                    capture_metrics.crc_packets.fetch_add(1, Ordering::Relaxed);
+                }
+                if packet.attrib.icv_err {
+                    capture_metrics.icv_packets.fetch_add(1, Ordering::Relaxed);
+                }
+                if packet.attrib.pkt_rpt_type != RxPacketType::NormalRx {
+                    capture_metrics
+                        .report_packets
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+            }
             let parse_latency_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
             let now = now_ms();
             let source = DiversitySourceId::new(event.source_id);
@@ -1711,6 +1991,11 @@ mod worker {
                     return Some((packet, None));
                 }
                 let frame = WifiFrame::parse(packet.data, FrameLayout::WithFcs).ok();
+                if frame.is_none() {
+                    capture_metrics
+                        .wifi_parse_errors
+                        .fetch_add(1, Ordering::Relaxed);
+                }
                 let is_video = frame.is_some_and(|frame| {
                     frame.matches_channel_id(ChannelId::new(request.channel_id))
                 });
@@ -1835,6 +2120,12 @@ mod worker {
                 decoder_errors: stats.decode_errors,
                 fec: batch.fec_counters,
                 counters: batch.counters,
+                pipeline_errors: batch
+                    .route_error
+                    .clone()
+                    .into_iter()
+                    .map(|error| (error, 1))
+                    .collect(),
                 rtp: batch.rtp_status,
                 reorder: batch.rtp_reorder_status,
                 uplink: uplink.as_ref().map_or_else(
@@ -2027,6 +2318,12 @@ mod worker {
                 metrics.merge(BatchMetrics {
                     routes: route_updates,
                     counters: batch.counters,
+                    pipeline_errors: batch
+                        .route_error
+                        .clone()
+                        .into_iter()
+                        .map(|error| (error, 1))
+                        .collect(),
                     rtp: batch.rtp_status,
                     reorder: batch.rtp_reorder_status,
                     telemetry,
@@ -2143,6 +2440,17 @@ mod worker {
                 }
             }
         }
+    }
+
+    fn hex_sample(bytes: &[u8]) -> String {
+        use std::fmt::Write as _;
+
+        let sample = &bytes[..bytes.len().min(64)];
+        let mut output = String::with_capacity(sample.len().saturating_mul(2));
+        for byte in sample {
+            let _ = write!(output, "{byte:02x}");
+        }
+        output
     }
 
     fn record_audio_packets(

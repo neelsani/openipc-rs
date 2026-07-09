@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 #[cfg(target_arch = "wasm32")]
 use std::{cell::RefCell, rc::Rc};
 
@@ -37,6 +37,7 @@ use crate::{
 };
 
 const MAX_OSD_UNDO_STEPS: usize = 64;
+const MAX_SUPPORT_LOGS: usize = 10_000;
 
 /// A consequential VTX operation waiting for explicit user approval.
 #[derive(Debug, Clone)]
@@ -155,10 +156,13 @@ pub struct NebulusApp {
     pub(crate) devices: Vec<UsbDeviceInfo>,
     pub(crate) receiver_info: Option<ReceiverInfo>,
     pub(crate) receiver_infos: Vec<ReceiverInfo>,
+    pub(crate) receiver_attempts: Vec<ReceiverInfo>,
     pub(crate) adapter_metrics: Vec<AdapterRuntimeMetrics>,
     pub(crate) metrics: LiveMetrics,
     pub(crate) history: MetricHistory,
     pub(crate) logs: Vec<LogEntry>,
+    pub(crate) support_logs: VecDeque<LogEntry>,
+    pub(crate) support_logs_dropped: u64,
     pub(crate) log_filter: LogLevel,
     pub(crate) log_search: String,
     pub(crate) route_stats: BTreeMap<u64, RouteStats>,
@@ -261,10 +265,13 @@ impl NebulusApp {
             devices: Vec::new(),
             receiver_info: None,
             receiver_infos: Vec::new(),
+            receiver_attempts: Vec::new(),
             adapter_metrics: Vec::new(),
             metrics: LiveMetrics::default(),
             history: MetricHistory::default(),
             logs: Vec::new(),
+            support_logs: VecDeque::new(),
+            support_logs_dropped: 0,
             log_filter: LogLevel::Trace,
             log_search: String::new(),
             route_stats: BTreeMap::new(),
@@ -1025,8 +1032,21 @@ impl NebulusApp {
                 RuntimeEvent::Connecting => {
                     self.receiver_info = None;
                     self.receiver_infos.clear();
+                    self.receiver_attempts.clear();
                     self.adapter_metrics.clear();
                     self.state = ReceiverState::Connecting;
+                    self.mark_milestone("connect_requested");
+                }
+                RuntimeEvent::ReceiverAttempt(receiver) => {
+                    if let Some(existing) = self
+                        .receiver_attempts
+                        .iter_mut()
+                        .find(|existing| existing.id == receiver.id)
+                    {
+                        *existing = receiver;
+                    } else {
+                        self.receiver_attempts.push(receiver);
+                    }
                 }
                 RuntimeEvent::Connected { receivers, decoder } => {
                     let label = receivers
@@ -1035,6 +1055,17 @@ impl NebulusApp {
                         .collect::<Vec<_>>()
                         .join(" + ");
                     self.receiver_info = receivers.first().cloned();
+                    for receiver in &receivers {
+                        if let Some(existing) = self
+                            .receiver_attempts
+                            .iter_mut()
+                            .find(|existing| existing.id == receiver.id)
+                        {
+                            existing.clone_from(receiver);
+                        } else {
+                            self.receiver_attempts.push(receiver.clone());
+                        }
+                    }
                     self.receiver_infos = receivers;
                     self.metrics.decoder_name = decoder.backend.clone();
                     self.environment.decoder_backend = decoder.backend;
@@ -1044,6 +1075,7 @@ impl NebulusApp {
                         capability_label(decoder.h265_supported, decoder.h265_hardware);
                     self.environment.native_surfaces = decoder.native_surfaces;
                     self.state = ReceiverState::Ready;
+                    self.mark_milestone("driver_initialized");
                     self.log(
                         LogLevel::Info,
                         "usb",
@@ -1055,9 +1087,11 @@ impl NebulusApp {
                 }
                 RuntimeEvent::Started => {
                     self.state = ReceiverState::Receiving;
+                    self.mark_milestone("receive_loop_started");
                     self.recovery.scheduled_at = None;
                     self.recovery.stable_since = Some(Instant::now());
                 }
+                RuntimeEvent::Milestone(name) => self.mark_milestone(name),
                 RuntimeEvent::ScanStarted { total } => {
                     self.state = ReceiverState::Scanning;
                     self.scan_progress = Some((0, total));
@@ -1763,6 +1797,54 @@ impl NebulusApp {
     }
 
     fn apply_batch(&mut self, mut batch: crate::runtime::BatchMetrics) {
+        for (error, added) in std::mem::take(&mut batch.pipeline_errors) {
+            let count = {
+                let count = self
+                    .diagnostics
+                    .pipeline_errors
+                    .entry(error.clone())
+                    .or_default();
+                *count = count.saturating_add(added);
+                *count
+            };
+            if count == 1 || count.is_power_of_two() {
+                self.log(
+                    LogLevel::Warn,
+                    "pipeline",
+                    format!("{error} (observed {count} times)"),
+                );
+            }
+        }
+        if batch.transfers > 0 {
+            self.mark_milestone("first_usb_completion");
+        }
+        if batch.transfer_bytes > 0 {
+            self.mark_milestone("first_non_empty_aggregate");
+        }
+        if batch.counters.packets > 0 {
+            self.mark_milestone("first_rx_descriptor");
+        }
+        if batch.counters.wifi_frames > 0 {
+            self.mark_milestone("first_valid_80211_frame");
+        }
+        if batch.counters.matched_frames > 0 {
+            self.mark_milestone("first_matching_channel_id");
+        }
+        if batch.counters.sessions > 0 {
+            self.mark_milestone("first_wfb_session");
+        }
+        if batch.counters.wfb_payloads > 0 {
+            self.mark_milestone("first_decrypted_payload");
+        }
+        if batch.rtp_packets > 0 {
+            self.mark_milestone("first_rtp_packet");
+        }
+        if batch.video_frames > 0 {
+            self.mark_milestone("first_encoded_frame");
+        }
+        if batch.decoder_frames > 0 {
+            self.mark_milestone("first_decoder_output");
+        }
         if let Some(update) = batch.telemetry.take() {
             self.telemetry.apply(update);
         }
@@ -1888,6 +1970,7 @@ impl NebulusApp {
     }
 
     fn record_presented_frame(&mut self, dimensions: [u32; 2], decode_latency_ms: f64) {
+        self.mark_milestone("first_rendered_frame");
         self.metrics.resolution = Some(dimensions);
         self.metrics.decode_latency_ms = decode_latency_ms;
         self.metrics.local_processing_latency_ms = self.metrics.video_submit_path_ms
@@ -1903,6 +1986,17 @@ impl NebulusApp {
                 > u64::from(current[0]) * u64::from(current[1])
         }) {
             self.environment.maximum_observed_resolution = Some(dimensions);
+        }
+    }
+
+    fn mark_milestone(&mut self, name: &str) {
+        let elapsed = self.started_at.elapsed().as_secs_f64();
+        if self.diagnostics.mark_milestone(name, elapsed) {
+            self.log(
+                LogLevel::Info,
+                "milestone",
+                format!("{name} at {elapsed:.3}s"),
+            );
         }
     }
 
@@ -1981,6 +2075,22 @@ impl NebulusApp {
         target: impl Into<String>,
         message: impl Into<String>,
     ) {
+        let target = target.into();
+        let message = message.into();
+        let sequence = self.next_log_sequence;
+        self.next_log_sequence = self.next_log_sequence.wrapping_add(1).max(1);
+        let entry = LogEntry {
+            sequence,
+            elapsed_seconds: self.started_at.elapsed().as_secs_f64(),
+            level,
+            target,
+            message,
+        };
+        if self.support_logs.len() >= MAX_SUPPORT_LOGS {
+            self.support_logs.pop_front();
+            self.support_logs_dropped = self.support_logs_dropped.saturating_add(1);
+        }
+        self.support_logs.push_back(entry.clone());
         let visible = match self.settings.diagnostic_verbosity {
             crate::settings::DiagnosticVerbosity::Low => {
                 matches!(level, LogLevel::Warn | LogLevel::Error)
@@ -1997,15 +2107,7 @@ impl NebulusApp {
         if self.logs.len() >= 1_000 {
             self.logs.drain(..100);
         }
-        let sequence = self.next_log_sequence;
-        self.next_log_sequence = self.next_log_sequence.wrapping_add(1).max(1);
-        self.logs.push(LogEntry {
-            sequence,
-            elapsed_seconds: self.started_at.elapsed().as_secs_f64(),
-            level,
-            target: target.into(),
-            message: message.into(),
-        });
+        self.logs.push(entry);
     }
 }
 
@@ -2029,6 +2131,11 @@ fn accumulate_counters(
     current.accepted_packets = current
         .accepted_packets
         .saturating_add(batch.accepted_packets);
+    current.wifi_frames = current.wifi_frames.saturating_add(batch.wifi_frames);
+    current.matched_frames = current.matched_frames.saturating_add(batch.matched_frames);
+    current.wifi_parse_dropped = current
+        .wifi_parse_dropped
+        .saturating_add(batch.wifi_parse_dropped);
     current.dropped_packets = current
         .dropped_packets
         .saturating_add(batch.dropped_packets);

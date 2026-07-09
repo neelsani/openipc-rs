@@ -52,8 +52,8 @@ pub use radiotap::{
     RadiotapTxMetadata, TxMode, TxModeKind, TxRadioParams, FRAME_TYPE_DATA, FRAME_TYPE_RTS,
 };
 pub use realtek::{
-    parse_rx_aggregate, parse_rx_aggregate_with_kind, RealtekRxPacket, RxDescriptorKind,
-    RxPacketAttrib,
+    parse_rx_aggregate, parse_rx_aggregate_with_kind, parse_rx_aggregate_with_kind_diagnostics,
+    RealtekRxPacket, RxAggregateDiagnostics, RxDescriptorKind, RxPacketAttrib,
 };
 pub use receiver::{
     ReceiverBatch, ReceiverBatchCounters, ReceiverBatchOptions, ReceiverRuntime, RoutePayload,

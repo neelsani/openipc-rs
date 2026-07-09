@@ -384,6 +384,13 @@ impl PayloadRouteManager {
             .unwrap_or(false)
     }
 
+    /// Return true when at least one configured runtime receives `channel_id`.
+    pub fn accepts_channel_id(&self, channel_id: ChannelId) -> bool {
+        self.runtimes
+            .keys()
+            .any(|key| key.channel_id() == channel_id)
+    }
+
     /// Route one raw 802.11 frame to every matching runtime.
     pub fn push_80211_frame(
         &mut self,

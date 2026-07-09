@@ -30,6 +30,7 @@ mod async_tables;
 mod async_tx_power;
 mod beamforming;
 mod device;
+mod diagnostics;
 mod firmware;
 mod hop_prof;
 mod link_health;
@@ -65,6 +66,10 @@ pub use beamforming::{
     BeamformingReport,
 };
 pub use device::RealtekDevice;
+pub use diagnostics::{
+    DriverDiagnostics, EfuseDiagnostics, InitStageDiagnostics, ProbeDiagnostics,
+    RegisterIoDiagnostics, RegisterSnapshot, RegisterTraceEntry,
+};
 pub use link_health::{
     classify_link_health, LinkHealth, LinkHealthInput, LinkHealthThresholds, LinkVerdict,
 };

@@ -147,8 +147,10 @@ beamforming sounding, CSI/NBI receive masking, per-rate TX power, PHYDM, power
 tracking, IQK, C2H/TX-status packets, clean shutdown, runtime quarter-dB power
 control, Jaguar2 per-packet power, TX capability guards/statistics, rolling RX
 quality and link-health classification, adapter-health probes, and self-gated
-Jaguar3 TX beamforming. Driver diagnostics are explicit APIs that apps
-schedule themselves; the library does not create hidden polling threads.
+Jaguar3 TX beamforming. Driver diagnostics include structured probe, EFUSE,
+initialization-stage, register-trace, and post-init snapshots. Runtime polling
+remains explicit and app-owned; the library does not create hidden polling
+threads.
 
 More live adapter testing is still needed: cold-plug runs, register-trace
 comparison, and browser WebUSB behavior across platforms.

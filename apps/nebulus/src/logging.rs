@@ -3,7 +3,7 @@
 use std::{
     collections::VecDeque,
     sync::{
-        atomic::{AtomicU8, AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering},
         Mutex, Once,
     },
 };
@@ -23,6 +23,9 @@ pub(crate) struct CapturedLog {
 struct NebulusLogger {
     level: AtomicU8,
     hot_trace_sequence: AtomicUsize,
+    sampled_trace_records: AtomicU64,
+    trimmed_records: AtomicU64,
+    egui_records_excluded: AtomicU64,
     captured: Mutex<VecDeque<CapturedLog>>,
 }
 
@@ -31,6 +34,9 @@ impl NebulusLogger {
         Self {
             level: AtomicU8::new(LevelFilter::Info as u8),
             hot_trace_sequence: AtomicUsize::new(0),
+            sampled_trace_records: AtomicU64::new(0),
+            trimmed_records: AtomicU64::new(0),
+            egui_records_excluded: AtomicU64::new(0),
             captured: Mutex::new(VecDeque::new()),
         }
     }
@@ -51,6 +57,7 @@ impl Log for NebulusLogger {
         if record.level() == Level::Trace && high_rate_target(record.target()) {
             let sequence = self.hot_trace_sequence.fetch_add(1, Ordering::Relaxed);
             if !sequence.is_multiple_of(128) {
+                self.sampled_trace_records.fetch_add(1, Ordering::Relaxed);
                 return;
             }
         }
@@ -61,11 +68,14 @@ impl Log for NebulusLogger {
         // which produces another layout diagnostic. Keep those messages in
         // stderr/Logcat, but never feed them back into the in-app log view.
         if record.target().starts_with("egui") {
+            self.egui_records_excluded.fetch_add(1, Ordering::Relaxed);
             return;
         }
         let mut captured = self.captured.lock().expect("log capture poisoned");
         if captured.len() >= MAX_CAPTURED_RECORDS {
             captured.drain(..TRIM_RECORDS);
+            self.trimmed_records
+                .fetch_add(TRIM_RECORDS as u64, Ordering::Relaxed);
         }
         captured.push_back(CapturedLog {
             level: record.level(),
@@ -80,12 +90,23 @@ impl Log for NebulusLogger {
 fn high_rate_target(target: &str) -> bool {
     matches!(
         target,
-        "openipc_core::rtp" | "openipc_core::wfb" | "openipc_rtl88xx::usb"
+        "openipc_core::rtp"
+            | "openipc_core::wfb"
+            | "openipc_rtl88xx::usb"
+            | "openipc_rtl88xx::register"
     )
 }
 
 static LOGGER: NebulusLogger = NebulusLogger::new();
 static INIT: Once = Once::new();
+
+/// Counters describing records intentionally omitted from the in-app capture.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CaptureStats {
+    pub(crate) sampled_trace_records: u64,
+    pub(crate) trimmed_records: u64,
+    pub(crate) egui_records_excluded: u64,
+}
 
 pub(crate) fn init() {
     INIT.call_once(|| {
@@ -106,6 +127,14 @@ pub(crate) fn drain() -> Vec<CapturedLog> {
         .expect("log capture poisoned")
         .drain(..)
         .collect()
+}
+
+pub(crate) fn capture_stats() -> CaptureStats {
+    CaptureStats {
+        sampled_trace_records: LOGGER.sampled_trace_records.load(Ordering::Relaxed),
+        trimmed_records: LOGGER.trimmed_records.load(Ordering::Relaxed),
+        egui_records_excluded: LOGGER.egui_records_excluded.load(Ordering::Relaxed),
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]

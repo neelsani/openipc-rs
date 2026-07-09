@@ -329,6 +329,25 @@ retries are `warn`, and register plus bulk-transfer details are `trace`. Trace
 logging is intentionally high volume and should be enabled only for short
 hardware investigations.
 
+`RealtekDevice::diagnostics_snapshot()` retains the latest monitor-init attempt
+independently from that rolling log. It includes raw probe registers and the
+selected RX descriptor, decoded EFUSE/RFE calibration, per-stage timing and
+errors, register-I/O fingerprints, a bounded ordered register trace with actual
+values, and post-init RX/filter/DMA registers. Snapshot cloning is intended for
+connection setup or support export, not the bulk-IN hot path.
+
+```rust
+device.initialize_monitor_async(radio, false).await?;
+let init = device.diagnostics_snapshot();
+println!(
+    "completed={} stages={} register_ops={} dropped={}",
+    init.completed,
+    init.stages.len(),
+    init.register_trace.len(),
+    init.register_trace_dropped,
+);
+```
+
 The crate exposes diagnostics as explicit calls: thermal meter reads, false
 alarm counters, frame-free FA/CCA/IGI plus NHM sensing, RTL8814 queue depth, BB
 register/dbgport reads, PHYDM watchdog ticks, IQK, power tracking, and

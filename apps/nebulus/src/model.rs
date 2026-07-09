@@ -282,11 +282,21 @@ pub(crate) struct DiagnosticsState {
     pub(crate) reorder: openipc_core::RtpReorderStatus,
     pub(crate) diversity: openipc_core::DiversityStats,
     pub(crate) stages: BTreeMap<&'static str, LatencySeries>,
+    pub(crate) milestones: BTreeMap<String, f64>,
+    pub(crate) pipeline_errors: BTreeMap<String, u64>,
 }
 
 impl DiagnosticsState {
     pub(crate) fn observe(&mut self, stage: &'static str, milliseconds: f64) {
         self.stages.entry(stage).or_default().observe(milliseconds);
+    }
+
+    pub(crate) fn mark_milestone(&mut self, name: &str, elapsed_seconds: f64) -> bool {
+        if self.milestones.contains_key(name) {
+            return false;
+        }
+        self.milestones.insert(name.to_owned(), elapsed_seconds);
+        true
     }
 }
 

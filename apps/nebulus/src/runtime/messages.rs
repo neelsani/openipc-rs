@@ -1,6 +1,7 @@
 use openipc_core::{
     DiversityStats, FecCounters, ReceiverBatchCounters, RtpDepacketizerStatus, RtpReorderStatus,
 };
+use std::collections::BTreeMap;
 use std::time::Duration;
 use web_time::Instant;
 
@@ -64,9 +65,41 @@ pub(crate) struct ReceiverInfo {
     pub(crate) bulk_out_endpoint: Option<u8>,
     pub(crate) initialization: String,
     pub(crate) firmware_downloaded: Option<bool>,
+    pub(crate) rx_descriptor: Option<String>,
+    pub(crate) failure: Option<String>,
+    pub(crate) driver_diagnostics: Option<std::sync::Arc<openipc_rtl88xx::DriverDiagnostics>>,
 }
 
 impl ReceiverInfo {
+    pub(crate) fn open_failed(
+        id: String,
+        source_id: u16,
+        label: String,
+        vendor_id: Option<u16>,
+        product_id: Option<u16>,
+        error: String,
+    ) -> Self {
+        Self {
+            transport: ReceiverTransport::Usb,
+            id,
+            source_id,
+            label,
+            vendor_id,
+            product_id,
+            chip: "Unavailable before probe".to_owned(),
+            rf_paths: "Unknown".to_owned(),
+            cut_version: None,
+            usb_speed: "Unavailable".to_owned(),
+            bulk_in_endpoint: None,
+            bulk_out_endpoint: None,
+            initialization: "Device open/claim failed".to_owned(),
+            firmware_downloaded: None,
+            rx_descriptor: None,
+            failure: Some(error),
+            driver_diagnostics: None,
+        }
+    }
+
     pub(crate) fn initialized(
         id: String,
         source_id: u16,
@@ -81,14 +114,7 @@ impl ReceiverInfo {
             RfType::TwoTTwoR => "2T2R",
             RfType::FourTFourR => "4T4R",
         };
-        let usb_speed = match device.device_speed() {
-            Some(nusb::Speed::Low) => "Low speed (1.5 Mbps)",
-            Some(nusb::Speed::Full) => "Full speed (12 Mbps)",
-            Some(nusb::Speed::High) => "High speed (480 Mbps)",
-            Some(nusb::Speed::Super) => "SuperSpeed (5 Gbps)",
-            Some(nusb::Speed::SuperPlus) => "SuperSpeed+ (10 Gbps)",
-            Some(_) | None => "Not reported",
-        };
+        let diagnostics = device.diagnostics_snapshot();
         Self {
             transport: ReceiverTransport::Usb,
             id,
@@ -99,7 +125,7 @@ impl ReceiverInfo {
             chip: report.chip.family.name().to_owned(),
             rf_paths: rf_paths.to_owned(),
             cut_version: Some(report.chip.cut_version),
-            usb_speed: usb_speed.to_owned(),
+            usb_speed: usb_speed_label(device),
             bulk_in_endpoint: Some(device.bulk_in_endpoint_address()),
             bulk_out_endpoint: Some(device.bulk_out_endpoint_address()),
             initialization: match report.status {
@@ -108,6 +134,49 @@ impl ReceiverInfo {
             }
             .to_owned(),
             firmware_downloaded: Some(report.firmware_downloaded),
+            rx_descriptor: diagnostics
+                .probe
+                .as_ref()
+                .map(|probe| format!("{:?}", probe.rx_descriptor)),
+            failure: None,
+            driver_diagnostics: Some(std::sync::Arc::new(diagnostics)),
+        }
+    }
+
+    pub(crate) fn failed(
+        id: String,
+        source_id: u16,
+        label: String,
+        device: &openipc_rtl88xx::RealtekDevice,
+        error: String,
+    ) -> Self {
+        let diagnostics = device.diagnostics_snapshot();
+        let probe = diagnostics.probe.as_ref();
+        let rf_paths = probe.map_or("Unknown", |probe| match probe.chip.rf_type {
+            openipc_rtl88xx::RfType::OneTOneR => "1T1R",
+            openipc_rtl88xx::RfType::TwoTTwoR => "2T2R",
+            openipc_rtl88xx::RfType::FourTFourR => "4T4R",
+        });
+        Self {
+            transport: ReceiverTransport::Usb,
+            id,
+            source_id,
+            label,
+            vendor_id: Some(device.vendor_id()),
+            product_id: Some(device.product_id()),
+            chip: probe
+                .map(|probe| probe.chip.family.name().to_owned())
+                .unwrap_or_else(|| "Probe failed".to_owned()),
+            rf_paths: rf_paths.to_owned(),
+            cut_version: probe.map(|probe| probe.chip.cut_version),
+            usb_speed: usb_speed_label(device),
+            bulk_in_endpoint: Some(device.bulk_in_endpoint_address()),
+            bulk_out_endpoint: Some(device.bulk_out_endpoint_address()),
+            initialization: "Initialization failed".to_owned(),
+            firmware_downloaded: None,
+            rx_descriptor: probe.map(|probe| format!("{:?}", probe.rx_descriptor)),
+            failure: Some(error),
+            driver_diagnostics: Some(std::sync::Arc::new(diagnostics)),
         }
     }
 
@@ -128,6 +197,9 @@ impl ReceiverInfo {
             bulk_out_endpoint: None,
             initialization: "Listening for RTP datagrams".to_owned(),
             firmware_downloaded: None,
+            rx_descriptor: None,
+            failure: None,
+            driver_diagnostics: None,
         }
     }
 
@@ -152,8 +224,23 @@ impl ReceiverInfo {
             bulk_out_endpoint: None,
             initialization: "Development codec mock".to_owned(),
             firmware_downloaded: None,
+            rx_descriptor: None,
+            failure: None,
+            driver_diagnostics: None,
         }
     }
+}
+
+fn usb_speed_label(device: &openipc_rtl88xx::RealtekDevice) -> String {
+    match device.device_speed() {
+        Some(nusb::Speed::Low) => "Low speed (1.5 Mbps)",
+        Some(nusb::Speed::Full) => "Full speed (12 Mbps)",
+        Some(nusb::Speed::High) => "High speed (480 Mbps)",
+        Some(nusb::Speed::Super) => "SuperSpeed (5 Gbps)",
+        Some(nusb::Speed::SuperPlus) => "SuperSpeed+ (10 Gbps)",
+        Some(_) | None => "Not reported",
+    }
+    .to_owned()
 }
 
 #[cfg(target_os = "macos")]
@@ -280,6 +367,30 @@ pub(crate) struct AdapterRuntimeMetrics {
     pub(crate) snr: [i32; 4],
     pub(crate) accepted: u64,
     pub(crate) duplicates: u64,
+    pub(crate) descriptor_kind: String,
+    pub(crate) first_descriptor_sample: Option<String>,
+    pub(crate) first_transfer_len: Option<usize>,
+    pub(crate) first_transfer_latency_ms: Option<f64>,
+    pub(crate) first_transfer_sample: Option<String>,
+    pub(crate) zero_length_transfers: u64,
+    pub(crate) aggregate_descriptors: u64,
+    pub(crate) aggregate_trailing_events: u64,
+    pub(crate) aggregate_trailing_bytes: u64,
+    pub(crate) aggregate_trailing_nonzero_bytes: u64,
+    pub(crate) alignment_padding_bytes: u64,
+    pub(crate) final_alignment_shortfall_bytes: u64,
+    pub(crate) descriptor_too_short: u64,
+    pub(crate) invalid_packet_length: u64,
+    pub(crate) crc_packets: u64,
+    pub(crate) icv_packets: u64,
+    pub(crate) report_packets: u64,
+    pub(crate) wifi_parse_errors: u64,
+    pub(crate) first_parse_error: Option<String>,
+    pub(crate) first_parse_error_sample: Option<String>,
+    pub(crate) usb_stalls: u64,
+    pub(crate) usb_disconnects: u64,
+    pub(crate) usb_other_errors: u64,
+    pub(crate) last_usb_error: Option<String>,
 }
 
 /// Metrics emitted for one processed USB batch.
@@ -315,6 +426,7 @@ pub(crate) struct BatchMetrics {
     pub(crate) audio: crate::model::AudioStats,
     pub(crate) diversity: DiversityStats,
     pub(crate) adapters: Vec<AdapterRuntimeMetrics>,
+    pub(crate) pipeline_errors: BTreeMap<String, u64>,
 }
 
 impl BatchMetrics {
@@ -368,6 +480,10 @@ impl BatchMetrics {
         self.audio = newer.audio;
         self.diversity = newer.diversity;
         self.adapters = newer.adapters;
+        for (error, count) in newer.pipeline_errors {
+            let current = self.pipeline_errors.entry(error).or_default();
+            *current = current.saturating_add(count);
+        }
     }
 }
 
@@ -419,6 +535,11 @@ fn merge_counters(current: &mut ReceiverBatchCounters, newer: ReceiverBatchCount
     current.accepted_packets = current
         .accepted_packets
         .saturating_add(newer.accepted_packets);
+    current.wifi_frames = current.wifi_frames.saturating_add(newer.wifi_frames);
+    current.matched_frames = current.matched_frames.saturating_add(newer.matched_frames);
+    current.wifi_parse_dropped = current
+        .wifi_parse_dropped
+        .saturating_add(newer.wifi_parse_dropped);
     current.dropped_packets = current
         .dropped_packets
         .saturating_add(newer.dropped_packets);
@@ -505,11 +626,13 @@ pub(crate) enum RuntimeEvent {
     Devices(Vec<UsbDeviceInfo>),
     DiscoveryFailed(String),
     Connecting,
+    ReceiverAttempt(ReceiverInfo),
     Connected {
         receivers: Vec<ReceiverInfo>,
         decoder: DecoderEnvironment,
     },
     Started,
+    Milestone(&'static str),
     ScanStarted {
         total: usize,
     },

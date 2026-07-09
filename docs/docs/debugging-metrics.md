@@ -133,7 +133,8 @@ tab. The tab can filter by minimum severity and search both target and message.
 Packet-level Trace records from RTP, WFB, and USB targets are sampled one in
 128 before formatting. Counters and stage metrics still account for every
 packet. The capture queue keeps at most 4,000 pending records and the visible
-app history trims itself at 1,000 entries. Use the target search to isolate
+app history trims itself at 1,000 entries. A separate 10,000-record rolling
+history feeds support bundles. Use the target search to isolate
 `openipc_rtl88xx::register`, `openipc_rtl88xx::usb`, `openipc_core::wfb`,
 `openipc_core::fec`, `openipc_core::rtp`, or `openipc_video`.
 
@@ -141,6 +142,23 @@ A useful startup trace contains device open, chip probe, firmware/EFUSE
 initialization, monitor channel setup, WFB session acceptance, codec
 configuration, keyframe acceptance, and decoder activation. Normal remains the
 recommended setting for measurements; even sampled trace output adds work.
+
+For “OpenIPC-WASM works but Nebulus does not,” export a support bundle after
+the failure and compare boundaries in this order:
+
+1. Open `driver_init.json`. Confirm raw `SYS_CFG`/`SYS_CFG2`, selected chip,
+   descriptor kind, EFUSE RFE/board/RF paths, every successful init stage, and
+   post-init `CR`, `RCR`, `RXFLTMAP2`, and `RXDMA_STATUS`.
+2. In `report.json`, find the last entry in `receive_milestones_seconds`.
+3. Check the adapter parser histogram and first descriptor/rejection samples.
+   Non-zero trailing bytes can be normal padding; non-zero trailing _data_ plus
+   invalid packet lengths usually points to a descriptor or alignment mismatch.
+4. If matching 802.11 frames stop before a WFB session, verify link ID and key.
+   If WFB payloads reach RTP, move to the RTP and codec-config counters instead
+   of changing the radio driver.
+
+The complete register trace is structured and unsampled in
+`driver_init.json`; trace-level console logging remains sampled for latency.
 
 The Environment view identifies target OS/architecture, renderer, USB API,
 decoder backend, codec support, acceleration status where the platform exposes

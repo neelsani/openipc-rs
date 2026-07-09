@@ -521,19 +521,39 @@ Diagnostics is divided into four views:
   observed limits are labeled as such.
 
 The Logs tab owns capture verbosity: Low, Normal, High, or Very verbose. It also
-has an independent minimum-level display filter and target/message search. Logs
-remain bounded to avoid memory growth.
+has an independent minimum-level display filter and target/message search. The
+visible panel and support history are bounded independently. High-rate USB,
+WFB, RTP, and register messages are sampled to protect receive latency; the
+support report records how many messages were sampled or evicted. Driver
+initialization evidence is structured separately and is not lost when ordinary
+logs roll over.
 
-**Export support bundle** writes a ZIP containing `report.json`, `logs.txt`,
-and a short README. The report captures the build tag/commit, platform and
-decoder capabilities, selected receiver configuration, sanitized profile and
-route summaries, OSD profile summaries, hardware identity,
-packet/FEC/RTP/audio/VPN metrics, recovery
-state, telemetry protocol and field availability, and the latest channel-scan
-results. Exact GPS coordinates are omitted. Home-directory paths in logs are
-shortened. Key bytes are never included; the report records only key length and
-whether the active key is the built-in default. Desktop uses a save dialog,
-Android uses the document picker, and the browser downloads the ZIP.
+**Export support bundle** writes a ZIP with these files:
+
+| File | Start here when |
+| --- | --- |
+| `report.json` | Locating the first missing receive milestone or checking live counters, routes, media state, and platform capabilities. |
+| `driver_init.json` | Comparing Nebulus with Devourer/OpenIPC-WASM initialization. It contains every adapter attempt, raw `SYS_CFG`/`SYS_CFG2`, the selected chip and RX descriptor, decoded EFUSE/RFE state, timed stages, ordered register reads/writes with values, failures, and post-init registers. |
+| `session-logs.txt` | Following the latest unfiltered session history leading up to a failure. |
+| `logs.txt` | Reproducing what was visible under the current Logs-tab filters. |
+| `manifest.json` | Reviewing the bundle schema and privacy disclosure. |
+| `README.txt` | Getting a short triage guide without opening the docs site. |
+
+`report.json` records one-shot milestones from the first bulk-IN completion
+through descriptor parsing, valid 802.11 input, channel matching, WFB session
+and payload recovery, RTP, encoded frame, decoder output, and presentation. Per
+adapter parser evidence includes zero-length transfers, malformed lengths,
+trailing/non-zero aggregate tails, alignment behavior, CRC/ICV/report counts,
+the first descriptor bytes, and the first rejected aggregate sample.
+
+WFB and MAVLink key bytes, VTX credentials, media payloads, and exact GPS
+coordinates are excluded. SHA-256 key fingerprints are included so two systems
+can confirm that they loaded the same file without revealing it.
+Home-directory prefixes are shortened. USB identity,
+EFUSE fingerprints and decoded board calibration, register values, and bounded
+descriptor samples are included because they are needed for hardware trace
+comparison. Desktop uses a save dialog, Android uses the document picker, and
+the browser downloads the ZIP.
 
 ## GUI Settings
 

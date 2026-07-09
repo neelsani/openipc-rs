@@ -72,6 +72,7 @@ fn is_lifecycle_barrier(event: &RuntimeEvent) -> bool {
         RuntimeEvent::Connecting
             | RuntimeEvent::Connected { .. }
             | RuntimeEvent::Started
+            | RuntimeEvent::Milestone(_)
             | RuntimeEvent::ScanStarted { .. }
             | RuntimeEvent::ScanCompleted
             | RuntimeEvent::ScanFailed(_)

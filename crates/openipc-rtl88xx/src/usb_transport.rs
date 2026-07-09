@@ -58,7 +58,6 @@ pub(crate) fn read_register_with_recovery<T: UsbControlTransport>(
     register: u16,
     len: u16,
 ) -> Result<Vec<u8>, DriverError> {
-    log::trace!(target: "openipc_rtl88xx::register", "USB register read register=0x{register:04x} len={len}");
     for attempt in 0..CONTROL_RETRY_ATTEMPTS {
         let result = transport.control_in_blocking(
             ControlIn {
@@ -98,7 +97,6 @@ pub(crate) fn write_register_with_recovery<T: UsbControlTransport>(
     register: u16,
     bytes: &[u8],
 ) -> Result<(), DriverError> {
-    log::trace!(target: "openipc_rtl88xx::register", "USB register write register=0x{register:04x} bytes={}", bytes.len());
     for attempt in 0..CONTROL_RETRY_ATTEMPTS {
         let result = transport.control_out_blocking(
             ControlOut {

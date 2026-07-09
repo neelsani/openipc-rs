@@ -174,6 +174,24 @@ pub enum AggregateError {
     },
 }
 
+/// Structural evidence collected while splitting one Realtek USB RX aggregate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RxAggregateDiagnostics {
+    /// Complete descriptors parsed from the transfer.
+    pub descriptors: usize,
+    /// Bytes left after the final complete descriptor/aligned packet.
+    pub trailing_bytes: usize,
+    /// Non-zero bytes in the trailing region, which can indicate truncation.
+    pub trailing_nonzero_bytes: usize,
+    /// Alignment bytes skipped between complete packets.
+    pub alignment_padding_bytes: usize,
+    /// Expected final alignment bytes absent from the USB completion.
+    ///
+    /// A non-zero value is valid when hardware omits padding after the final
+    /// packet, but retaining it makes native/WebUSB trace comparison explicit.
+    pub final_alignment_shortfall_bytes: usize,
+}
+
 impl std::fmt::Display for AggregateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -263,17 +281,30 @@ pub fn parse_rx_aggregate_with_kind(
     buf: &[u8],
     kind: RxDescriptorKind,
 ) -> Result<Vec<RealtekRxPacket<'_>>, AggregateError> {
+    parse_rx_aggregate_with_kind_diagnostics(buf, kind).map(|(packets, _)| packets)
+}
+
+/// Split a Realtek USB bulk-IN transfer and retain aggregate-layout evidence.
+pub fn parse_rx_aggregate_with_kind_diagnostics(
+    buf: &[u8],
+    kind: RxDescriptorKind,
+) -> Result<(Vec<RealtekRxPacket<'_>>, RxAggregateDiagnostics), AggregateError> {
     let mut packets = Vec::new();
+    let mut diagnostics = RxAggregateDiagnostics::default();
     let mut offset = 0usize;
 
     while offset < buf.len() {
         let remaining = buf.len() - offset;
         if remaining < RX_DESC_SIZE {
+            diagnostics.trailing_bytes = remaining;
+            diagnostics.trailing_nonzero_bytes =
+                buf[offset..].iter().filter(|byte| **byte != 0).count();
             break;
         }
 
         let desc = &buf[offset..offset + RX_DESC_SIZE];
         let mut attrib = parse_rx_descriptor_with_kind(desc, kind)?;
+        diagnostics.descriptors = diagnostics.descriptors.saturating_add(1);
         let data_start =
             offset + RX_DESC_SIZE + attrib.drvinfo_sz as usize + attrib.shift_sz as usize;
         let pkt_offset = RX_DESC_SIZE
@@ -302,12 +333,16 @@ pub fn parse_rx_aggregate_with_kind(
 
         let aligned = round_up_8(pkt_offset);
         if aligned >= remaining {
+            diagnostics.final_alignment_shortfall_bytes = aligned.saturating_sub(remaining);
             break;
         }
+        diagnostics.alignment_padding_bytes = diagnostics
+            .alignment_padding_bytes
+            .saturating_add(aligned.saturating_sub(pkt_offset));
         offset += aligned;
     }
 
-    Ok(packets)
+    Ok((packets, diagnostics))
 }
 
 /// Parse a C2H report header from a Realtek RX packet payload.
@@ -646,6 +681,24 @@ mod tests {
         assert_eq!(packets.len(), 2);
         assert_eq!(packets[0].data, &[1, 2, 3, 4, 5]);
         assert_eq!(packets[1].data, &[6, 7, 8]);
+    }
+
+    #[test]
+    fn reports_alignment_and_trailing_descriptor_evidence() {
+        let mut aggregate = Vec::new();
+        aggregate.extend_from_slice(&descriptor(5, 0, 0, 1));
+        aggregate.extend_from_slice(&[1, 2, 3, 4, 5]);
+        aggregate.extend_from_slice(&[0, 0, 0]);
+        aggregate.extend_from_slice(&[0xaa, 0, 0xbb, 0]);
+
+        let (packets, diagnostics) =
+            parse_rx_aggregate_with_kind_diagnostics(&aggregate, RxDescriptorKind::Jaguar1)
+                .unwrap();
+        assert_eq!(packets.len(), 1);
+        assert_eq!(diagnostics.descriptors, 1);
+        assert_eq!(diagnostics.alignment_padding_bytes, 3);
+        assert_eq!(diagnostics.trailing_bytes, 4);
+        assert_eq!(diagnostics.trailing_nonzero_bytes, 2);
     }
 
     #[test]

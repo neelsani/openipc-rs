@@ -293,9 +293,13 @@ impl RealtekDevice {
         // this function, so the image must always be downloaded again.
         let status = InitStatus::Initialized;
 
-        self.pre_init_system_cfg_8822c_async().await?;
-        self.power_on_8822c_async().await?;
-        let efuse_info = self.read_efuse_info_async(chip).await?;
+        self.diagnostic_stage("jaguar3_pre_init", self.pre_init_system_cfg_8822c_async())
+            .await?;
+        self.diagnostic_stage("jaguar3_power_on", self.power_on_8822c_async())
+            .await?;
+        let efuse_info = self
+            .diagnostic_stage("jaguar3_efuse", self.read_efuse_info_async(chip))
+            .await?;
         let _ = self.efuse_info.set(efuse_info);
         let rfe_type =
             if chip.family == ChipFamily::Rtl8822e && matches!(efuse_info.rfe_type, 0 | 0xff) {
@@ -303,51 +307,98 @@ impl RealtekDevice {
             } else {
                 efuse_info.rfe_type
             };
-        self.init_system_cfg_8822c_async(radio.channel_width, chip.cut_version)
-            .await?;
+        self.diagnostic_stage(
+            "jaguar3_system_config",
+            self.init_system_cfg_8822c_async(radio.channel_width, chip.cut_version),
+        )
+        .await?;
         let firmware = match chip.family {
             ChipFamily::Rtl8822e => rtl_data::RTL8822E_FW_NIC,
             ChipFamily::Rtl8822c => rtl_data::RTL8822C_FW_NIC,
             _ => return Err(DriverError::UnsupportedFirmwarePath(chip.family)),
         };
-        self.download_firmware_8822c_async(firmware).await?;
-        self.init_mac_cfg_8822c_async(radio.channel_width).await?;
-        self.init_usb_cfg_8822c_async().await?;
-        self.enable_bb_rf_8822c_async(true).await?;
-        self.load_phy_tables_jaguar3_async(chip, rfe_type).await?;
+        self.diagnostic_stage(
+            "jaguar3_firmware_download",
+            self.download_firmware_8822c_async(firmware),
+        )
+        .await?;
+        self.diagnostic_stage(
+            "jaguar3_mac",
+            self.init_mac_cfg_8822c_async(radio.channel_width),
+        )
+        .await?;
+        self.diagnostic_stage("jaguar3_usb", self.init_usb_cfg_8822c_async())
+            .await?;
+        self.diagnostic_stage("jaguar3_bb_rf", self.enable_bb_rf_8822c_async(true))
+            .await?;
+        self.diagnostic_stage(
+            "jaguar3_phy_rf_tables",
+            self.load_phy_tables_jaguar3_async(chip, rfe_type),
+        )
+        .await?;
         if chip.family == ChipFamily::Rtl8822e {
-            self.config_pa_bias_8822e_async().await?;
+            self.diagnostic_stage("jaguar3_pa_bias", self.config_pa_bias_8822e_async())
+                .await?;
         }
-        self.config_phydm_parameter_init_8822c_async().await?;
-        self.init_rfk_jaguar3_async(chip).await?;
-        self.run_dack_jaguar3_with_retry_async(chip).await?;
-        self.bf_init_8822c_async().await?;
-        self.monitor_rx_cfg_8822c_async().await?;
-        self.enable_tx_path_8822c_async().await?;
-        self.set_channel_bwmode_8822c_async(
-            chip,
-            radio.channel,
-            radio.channel_offset,
-            radio.channel_width,
+        self.diagnostic_stage(
+            "jaguar3_phydm",
+            self.config_phydm_parameter_init_8822c_async(),
+        )
+        .await?;
+        self.diagnostic_stage("jaguar3_rfk", self.init_rfk_jaguar3_async(chip))
+            .await?;
+        self.diagnostic_stage("jaguar3_dack", self.run_dack_jaguar3_with_retry_async(chip))
+            .await?;
+        self.diagnostic_stage("jaguar3_beamforming", self.bf_init_8822c_async())
+            .await?;
+        self.diagnostic_stage("jaguar3_monitor_rx", self.monitor_rx_cfg_8822c_async())
+            .await?;
+        self.diagnostic_stage("jaguar3_tx_path", self.enable_tx_path_8822c_async())
+            .await?;
+        self.diagnostic_stage(
+            "jaguar3_channel",
+            self.set_channel_bwmode_8822c_async(
+                chip,
+                radio.channel,
+                radio.channel_offset,
+                radio.channel_width,
+            ),
         )
         .await?;
         if options.should_run_iqk(chip.family) {
-            self.run_iqk_jaguar3_with_retry_async(chip, radio, options.skip_txgapk)
-                .await?;
+            self.diagnostic_stage(
+                "jaguar3_iqk",
+                self.run_iqk_jaguar3_with_retry_async(chip, radio, options.skip_txgapk),
+            )
+            .await?;
         }
         if options.jaguar3_enable_rx {
-            self.enable_rx_path_jaguar3_async().await?;
+            self.diagnostic_stage("jaguar3_rx_enable", self.enable_rx_path_jaguar3_async())
+                .await?;
         }
         if chip.family == ChipFamily::Rtl8822e {
-            self.dpk_force_bypass_8822e_async().await?;
-            self.config_rfe_8822e_async(rfe_type, radio.channel).await?;
-            self.config_channel_8822e_async(radio.channel).await?;
+            self.diagnostic_stage("jaguar3_dpk", self.dpk_force_bypass_8822e_async())
+                .await?;
+            self.diagnostic_stage(
+                "jaguar3_rfe",
+                self.config_rfe_8822e_async(rfe_type, radio.channel),
+            )
+            .await?;
+            self.diagnostic_stage(
+                "jaguar3_channel_finalize",
+                self.config_channel_8822e_async(radio.channel),
+            )
+            .await?;
         }
         if let Some(gain) = options.cw_tone_gain {
             // Devourer arms Jaguar3 here: later TX-power/coex writes can leave
             // RTL8822E 5 GHz control-IN reads NAKing, while a CW hold needs no
             // firmware power/coexistence runtime.
-            self.start_cw_tone_async(radio.channel, gain).await?;
+            self.diagnostic_stage(
+                "jaguar3_cw_tone",
+                self.start_cw_tone_async(radio.channel, gain),
+            )
+            .await?;
             return Ok(InitReport {
                 chip,
                 status,
@@ -355,18 +406,30 @@ impl RealtekDevice {
             });
         }
         if !options.skip_tx_power {
-            self.set_default_tx_power_jaguar3_async(chip, radio.channel)
-                .await?;
+            self.diagnostic_stage(
+                "jaguar3_tx_power",
+                self.set_default_tx_power_jaguar3_async(chip, radio.channel),
+            )
+            .await?;
         }
-        self.coex_wlan_only_init_8822c_async().await?;
+        self.diagnostic_stage(
+            "jaguar3_coexistence",
+            self.coex_wlan_only_init_8822c_async(),
+        )
+        .await?;
         if chip.family == ChipFamily::Rtl8822e {
-            self.configure_rfe_pinmux_8822e_async().await?;
+            self.diagnostic_stage(
+                "jaguar3_rfe_pinmux",
+                self.configure_rfe_pinmux_8822e_async(),
+            )
+            .await?;
         }
         let _ = self.fw_set_pwr_mode_active_8822c_async().await;
         let _ = self.fw_coex_query_bt_info_8822c_async().await;
         let _ = self.fw_coex_tdma_off_8822c_async().await;
         if !options.jaguar3_enable_rx {
-            self.prepare_transmit_only_async().await?;
+            self.diagnostic_stage("jaguar3_tx_only", self.prepare_transmit_only_async())
+                .await?;
         }
 
         Ok(InitReport {

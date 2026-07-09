@@ -300,7 +300,8 @@ codec. Native audio requests a 256-frame output buffer and keeps no more than
 - Opus playback with volume, queue depth, and decoder/error metrics
 - Native OpenIPC VPN/TUN bridging on macOS, Linux, Windows, and Android
 - Catppuccin Macchiato theme and persisted receiver settings
-- Sanitized ZIP support bundle with build, platform, pipeline, scan, and logs
+- Sanitized ZIP support bundle with persistent driver initialization traces,
+  first-receive milestones, parser histograms, platform state, and session logs
 
 Direct UDP input, UDP forwarding, and VPN/TUN are native-only. Their controls
 are unavailable in browser builds. Android requests `VpnService` consent and passes the resulting

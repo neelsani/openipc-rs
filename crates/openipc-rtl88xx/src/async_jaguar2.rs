@@ -368,11 +368,27 @@ impl RealtekDevice {
         let mut booted_chip = None;
         let mut last_firmware_error = None;
         for attempt in 0..BRINGUP_ATTEMPTS {
-            self.pre_init_system_cfg_8822b_async().await?;
-            self.power_on_jaguar2_async(initial_chip.family).await?;
-            let chip = self.probe_chip_async().await?;
-            self.init_system_cfg_8822b_async(chip.family, chip.cut_version)
+            self.diagnostic_stage(
+                format!("jaguar2_pre_init_attempt_{}", attempt + 1),
+                self.pre_init_system_cfg_8822b_async(),
+            )
+            .await?;
+            self.diagnostic_stage(
+                format!("jaguar2_power_on_attempt_{}", attempt + 1),
+                self.power_on_jaguar2_async(initial_chip.family),
+            )
+            .await?;
+            let chip = self
+                .diagnostic_stage(
+                    format!("jaguar2_reprobe_attempt_{}", attempt + 1),
+                    self.probe_chip_async(),
+                )
                 .await?;
+            self.diagnostic_stage(
+                format!("jaguar2_system_config_attempt_{}", attempt + 1),
+                self.init_system_cfg_8822b_async(chip.family, chip.cut_version),
+            )
+            .await?;
             let firmware = match chip.family {
                 ChipFamily::Rtl8821c => rtl_data::RTL8821C_FW_NIC,
                 _ => rtl_data::RTL8822B_FW_NIC,
@@ -381,7 +397,14 @@ impl RealtekDevice {
             let mut firmware_result = None;
             for cpu_attempt in 0..CPU_RESET_ATTEMPTS {
                 match self
-                    .download_firmware_8822b_async(chip.family, firmware)
+                    .diagnostic_stage(
+                        format!(
+                            "jaguar2_firmware_attempt_{}_{}",
+                            attempt + 1,
+                            cpu_attempt + 1
+                        ),
+                        self.download_firmware_8822b_async(chip.family, firmware),
+                    )
                     .await
                 {
                     Ok(()) => {
@@ -417,59 +440,108 @@ impl RealtekDevice {
                 }));
             }
         };
-        self.init_mac_cfg_8822b_async(chip.family).await?;
-        self.init_usb_cfg_8822b_async().await?;
-        self.enable_bb_rf_8822b_async(true).await?;
+        self.diagnostic_stage("jaguar2_mac", self.init_mac_cfg_8822b_async(chip.family))
+            .await?;
+        self.diagnostic_stage("jaguar2_usb", self.init_usb_cfg_8822b_async())
+            .await?;
+        self.diagnostic_stage("jaguar2_bb_rf", self.enable_bb_rf_8822b_async(true))
+            .await?;
 
-        let mut efuse = self.read_efuse_info_async(chip).await?;
+        let mut efuse = self
+            .diagnostic_stage("jaguar2_efuse", self.read_efuse_info_async(chip))
+            .await?;
         if let Some(rfe) = options.rfe_type_override {
             efuse.rfe_type = rfe;
+            if let Some(map) = self.efuse_logical_map.get() {
+                self.record_efuse_diagnostics(map, efuse);
+            }
         }
         let _ = self.efuse_info.set(efuse);
-        self.phydm_pre_post_8822b_async(false).await?;
-        self.load_phy_tables_async(chip, efuse).await?;
-        self.load_rf_tables_async(chip, efuse).await?;
-        self.phydm_pre_post_8822b_async(true).await?;
-        self.config_trx_mode_8822b_async(chip).await?;
+        self.diagnostic_stage("jaguar2_phydm_pre", self.phydm_pre_post_8822b_async(false))
+            .await?;
+        self.diagnostic_stage(
+            "jaguar2_phy_tables",
+            self.load_phy_tables_async(chip, efuse),
+        )
+        .await?;
+        self.diagnostic_stage("jaguar2_rf_tables", self.load_rf_tables_async(chip, efuse))
+            .await?;
+        self.diagnostic_stage("jaguar2_phydm_post", self.phydm_pre_post_8822b_async(true))
+            .await?;
+        self.diagnostic_stage("jaguar2_trx", self.config_trx_mode_8822b_async(chip))
+            .await?;
         if chip.family == ChipFamily::Rtl8821c {
-            self.set_channel_bw_8821c_async(chip, radio, efuse.rfe_type)
-                .await?;
+            self.diagnostic_stage(
+                "jaguar2_channel",
+                self.set_channel_bw_8821c_async(chip, radio, efuse.rfe_type),
+            )
+            .await?;
         } else {
-            self.set_channel_bw_8822b_async(chip, radio, efuse.rfe_type)
-                .await?;
+            self.diagnostic_stage(
+                "jaguar2_channel",
+                self.set_channel_bw_8822b_async(chip, radio, efuse.rfe_type),
+            )
+            .await?;
         }
-        self.lck_8822b_async(chip).await?;
+        self.diagnostic_stage("jaguar2_lck", self.lck_8822b_async(chip))
+            .await?;
         if options.should_run_iqk(chip.family) {
             if chip.family == ChipFamily::Rtl8821c {
-                self.run_iqk_8821c_async(chip, radio.channel <= 14).await?;
+                self.diagnostic_stage(
+                    "jaguar2_iqk",
+                    self.run_iqk_8821c_async(chip, radio.channel <= 14),
+                )
+                .await?;
             } else {
-                self.run_iqk_8822b_async(chip, radio.channel <= 14).await?;
+                self.diagnostic_stage(
+                    "jaguar2_iqk",
+                    self.run_iqk_8822b_async(chip, radio.channel <= 14),
+                )
+                .await?;
             }
         }
         if !options.skip_trx_reassert {
-            self.config_trx_mode_8822b_async(chip).await?;
+            self.diagnostic_stage(
+                "jaguar2_trx_reassert",
+                self.config_trx_mode_8822b_async(chip),
+            )
+            .await?;
         }
         if !options.skip_rfe_init {
             if chip.family == ChipFamily::Rtl8821c {
-                self.bf_init_8821c_async(efuse.rfe_type).await?;
+                self.diagnostic_stage("jaguar2_rfe_bf", self.bf_init_8821c_async(efuse.rfe_type))
+                    .await?;
             } else {
-                self.rfe_init_8822b_async().await?;
-                self.bf_init_8822b_async().await?;
+                self.diagnostic_stage("jaguar2_rfe", self.rfe_init_8822b_async())
+                    .await?;
+                self.diagnostic_stage("jaguar2_bf", self.bf_init_8822b_async())
+                    .await?;
             }
         }
         if !options.skip_tx_power {
             if chip.family == ChipFamily::Rtl8821c {
-                self.apply_tx_power_8821c_async(radio).await?;
-            } else {
-                self.apply_tx_power_8822b_async(chip, radio, efuse.rfe_type)
+                self.diagnostic_stage("jaguar2_tx_power", self.apply_tx_power_8821c_async(radio))
                     .await?;
+            } else {
+                self.diagnostic_stage(
+                    "jaguar2_tx_power",
+                    self.apply_tx_power_8822b_async(chip, radio, efuse.rfe_type),
+                )
+                .await?;
             }
         }
         if !options.skip_coex {
-            self.coex_wlan_only_8822b_async(chip.family, efuse.rfe_type, radio.channel > 14)
-                .await?;
+            self.diagnostic_stage(
+                "jaguar2_coexistence",
+                self.coex_wlan_only_8822b_async(chip.family, efuse.rfe_type, radio.channel > 14),
+            )
+            .await?;
         }
-        self.enable_rx_8822b_async(chip.family, options).await?;
+        self.diagnostic_stage(
+            "jaguar2_rx_enable",
+            self.enable_rx_8822b_async(chip.family, options),
+        )
+        .await?;
         if let Some(gain) = options.cw_tone_gain {
             if options.beamforming_sounder || options.beamforming_sounder_mac.is_some() {
                 self.arm_beamforming_sounder_async(options.beamforming_sounder_mac)

@@ -14,6 +14,7 @@ use std::sync::{Mutex, OnceLock};
 use crate::async_continuous_tx::ContinuousTxState;
 use crate::async_cw::CwToneState;
 use crate::async_efuse::EfuseInfo;
+use crate::diagnostics::DriverDiagnosticsState;
 use crate::retune_state::FastRetuneState;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -56,6 +57,7 @@ pub struct RealtekDevice {
     pub(crate) detected_family: OnceLock<ChipFamily>,
     pub(crate) efuse_logical_map: OnceLock<[u8; 512]>,
     pub(crate) efuse_info: OnceLock<EfuseInfo>,
+    pub(crate) diagnostics: Mutex<DriverDiagnosticsState>,
     pub(crate) cck_filter_8821c: OnceLock<[u32; 3]>,
     pub(crate) h2c_box: AtomicU8,
     pub(crate) cw_tone: Mutex<CwToneState>,
@@ -340,6 +342,7 @@ impl RealtekDevice {
             detected_family: OnceLock::new(),
             efuse_logical_map: OnceLock::new(),
             efuse_info: OnceLock::new(),
+            diagnostics: Mutex::new(DriverDiagnosticsState::default()),
             cck_filter_8821c: OnceLock::new(),
             h2c_box: AtomicU8::new(0),
             cw_tone: Mutex::new(CwToneState::default()),
@@ -963,7 +966,16 @@ impl RealtekDevice {
     #[cfg(not(target_arch = "wasm32"))]
     /// Perform a Realtek vendor control read.
     pub fn read_register(&self, register: u16, len: u16) -> Result<Vec<u8>, DriverError> {
-        read_register_with_recovery(&self.interface, register, len)
+        match read_register_with_recovery(&self.interface, register, len) {
+            Ok(bytes) => {
+                self.record_register_read(register, &bytes);
+                Ok(bytes)
+            }
+            Err(error) => {
+                self.record_register_failure(b'R', register, error.to_string());
+                Err(error)
+            }
+        }
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -977,7 +989,16 @@ impl RealtekDevice {
     #[cfg(not(target_arch = "wasm32"))]
     /// Perform a Realtek vendor control write.
     pub fn write_register(&self, register: u16, bytes: &[u8]) -> Result<(), DriverError> {
-        write_register_with_recovery(&self.interface, register, bytes)
+        match write_register_with_recovery(&self.interface, register, bytes) {
+            Ok(()) => {
+                self.record_register_write(register, bytes);
+                Ok(())
+            }
+            Err(error) => {
+                self.record_register_failure(b'W', register, error.to_string());
+                Err(error)
+            }
+        }
     }
 
     #[cfg(target_arch = "wasm32")]

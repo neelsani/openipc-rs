@@ -321,6 +321,30 @@ queue-depth registers, BB register/dbgport reads, PHYDM DIG watchdog ticks,
 IQK, RTL8812 power tracking ticks, Jaguar3 coex keepalive, C2H payloads, and
 RTL8814 TX-status parsing.
 
+Every monitor initialization also leaves a structured snapshot on the device:
+
+```rust
+let report = device.initialize_monitor_async(radio, false).await?;
+let diagnostics = device.diagnostics_snapshot();
+
+println!(
+    "chip={} stages={} register_ops={} trace_dropped={}",
+    report.chip.family.name(),
+    diagnostics.stages.len(),
+    diagnostics.register_trace.len(),
+    diagnostics.register_trace_dropped,
+);
+```
+
+The snapshot records the raw probe registers and descriptor decision, decoded
+EFUSE/RFE and calibration summary, each initialization stage with duration and
+result, register-I/O counts and fingerprints, a bounded ordered register trace
+with actual byte values, and final RX/filter/DMA register values. It is retained
+independently from application logs so a noisy receive session cannot erase the
+bring-up evidence. Applications should export it only in a deliberate support
+workflow: register and EFUSE evidence can identify a particular adapter even
+though key material is not present.
+
 Frame-free sensing and continuous TX are explicit for the same reason:
 
 ```rust

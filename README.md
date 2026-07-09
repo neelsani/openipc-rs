@@ -36,7 +36,7 @@ scripts                   cleanup helpers
 | ----------------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `openipc-core`    | [crates.io](https://crates.io/crates/openipc-core)    | Shared protocol code: WFB, FEC, RTP, crypto, video frame extraction, generic raw payload taps, adaptive-link packet logic. |
 | `openipc-rtl88xx` | [crates.io](https://crates.io/crates/openipc-rtl88xx) | Realtek rtl88xx USB WiFi driver/HAL for monitor receive and adaptive-link transmit.                                        |
-| `openipc-uplink`  | [crates.io](https://crates.io/crates/openipc-uplink)  | Userspace IPv4/TCP over WFB tunnel ports, cross-target SSH, and typed controls for existing OpenIPC VTX firmware.          |
+| `openipc-uplink`  | [crates.io](https://crates.io/crates/openipc-uplink)  | Userspace IPv4/UDP/TCP, completion-aware priority TX scheduling, TUN bridging, cross-target SSH, and typed VTX control.     |
 | `openipc-video`   | [crates.io](https://crates.io/crates/openipc-video)   | Hardware H.264/H.265 decoding for macOS, Linux, Windows, Android, and WebAssembly/WebCodecs.                               |
 | `openipc-web`     | [crates.io](https://crates.io/crates/openipc-web)     | Rust/WASM bindings for browser WebUSB applications.                                                                        |
 | `wfb-rs`          | [crates.io](https://crates.io/crates/wfb-rs)          | WFB-style command-line tools backed by the Rust userland Realtek driver.                                                   |

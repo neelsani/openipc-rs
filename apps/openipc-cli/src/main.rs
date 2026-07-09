@@ -12,13 +12,14 @@ use openipc_core::realtek::{
 };
 use openipc_core::realtek::{RxPacketAttrib, DEFAULT_RX_TRANSFER_SIZE};
 use openipc_core::{
-    AdaptiveLinkSender, ChannelId, DamagedFramePolicy, FecCounters, FrameLayout, PayloadRouteId,
+    AdaptiveLink, ChannelId, DamagedFramePolicy, FecCounters, FrameLayout, PayloadRouteId,
     RadioPort, ReceiverBatchOptions, ReceiverRuntime, WfbKeypair, WfbTxKeypair,
 };
 use openipc_rtl88xx::{
-    list_devices, list_supported_devices, ChannelWidth, ChipFamily, DriverOptions,
+    list_devices, list_supported_devices, ChannelWidth, ChipFamily, DriverError, DriverOptions,
     Firmware8814Mode, MonitorOptions, RadioConfig, RealtekDevice, RealtekTxOptions,
 };
+use openipc_uplink::{TxFailureKind, TxOutcome, UplinkEngine};
 
 const VIDEO_ROUTE_ID: PayloadRouteId = PayloadRouteId::new(1);
 const DEFAULT_KEY_SLOT: u64 = 0;
@@ -428,14 +429,16 @@ impl StreamStats {
 }
 
 struct AdaptiveRuntime {
-    sender: AdaptiveLinkSender,
+    link: AdaptiveLink,
+    engine: UplinkEngine,
+    last_feedback_ms: Option<u64>,
     last_counters: FecCounters,
     tx_options: RealtekTxOptions,
 }
 
 impl AdaptiveRuntime {
     fn record_rx(&mut self, now_ms: u64, attrib: &RxPacketAttrib) {
-        self.sender.record_rx_paths(now_ms, attrib.rssi, attrib.snr);
+        self.link.record_rx_paths(now_ms, attrib.rssi, attrib.snr);
     }
 
     fn record_pipeline(&mut self, now_ms: u64, counters: FecCounters) {
@@ -449,7 +452,7 @@ impl AdaptiveRuntime {
             .lost_packets
             .saturating_sub(self.last_counters.lost_packets);
         self.last_counters = counters;
-        self.sender.record_fec(
+        self.link.record_fec(
             now_ms,
             total.min(u32::MAX as u64) as u32,
             recovered.min(u32::MAX as u64) as u32,
@@ -459,14 +462,43 @@ impl AdaptiveRuntime {
 
     fn tick(
         &mut self,
-        now_ms: u64,
+        monotonic_ms: u64,
+        payload_now_ms: u64,
         device: &RealtekDevice,
         ep_out: &mut nusb::Endpoint<Bulk, Out>,
     ) -> Result<usize, Box<dyn std::error::Error>> {
-        let frames = self.sender.tick(now_ms)?;
-        let count = frames.len();
-        for frame in frames {
-            device.send_packet_on_tracked(ep_out, &frame, self.tx_options)?;
+        if self
+            .last_feedback_ms
+            .is_none_or(|last| monotonic_ms.saturating_sub(last) >= 100)
+        {
+            let feedback = self.link.feedback_udp_payload(payload_now_ms);
+            self.engine.send_udp(
+                openipc_core::ADAPTIVE_LINK_GS_PORT,
+                openipc_core::ADAPTIVE_LINK_VTX_PORT,
+                &feedback,
+            )?;
+            self.last_feedback_ms = Some(monotonic_ms);
+        }
+        let Some(batch) = self.engine.ready_batch(monotonic_ms, usize::MAX)? else {
+            return Ok(0);
+        };
+        self.engine.mark_submitted(&batch)?;
+        let count = batch.frames().len();
+        let mut first_error = None;
+        for frame in batch.frames() {
+            let result = device.send_packet_on_tracked(ep_out, frame.bytes(), self.tx_options);
+            let outcome = match &result {
+                Ok(_) => TxOutcome::Completed,
+                Err(error) => cli_tx_outcome(error),
+            };
+            self.engine
+                .report_completion(frame.ticket(), outcome, monotonic_ms)?;
+            if let Err(error) = result {
+                first_error.get_or_insert(error);
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error.into());
         }
         Ok(count)
     }
@@ -482,13 +514,15 @@ impl RecvConfig {
         let keypair = WfbTxKeypair::from_bytes(&fs::read(key_path)?)?;
         let link_id = self.channel_id.raw() >> 8;
         Ok(AdaptiveRuntime {
-            sender: AdaptiveLinkSender::new(
+            link: AdaptiveLink::new(),
+            engine: UplinkEngine::new(
                 link_id,
                 keypair,
                 self.alink_epoch,
                 self.alink_fec_k,
                 self.alink_fec_n,
             )?,
+            last_feedback_ms: None,
             last_counters: counters,
             tx_options: RealtekTxOptions {
                 current_channel: self.radio.channel,
@@ -561,6 +595,7 @@ fn run_recv(config: RecvConfig) -> Result<(), Box<dyn std::error::Error>> {
     }
     let jaguar2_dig = chip.family.is_jaguar2() && device.jaguar2_dig_enabled();
     let mut last_dig = Instant::now();
+    let uplink_started = Instant::now();
 
     loop {
         if let Some(max) = config.max_transfers {
@@ -583,7 +618,14 @@ fn run_recv(config: RecvConfig) -> Result<(), Box<dyn std::error::Error>> {
         }
         let Some(completion) = completion else {
             let now_ms = unix_time_ms();
-            tick_adaptive(&mut adaptive, &device, ep_out.as_mut(), now_ms, &mut stats);
+            tick_adaptive(
+                &mut adaptive,
+                &device,
+                ep_out.as_mut(),
+                elapsed_ms(&uplink_started),
+                now_ms,
+                &mut stats,
+            );
             if !jaguar2_dig {
                 eprintln!("{}", stats.summary());
             }
@@ -615,7 +657,14 @@ fn run_recv(config: RecvConfig) -> Result<(), Box<dyn std::error::Error>> {
             if let Some(runtime) = adaptive.as_mut() {
                 runtime.record_pipeline(now_ms, receiver.video_fec_counters());
             }
-            tick_adaptive(&mut adaptive, &device, ep_out.as_mut(), now_ms, &mut stats);
+            tick_adaptive(
+                &mut adaptive,
+                &device,
+                ep_out.as_mut(),
+                elapsed_ms(&uplink_started),
+                now_ms,
+                &mut stats,
+            );
         }
         ep_in.submit(completion.buffer);
     }
@@ -707,13 +756,14 @@ fn tick_adaptive(
     adaptive: &mut Option<AdaptiveRuntime>,
     device: &RealtekDevice,
     ep_out: Option<&mut nusb::Endpoint<Bulk, Out>>,
-    now_ms: u64,
+    monotonic_ms: u64,
+    payload_now_ms: u64,
     stats: &mut StreamStats,
 ) {
     let (Some(runtime), Some(ep_out)) = (adaptive.as_mut(), ep_out) else {
         return;
     };
-    match runtime.tick(now_ms, device, ep_out) {
+    match runtime.tick(monotonic_ms, payload_now_ms, device, ep_out) {
         Ok(frames) => stats.adaptive_tx_frames += frames as u64,
         Err(err) => {
             stats.adaptive_tx_errors += 1;
@@ -816,4 +866,27 @@ fn unix_time_ms() -> u64 {
         .unwrap_or_default()
         .as_millis()
         .min(u128::from(u64::MAX)) as u64
+}
+
+fn elapsed_ms(started: &Instant) -> u64 {
+    started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn cli_tx_outcome(error: &DriverError) -> TxOutcome {
+    match error {
+        DriverError::BulkOutShort { .. } => TxOutcome::Retryable(TxFailureKind::ShortWrite),
+        DriverError::Nusb(message) => {
+            let message = message.to_ascii_lowercase();
+            if message.contains("disconnect") || message.contains("no device") {
+                TxOutcome::Fatal(TxFailureKind::Disconnected)
+            } else if message.contains("stall") {
+                TxOutcome::Retryable(TxFailureKind::Stall)
+            } else if message.contains("timeout") || message.contains("cancel") {
+                TxOutcome::Retryable(TxFailureKind::Timeout)
+            } else {
+                TxOutcome::Retryable(TxFailureKind::Other)
+            }
+        }
+        _ => TxOutcome::Fatal(TxFailureKind::Other),
+    }
 }

@@ -791,6 +791,20 @@ impl RealtekDevice {
             let completion = ep.transfer_blocking(Buffer::from(usb_frame), tx_timeout());
             match completion.status {
                 Ok(()) => {
+                    if completion.actual_len != usb_frame.len() {
+                        if attempt + 1 < BULK_RETRY_ATTEMPTS {
+                            let _ = ep.clear_halt().wait();
+                            std::thread::sleep(std::time::Duration::from_millis(retry_delay_ms(
+                                attempt,
+                            )
+                                as u64));
+                            continue;
+                        }
+                        return Err(DriverError::BulkOutShort {
+                            expected: usb_frame.len(),
+                            actual: completion.actual_len,
+                        });
+                    }
                     if terminate
                         && !usb_frame.is_empty()
                         && usb_frame.len().is_multiple_of(ep.max_packet_size())
@@ -835,41 +849,72 @@ impl RealtekDevice {
             })?;
         }
         self.record_tx_submission();
-        let completion = ep.transfer_blocking(Buffer::from(usb_frame), tx_timeout());
-        let result = match completion.status {
-            Ok(()) => {
-                if terminate
-                    && !usb_frame.is_empty()
-                    && usb_frame.len().is_multiple_of(ep.max_packet_size())
-                {
-                    let zlp = ep.transfer_blocking(Buffer::new(0), tx_timeout());
-                    zlp.status
-                        .map(|()| completion.actual_len)
-                        .map_err(|err| transfer_error("bulk OUT terminating ZLP failed", err))
-                } else {
-                    Ok(completion.actual_len)
+        for attempt in 0..BULK_RETRY_ATTEMPTS {
+            let completion = ep.transfer_blocking(Buffer::from(usb_frame), tx_timeout());
+            match completion.status {
+                Ok(()) if completion.actual_len != usb_frame.len() => {
+                    if attempt + 1 < BULK_RETRY_ATTEMPTS {
+                        let _ = ep.clear_halt().wait();
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            retry_delay_ms(attempt) as u64,
+                        ));
+                        continue;
+                    }
+                    if terminate {
+                        self.tx_wedged.store(true, Ordering::Release);
+                    }
+                    self.record_tx_failure(crate::TxErrorKind::ShortWrite);
+                    return Err(DriverError::BulkOutShort {
+                        expected: usb_frame.len(),
+                        actual: completion.actual_len,
+                    });
+                }
+                Ok(()) => {
+                    if terminate
+                        && !usb_frame.is_empty()
+                        && usb_frame.len().is_multiple_of(ep.max_packet_size())
+                    {
+                        let zlp = ep.transfer_blocking(Buffer::new(0), tx_timeout());
+                        if let Err(err) = zlp.status {
+                            if should_retry_transfer_error(err, attempt, BULK_RETRY_ATTEMPTS) {
+                                let _ = ep.clear_halt().wait();
+                                std::thread::sleep(std::time::Duration::from_millis(
+                                    retry_delay_ms(attempt) as u64,
+                                ));
+                                continue;
+                            }
+                            if terminate {
+                                self.tx_wedged.store(true, Ordering::Release);
+                            }
+                            self.record_tx_failure(crate::TxErrorKind::Other);
+                            return Err(transfer_error("bulk OUT terminating ZLP failed", err));
+                        }
+                    }
+                    return Ok(completion.actual_len);
+                }
+                Err(err) if should_retry_transfer_error(err, attempt, BULK_RETRY_ATTEMPTS) => {
+                    let _ = ep.clear_halt().wait();
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        retry_delay_ms(attempt) as u64
+                    ));
+                }
+                Err(err) => {
+                    if terminate {
+                        self.tx_wedged.store(true, Ordering::Release);
+                    }
+                    self.record_tx_failure(match err {
+                        nusb::transfer::TransferError::Cancelled => crate::TxErrorKind::Timeout,
+                        nusb::transfer::TransferError::Stall => crate::TxErrorKind::Stall,
+                        nusb::transfer::TransferError::Disconnected => {
+                            crate::TxErrorKind::Disconnected
+                        }
+                        _ => crate::TxErrorKind::Other,
+                    });
+                    return Err(transfer_error("bulk OUT transfer failed", err));
                 }
             }
-            Err(err) => Err(transfer_error("bulk OUT transfer failed", err)),
-        };
-        if let Err(error) = &result {
-            if terminate {
-                self.tx_wedged.store(true, Ordering::Release);
-            }
-            let message = error.to_string();
-            self.record_tx_failure(
-                if message.contains("cancelled") || message.contains("timeout") {
-                    crate::TxErrorKind::Timeout
-                } else if message.contains("stall") {
-                    crate::TxErrorKind::Stall
-                } else if message.contains("disconnect") {
-                    crate::TxErrorKind::Disconnected
-                } else {
-                    crate::TxErrorKind::Other
-                },
-            );
         }
-        result
+        unreachable!("retry loop either returns or reports the final USB error")
     }
 
     /// Merge device-wide TX defaults into one packet's explicit options.

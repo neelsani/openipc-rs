@@ -35,6 +35,7 @@ pub(crate) struct VtxControlStatus {
     pub(crate) last_error: String,
     pub(crate) video_mode: String,
     pub(crate) network: openipc_uplink::NetworkMetrics,
+    pub(crate) tx: openipc_uplink::UplinkEngineMetrics,
 }
 
 /// In-memory state for bounded-delay receiver recovery.

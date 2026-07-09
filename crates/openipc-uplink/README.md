@@ -2,10 +2,10 @@
 
 Cross-platform VTX networking and control for OpenIPC WFB ground stations.
 
-The crate runs IPv4 and TCP in userspace with `smoltcp`, exposes virtual Tokio
-I/O streams, and runs an SSH client over those streams. It opens no platform
-socket and does not require a TUN device, so the same code works on desktop,
-Android, and `wasm32-unknown-unknown`.
+The crate runs IPv4, UDP, and TCP in userspace with `smoltcp`, exposes virtual
+Tokio I/O streams, and runs an SSH client over those streams. It opens no
+platform socket and does not require a TUN device, so the same code works on
+desktop, Android, and `wasm32-unknown-unknown`.
 
 ## Wire Contract
 
@@ -20,26 +20,57 @@ The crate parses the two-byte big-endian IP length prefix used by current WFB
 tunnels, including multiple IP packets aggregated into one WFB payload. APFPV
 is intentionally unsupported.
 
-## Driving The Network
+## Driving The Uplink
 
 ```rust
-use openipc_uplink::{NetworkConfig, UserspaceNetwork};
+use openipc_core::{AdaptiveLink, WfbTxKeypair, ADAPTIVE_LINK_GS_PORT, ADAPTIVE_LINK_VTX_PORT};
+use openipc_uplink::{TxOutcome, UplinkEngine};
 
-let mut network = UserspaceNetwork::new(NetworkConfig::default())?;
-let ssh_stream = network.connect_tcp(22)?;
+let keypair = WfbTxKeypair::from_bytes(&gs_key_bytes)?;
+let mut uplink = UplinkEngine::new(0x7505d6, keypair, 0, 1, 5)?;
+let network = uplink.network();
+let ssh_stream = network.lock().unwrap().connect_tcp(22)?;
+let mut adaptive = AdaptiveLink::new();
+let monotonic_milliseconds = 1_000;
+let unix_milliseconds = 1_800_000_000_000;
+let feedback = adaptive.feedback_udp_payload(unix_milliseconds);
+uplink.send_udp(
+    ADAPTIVE_LINK_GS_PORT,
+    ADAPTIVE_LINK_VTX_PORT,
+    &feedback,
+)?;
 
-// Receiver loop:
-// network.ingest_tunnel_payload(recovered_port_0x20_payload)?;
-// network.poll(monotonic_milliseconds);
-// for payload in network.drain_outbound() {
-//     wfb_tunnel_transmitter.send_on_port_0xa0(payload)?;
-// }
+// In the receiver loop, offer a complete batch to the platform USB sink.
+if let Some(batch) = uplink.ready_batch(monotonic_milliseconds, usb_free_slots)? {
+    if usb_sink_accepts_every_frame(&batch) {
+        uplink.mark_submitted(&batch)?;
+        // As each asynchronous transfer finishes:
+        for frame in batch.frames() {
+            uplink.report_completion(
+                frame.ticket(),
+                TxOutcome::Completed,
+                monotonic_milliseconds,
+            )?;
+        }
+    }
+}
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Poll the network while any returned stream is active. `VirtualTcpStream`
+`UplinkEngine` polls the network whenever `ready_batch` is called. Poll it while
+any returned stream is active. `VirtualTcpStream`
 implements Tokio `AsyncRead` and `AsyncWrite`, but it does not require a Tokio
-network reactor.
+network reactor. Queue complete native TUN, Wintun, or Android `VpnService`
+packets with `enqueue_tunnel_packet`; they bypass smoltcp socket processing but
+join its output at the priority scheduler.
+
+The engine bounds both queues, always schedules adaptive/SSH packets before
+bulk TUN traffic, aggregates same-tick IP packets up to one WFB payload, closes
+partial FEC blocks, and exposes a complete frame group for atomic admission.
+It retains encrypted frame bytes until the sink reports a real completion.
+Stalls, timeouts, and short writes use a bounded retry budget; disconnects are
+reported as fatal. `UplinkEngineMetrics` distinguishes generated, submitted,
+completed, retried, and exhausted traffic.
 
 ## VTX Control
 
@@ -79,10 +110,12 @@ known VTX key.
 
 ## Scheduling
 
-`UserspaceNetwork` has no hidden worker. A native app can poll it from its radio
-worker while running SSH on another executor thread. A browser app can poll it
-from the WebUSB receive loop and run SSH with `spawn_local`. Nebulus contains
-both integrations.
+Neither `UserspaceNetwork` nor `UplinkEngine` starts a hidden worker. A native
+app can drive the engine from its radio loop while SSH runs on another executor
+thread. A browser app drives it from the WebUSB receive loop and can run SSH
+with `spawn_local`. Transport scheduling must use monotonic elapsed time;
+adaptive payload timestamps may continue to use wall-clock/Unix time.
 
-The tests connect two smoltcp peers through the real tunnel framing and verify
-a TCP handshake plus bidirectional data without hardware.
+Tests cover smoltcp TCP/UDP, bounded queue pressure, control-over-TUN priority,
+same-tick aggregation, complete FEC-block admission, byte-identical retries,
+short writes, stalls, fatal disconnects, and WFB recovery without hardware.

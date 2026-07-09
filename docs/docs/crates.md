@@ -12,7 +12,7 @@ two crates.
 | ----------------- | -------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `openipc-core`    | [crates.io](https://crates.io/crates/openipc-core)                                                                   | Parsing Realtek RX aggregates, combining duplicate packets from multiple radios, decrypting WFB packets, recovering FEC blocks, routing raw payloads, depacketizing RTP into Annex-B frames, and creating adaptive-link uplink payloads. |
 | `openipc-rtl88xx` | [crates.io](https://crates.io/crates/openipc-rtl88xx)                                                                | Realtek Jaguar1/2/3 userspace USB HAL: cold initialization, monitor RX, injection, wide/narrow channels, TX power, sounding, CSI/NBI controls, and diagnostics.                                                                          |
-| `openipc-uplink`  | [crates.io](https://crates.io/crates/openipc-uplink)                                                                 | Userspace IPv4/TCP over WFB tunnel ports, virtual async TCP streams, WASM-compatible SSH, config transfer, and typed controls for existing OpenIPC VTX firmware.                                                                         |
+| `openipc-uplink`  | [crates.io](https://crates.io/crates/openipc-uplink)                                                                 | Userspace IPv4/UDP/TCP, bounded priority/aggregation scheduling, completion-aware WFB TX retries, virtual async TCP streams, WASM-compatible SSH, config transfer, and typed controls for existing OpenIPC VTX firmware.                    |
 | `openipc-video`   | [crates.io](https://crates.io/crates/openipc-video)                                                                  | Turning Annex-B H.264/H.265 access units into retained decoder surfaces through VideoToolbox, VA-API, Media Foundation/D3D11, Android MediaCodec, or browser WebCodecs.                                                                  |
 | `openipc-web`     | [crates.io](https://crates.io/crates/openipc-web)                                                                    | Rust/WASM bindings. Downstream Rust users normally do not call this directly unless they are building the npm package from source.                                                                                                       |
 | `@openipc-rs/web` | [npm](https://www.npmjs.com/package/@openipc-rs/web)                                                                 | Browser SDK generated from `openipc-web`: WASM, JavaScript glue, and TypeScript definitions for WebUSB apps.                                                                                                                             |
@@ -37,7 +37,8 @@ shared `ReceiverRuntime`; see [Receive Diversity](./receive-diversity.md).
 
 Add `openipc-uplink` when the application must reach the VTX through WFB tunnel
 ports `0x20`/`0xa0`. It does not require a platform TCP socket or TUN device, so
-the same smoltcp and SSH path works in native, Android, and browser builds.
+the same smoltcp UDP/TCP and SSH path works in native, Android, and browser
+builds.
 
 Add `openipc-video` when an app also needs local playback. It consumes
 the `DepacketizedFrame` values emitted by `openipc-core` and returns retained

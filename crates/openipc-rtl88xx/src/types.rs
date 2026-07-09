@@ -731,6 +731,13 @@ pub enum DriverError {
         /// Number of bytes returned by the device/backend.
         actual: usize,
     },
+    /// A successful bulk-OUT completion transferred fewer bytes than submitted.
+    BulkOutShort {
+        /// Number of bytes submitted.
+        expected: usize,
+        /// Number of bytes reported by the completion.
+        actual: usize,
+    },
     /// Firmware checksum C2H message did not arrive.
     FirmwareChecksumTimeout,
     /// Firmware ready state did not arrive.
@@ -776,6 +783,12 @@ impl fmt::Display for DriverError {
                 write!(
                     f,
                     "register read returned {actual} bytes, expected {expected}"
+                )
+            }
+            Self::BulkOutShort { expected, actual } => {
+                write!(
+                    f,
+                    "bulk OUT completed with {actual} bytes, expected {expected}"
                 )
             }
             Self::FirmwareChecksumTimeout => write!(f, "firmware checksum report did not arrive"),

@@ -75,7 +75,7 @@ impl TunBridge {
                 .recv_timeout(&mut self.read_buffer, std::time::Duration::ZERO)
             {
                 Ok(0) => return Ok(None),
-                Ok(amount) => return Ok(Some(length_prefixed(&self.read_buffer[..amount]))),
+                Ok(amount) => return Ok(Some(self.read_buffer[..amount].to_vec())),
                 Err(error)
                     if matches!(
                         error.kind(),
@@ -165,7 +165,7 @@ impl TunBridge {
             .recv_timeout(&mut self.read_buffer, std::time::Duration::ZERO)
         {
             Ok(0) => Ok(None),
-            Ok(amount) => Ok(Some(length_prefixed(&self.read_buffer[..amount]))),
+            Ok(amount) => Ok(Some(self.read_buffer[..amount].to_vec())),
             Err(error)
                 if matches!(
                     error.kind(),
@@ -246,7 +246,7 @@ impl TunBridge {
                     .await
                 });
                 if let Ok(Ok(amount)) = received {
-                    let _ = uplink_tx.send(length_prefixed(&read_buffer[..amount]));
+                    let _ = uplink_tx.send(read_buffer[..amount].to_vec());
                 }
             }
         });
@@ -303,18 +303,13 @@ fn tunnel_packets(payload: &[u8]) -> impl Iterator<Item = io::Result<&[u8]>> {
         .map(|packet| packet.map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error)))
 }
 
-fn length_prefixed(packet: &[u8]) -> Vec<u8> {
-    openipc_uplink::frame_ip_packet(packet)
-        .expect("native TUN MTU always fits OpenIPC tunnel framing")
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{length_prefixed, tunnel_packets};
+    use super::tunnel_packets;
 
     #[test]
     fn tunnel_framing_round_trips() {
-        let payload = length_prefixed(&[0x45, 1, 2, 3]);
+        let payload = openipc_uplink::frame_ip_packet(&[0x45, 1, 2, 3]).unwrap();
         let packets = tunnel_packets(&payload)
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
@@ -323,8 +318,8 @@ mod tests {
 
     #[test]
     fn tunnel_framing_preserves_aggregated_packets() {
-        let mut payload = length_prefixed(&[0x45, 1]);
-        payload.extend(length_prefixed(&[0x45, 2]));
+        let mut payload = openipc_uplink::frame_ip_packet(&[0x45, 1]).unwrap();
+        payload.extend(openipc_uplink::frame_ip_packet(&[0x45, 2]).unwrap());
         let packets = tunnel_packets(&payload)
             .collect::<Result<Vec<_>, _>>()
             .unwrap();

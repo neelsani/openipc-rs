@@ -11,6 +11,7 @@ readme = "README.md"
 [dependencies]
 openipc-core = { version = "0.1.35", path = "../../crates/openipc-core" }
 openipc-rtl88xx = { version = "0.1.35", path = "../../crates/openipc-rtl88xx" }
+openipc-uplink = { version = "0.1.35", path = "../../crates/openipc-uplink" }
 nusb.workspace = true
 
 [[bin]]

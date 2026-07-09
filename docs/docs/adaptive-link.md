@@ -46,8 +46,9 @@ station format:
 <gs_time>:<score>:<score>:<fec_recovered>:<lost>:<rssi>:<snr>:<num_ants>:<noise_penalty>:<fec_change>[:<idr_code>]\n
 ```
 
-The text is prefixed with a 32-bit big-endian length and then wrapped into a
-2-byte-length-prefixed IPv4/UDP payload:
+The text is prefixed with a 32-bit big-endian length. Nebulus queues that UDP
+payload through the same `openipc-uplink` smoltcp network used by SSH, which
+builds IPv4/UDP and applies the WFB tunnel's 2-byte IP-length prefix:
 
 ```text
 10.5.0.1:54321 -> 10.5.0.10:9999
@@ -115,13 +116,18 @@ index accepted by the driver.
 Native:
 
 ```text
-RX bulk transfers -> adaptive counters -> WFB uplink packet -> nusb bulk OUT
+RX bulk transfers -> adaptive counters -> smoltcp UDP -> WFB uplink -> nusb bulk OUT
 ```
 
 Browser:
 
 ```text
-WebUSB RX transfers -> Rust/WASM counters -> WFB uplink packet -> WebUSB bulk OUT
+WebUSB RX -> Rust/WASM counters -> smoltcp UDP -> WFB uplink -> WebUSB bulk OUT
 ```
 
-The feedback construction is shared Rust. Only the USB transport is different.
+The feedback, userspace network, priority scheduler, packet aggregation, WFB
+construction, and retry policy are shared Rust. Only the USB submission and
+completion API is platform-specific. A frame is counted as delivered only
+after native nusb or WebUSB reports the full transfer and any required Jaguar1
+terminating ZLP. Stalls, timeouts, and short writes retain the same encrypted
+frame bytes for a bounded retry.

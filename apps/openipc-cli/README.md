@@ -57,6 +57,9 @@ cargo run -p openipc-cli -- recv \
   --out video.annexb
 ```
 
+Adaptive feedback is sent through the shared `openipc-uplink` userspace UDP/IP
+stack before WFB encryption and USB injection, matching Nebulus native and web.
+
 Mirror recovered video RTP while receiving:
 
 ```sh

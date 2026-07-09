@@ -391,7 +391,10 @@ for (const payload of batch.rawPayloads) {
 ## Adaptive-Link Feedback
 
 The browser SDK can also send the ground-station adaptive-link feedback path.
-Use epoch milliseconds for the feedback clock, matching the station app.
+Use epoch milliseconds for the feedback payload clock, matching the station
+app. Scheduling itself uses the browser's monotonic Performance clock. The
+binding queues feedback through the shared Rust `UplinkEngine`, then performs
+smoltcp IPv4/UDP, aggregation, WFB encryption/FEC, and WebUSB injection.
 
 ```ts
 import { OpenIpcAdaptiveLink } from "@openipc-rs/web";
@@ -419,6 +422,11 @@ while (running) {
   await adaptive.tickAndSend(radio, nowMs, channel);
 }
 ```
+
+`tickAndSend` waits for the full WebUSB completion and reports failures to the
+bounded retry scheduler. `tick` remains the lower-level API for applications
+that own USB submission themselves; handing a frame array to that caller is its
+completion boundary.
 
 ## Driver Diagnostics
 

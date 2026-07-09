@@ -162,6 +162,8 @@ pub enum TxErrorKind {
     Stall,
     /// Device disconnected.
     Disconnected,
+    /// Completion succeeded but transferred fewer bytes than submitted.
+    ShortWrite,
     /// Other transport failure.
     Other,
 }

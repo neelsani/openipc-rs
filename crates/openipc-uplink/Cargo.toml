@@ -10,6 +10,7 @@ readme = "README.md"
 
 [dependencies]
 getrandom = { version = "0.2", features = ["js"] }
+openipc-core = { version = "0.1.34", path = "../openipc-core" }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9.34"
 smoltcp = { version = "0.13.1", default-features = false, features = [
@@ -17,6 +18,7 @@ smoltcp = { version = "0.13.1", default-features = false, features = [
     "medium-ip",
     "proto-ipv4",
     "socket-tcp",
+    "socket-udp",
 ] }
 tokio = { version = "1", default-features = false, features = ["io-util", "sync", "time"] }
 
@@ -25,3 +27,6 @@ russh = { version = "=0.50.2", default-features = false }
 
 [target.'cfg(target_os = "android")'.dependencies]
 russh = { version = "=0.62.1", default-features = false, features = ["ring", "rsa"] }
+
+[dev-dependencies]
+crypto_box = "0.9"

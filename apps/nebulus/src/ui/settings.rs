@@ -114,6 +114,22 @@ fn vtx_page(app: &mut NebulusApp, ui: &mut egui::Ui) {
                         network.tcp_connection_failures
                     ));
                     ui.end_row();
+                    ui.label("UDP uplink");
+                    ui.monospace(format!(
+                        "{} datagrams / {} bytes / {} failed",
+                        network.udp_datagrams_queued,
+                        network.udp_bytes_queued,
+                        network.udp_send_failures
+                    ));
+                    ui.end_row();
+                    ui.label("Raw IP / TUN uplink");
+                    ui.monospace(format!(
+                        "{} packets / {} bytes / {} failed",
+                        network.raw_ip_packets_queued,
+                        network.raw_ip_bytes_queued,
+                        network.raw_ip_send_failures
+                    ));
+                    ui.end_row();
                     ui.label("Malformed tunnel payloads");
                     ui.monospace(network.malformed_tunnel_packets.to_string());
                     ui.end_row();

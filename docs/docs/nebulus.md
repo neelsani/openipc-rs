@@ -274,9 +274,9 @@ Run `trunk serve` without `--release` to expose the development-only
 **H.264 mock** or **H.265 mock** button. The codec follows Setup → Media → Codec
 preference; `Auto` uses H.265 because that is the normal OpenIPC default. The
 same button is available from a debug native build started with
-`cargo run -p nebulus --bin nebulus`. It loops embedded, pre-recorded 1920x1080
-video with 48 kHz Opus audio. Rust packetizes and interleaves both tracks as
-RTP. Video runs through the normal depacketizer and production
+`cargo run -p nebulus --bin nebulus`. It loops embedded, pre-recorded
+3840x2160p60 video with 48 kHz Opus audio. Rust packetizes and interleaves both
+tracks as RTP. Video runs through the normal depacketizer and production
 decode/presentation path; audio runs through the configured mixed-audio route,
 Opus decoder, volume control, and output queue. WASM uses WebCodecs only for
 video decoding; the mock does not use an encoder. It requires no USB adapter

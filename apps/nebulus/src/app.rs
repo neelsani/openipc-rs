@@ -1879,6 +1879,7 @@ impl NebulusApp {
         self.diagnostics.rtp = batch.rtp;
         self.diagnostics.reorder = batch.reorder;
         self.vtx_control.network = batch.uplink;
+        self.vtx_control.tx = batch.uplink_tx;
         if self.settings.receiver_source == crate::settings::ReceiverSource::UdpRtp {
             self.diagnostics
                 .observe("UDP socket wait", batch.usb_latency_ms);

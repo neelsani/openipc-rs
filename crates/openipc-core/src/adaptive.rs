@@ -11,6 +11,11 @@ const DEFAULT_SESSION_INTERVAL_MS: u64 = 1_000;
 const DEFAULT_IDR_REQUEST_MESSAGES: u32 = 20;
 const DEFAULT_VIDEO_START_IDLE_MS: u64 = 1_000;
 
+/// Ground-station UDP source port used by the OpenIPC adaptive-link protocol.
+pub const ADAPTIVE_LINK_GS_PORT: u16 = 54_321;
+/// VTX UDP destination port used by the OpenIPC adaptive-link service.
+pub const ADAPTIVE_LINK_VTX_PORT: u16 = 9_999;
+
 /// Link-quality report used by OpenIPC adaptive-link feedback.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LinkQuality {
@@ -274,8 +279,12 @@ impl AdaptiveLink {
 
     /// Build a length-prefixed IPv4/UDP feedback packet.
     pub fn feedback_ip_packet(&mut self, now_ms: u64) -> Vec<u8> {
-        let packet =
-            wrap_udp_ipv4_payload_with_id(&self.feedback_udp_payload(now_ms), self.ip_packet_id);
+        let udp_payload = self.feedback_udp_payload(now_ms);
+        self.wrap_feedback_udp_payload(&udp_payload)
+    }
+
+    fn wrap_feedback_udp_payload(&mut self, udp_payload: &[u8]) -> Vec<u8> {
+        let packet = wrap_udp_ipv4_payload_with_id(udp_payload, self.ip_packet_id);
         self.ip_packet_id = self.ip_packet_id.wrapping_add(1);
         packet
     }
@@ -358,8 +367,30 @@ impl AdaptiveLinkSender {
         self.link.record_fec(now_ms, total, recovered, lost);
     }
 
-    /// Return WFB radio packets that should be transmitted at `now_ms`.
-    pub fn tick(&mut self, now_ms: u64) -> Result<Vec<Vec<u8>>, WfbError> {
+    /// Return the adaptive-link UDP application payload when feedback is due.
+    ///
+    /// Pass this payload through a userspace or platform UDP/IP stack before
+    /// sending the resulting tunnel packet on WFB port `0xa0`.
+    pub fn feedback_udp_payload_due(&mut self, now_ms: u64) -> Option<Vec<u8>> {
+        let send_feedback = self
+            .last_feedback_ms
+            .map(|last| now_ms.saturating_sub(last) >= self.feedback_interval_ms)
+            .unwrap_or(true);
+        if !send_feedback {
+            return None;
+        }
+        self.last_feedback_ms = Some(now_ms);
+        Some(self.link.feedback_udp_payload(now_ms))
+    }
+
+    /// Encrypt and radio-wrap userspace-network tunnel packets.
+    ///
+    /// This also emits the periodic WFB session packet required by the VTX.
+    pub fn radio_packets_for_tunnel_payloads<'a>(
+        &mut self,
+        now_ms: u64,
+        payloads: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Result<Vec<Vec<u8>>, WfbError> {
         let mut out = Vec::new();
         let send_session = self
             .last_session_ms
@@ -369,20 +400,24 @@ impl AdaptiveLinkSender {
             out.push(self.tx.session_radio_packet(self.tx_params));
             self.last_session_ms = Some(now_ms);
         }
-
-        let send_feedback = self
-            .last_feedback_ms
-            .map(|last| now_ms.saturating_sub(last) >= self.feedback_interval_ms)
-            .unwrap_or(true);
-        if send_feedback {
-            let payload = self.link.feedback_ip_packet(now_ms);
-            out.extend(
-                self.tx
-                    .radio_packets_for_payload(&payload, self.tx_params)?,
-            );
-            self.last_feedback_ms = Some(now_ms);
+        for payload in payloads {
+            out.extend(self.tx.radio_packets_for_payload(payload, self.tx_params)?);
         }
         Ok(out)
+    }
+
+    /// Return WFB radio packets that should be transmitted at `now_ms`.
+    ///
+    /// This compatibility helper uses the built-in IPv4/UDP packet builder.
+    /// Applications that also need tunnel TCP/SSH should use
+    /// [`feedback_udp_payload_due`](Self::feedback_udp_payload_due), pass the
+    /// result through their shared IP stack, and then call
+    /// [`radio_packets_for_tunnel_payloads`](Self::radio_packets_for_tunnel_payloads).
+    pub fn tick(&mut self, now_ms: u64) -> Result<Vec<Vec<u8>>, WfbError> {
+        let tunnel_payload = self
+            .feedback_udp_payload_due(now_ms)
+            .map(|udp_payload| self.link.wrap_feedback_udp_payload(&udp_payload));
+        self.radio_packets_for_tunnel_payloads(now_ms, tunnel_payload.iter().map(Vec::as_slice))
     }
 }
 
@@ -412,8 +447,8 @@ pub fn wrap_udp_ipv4_payload_with_id(udp_payload: &[u8], packet_id: u16) -> Vec<
     out[12] = (checksum >> 8) as u8;
     out[13] = checksum as u8;
 
-    out.extend_from_slice(&54321u16.to_be_bytes());
-    out.extend_from_slice(&9999u16.to_be_bytes());
+    out.extend_from_slice(&ADAPTIVE_LINK_GS_PORT.to_be_bytes());
+    out.extend_from_slice(&ADAPTIVE_LINK_VTX_PORT.to_be_bytes());
     out.extend_from_slice(&(udp_len as u16).to_be_bytes());
     out.extend_from_slice(&0u16.to_be_bytes());
     out.extend_from_slice(udp_payload);
@@ -608,5 +643,40 @@ mod tests {
         let second = link.feedback_ip_packet(1_100);
         assert_eq!(u16::from_be_bytes([first[6], first[7]]), 0);
         assert_eq!(u16::from_be_bytes([second[6], second[7]]), 1);
+    }
+
+    #[test]
+    fn adaptive_sender_splits_udp_and_wfb_scheduling() {
+        let keypair = WfbTxKeypair {
+            tx_secretkey: [3; 32],
+            rx_publickey: [9; 32],
+        };
+        let mut sender = AdaptiveLinkSender::new(0x7505d6, keypair, 0, 1, 5).unwrap();
+        sender.link_mut().set_keyframe_request_messages(0);
+
+        let udp_payload = sender.feedback_udp_payload_due(1_000).unwrap();
+        assert_eq!(
+            u32::from_be_bytes(udp_payload[..4].try_into().unwrap()) as usize,
+            udp_payload.len() - 4
+        );
+        assert!(sender.feedback_udp_payload_due(1_050).is_none());
+
+        let tunnel_payload = wrap_udp_ipv4_payload(&udp_payload);
+        let frames = sender
+            .radio_packets_for_tunnel_payloads(1_000, [tunnel_payload.as_slice()])
+            .unwrap();
+        assert_eq!(frames.len(), 6, "one session plus five FEC shards");
+        assert!(sender
+            .radio_packets_for_tunnel_payloads(1_050, std::iter::empty())
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            sender
+                .radio_packets_for_tunnel_payloads(2_000, std::iter::empty())
+                .unwrap()
+                .len(),
+            1,
+            "the WFB session refresh remains independent of feedback"
+        );
     }
 }

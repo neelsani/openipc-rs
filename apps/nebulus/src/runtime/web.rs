@@ -499,7 +499,7 @@ mod worker {
     use std::time::Duration;
     use std::{
         cell::{Cell, RefCell},
-        collections::VecDeque,
+        collections::{HashMap, VecDeque},
         rc::Rc,
         sync::{Arc, Mutex},
     };
@@ -516,14 +516,16 @@ mod worker {
             RxPacketType,
         },
         AdaptiveLink, ChannelId, DiversityCombiner, DiversityDecision, DiversitySourceId,
-        FecCounters, FrameLayout, PayloadRouteId, ReceiverRuntime, TxRadioParams, WfbKeypair,
-        WfbTransmitter, WfbTxKeypair,
+        FecCounters, FrameLayout, PayloadRouteId, ReceiverRuntime, WfbKeypair, WfbTxKeypair,
     };
     use openipc_rtl88xx::{
         build_usb_tx_frame, ChannelWidth, ChipFamily, DriverOptions, Jaguar3PowerTrackingState,
         RadioConfig, RealtekDevice, RealtekTxDescriptor, RealtekTxOptions,
     };
-    use openipc_uplink::{NetworkConfig, UserspaceNetwork, VtxController};
+    use openipc_uplink::{
+        TxBatch, TxFailureKind, TxOutcome, UplinkEngine, UplinkEngineMetrics, UserspaceNetwork,
+        VtxController,
+    };
     use wasm_bindgen::JsValue;
     use wasm_bindgen_futures::{spawn_local, JsFuture};
     use web_time::Instant;
@@ -540,7 +542,9 @@ mod worker {
 
     const VIDEO_ROUTE: PayloadRouteId = PayloadRouteId::new(1);
     const RX_TRANSFERS_IN_FLIGHT: usize = 8;
-    const TX_TRANSFERS_IN_FLIGHT: usize = 8;
+    const TX_TRANSFERS_IN_FLIGHT: usize = 16;
+    const WEBUSB_ERROR_RETRY_WINDOW_MS: u64 = 1_000;
+    const WEBUSB_ERROR_RETRY_BACKOFF_MS: i32 = 10;
     const FIRST_RX_WARNING_AFTER_MS: u128 = 2_000;
     const MAX_BROWSER_RECORDING_BYTES: usize = 512 * 1024 * 1024;
 
@@ -550,6 +554,7 @@ mod worker {
         endpoint_address: u8,
         endpoint: nusb::Endpoint<Bulk, In>,
         consecutive_errors: u8,
+        first_error_ms: Option<u64>,
         metrics: Rc<RefCell<AdapterRuntimeMetrics>>,
     }
 
@@ -775,109 +780,144 @@ mod worker {
     }
 
     struct UplinkRuntime {
-        network: Arc<Mutex<UserspaceNetwork>>,
-        transmitter: WfbTransmitter,
+        engine: UplinkEngine,
+        pending_adaptive: Option<Vec<u8>>,
         tx_options: RealtekTxOptions,
-        tx_params: TxRadioParams,
-        last_session_ms: Option<u64>,
+        network_payloads: u64,
+        adaptive_payloads: u64,
+        downlink_payloads: u64,
     }
 
     impl UplinkRuntime {
         fn new(request: &StartRequest, chip: ChipFamily) -> Result<Self, String> {
             let keypair = WfbTxKeypair::from_bytes(&request.key_bytes)
                 .map_err(|error| format!("uplink transmit key is invalid: {error}"))?;
+            let link_id = request.channel_id >> 8;
+            log::info!(
+                target: "nebulus::uplink",
+                "userspace uplink prepared link_id=0x{link_id:06x} tx_port=0xa0 rx_port=0x20 local=10.5.0.1 remote=10.5.0.10",
+            );
+            let engine =
+                UplinkEngine::new(link_id, keypair, 0, 1, 5).map_err(|error| error.to_string())?;
             Ok(Self {
-                network: Arc::new(Mutex::new(
-                    UserspaceNetwork::new(NetworkConfig::default())
-                        .map_err(|error| error.to_string())?,
-                )),
-                transmitter: WfbTransmitter::new(
-                    ChannelId::from_link_port(
-                        request.channel_id >> 8,
-                        openipc_core::RadioPort::TunnelTx,
-                    ),
-                    keypair,
-                    0,
-                    1,
-                    5,
-                )
-                .map_err(|error| error.to_string())?,
+                engine,
+                pending_adaptive: None,
                 tx_options: RealtekTxOptions {
                     current_channel: request.channel,
                     configured_channel_width: channel_width(request.channel_width_mhz)?,
                     configured_channel_offset: request.channel_offset,
                     descriptor: RealtekTxDescriptor::for_chip_family(chip),
+                    capabilities: Some(openipc_rtl88xx::TxCapabilities::for_family(chip)),
                     ..RealtekTxOptions::default()
                 },
-                tx_params: TxRadioParams::openipc_uplink_default(),
-                last_session_ms: None,
+                network_payloads: 0,
+                adaptive_payloads: 0,
+                downlink_payloads: 0,
             })
         }
 
         fn network(&self) -> Arc<Mutex<UserspaceNetwork>> {
-            Arc::clone(&self.network)
+            self.engine.network()
         }
 
         fn network_metrics(&self) -> openipc_uplink::NetworkMetrics {
-            self.network.lock().map_or_else(
+            self.engine.network().lock().map_or_else(
                 |_| openipc_uplink::NetworkMetrics::default(),
                 |network| network.metrics(),
             )
         }
 
+        fn engine_metrics(&self) -> UplinkEngineMetrics {
+            self.engine.metrics()
+        }
+
         fn write_downlink(&mut self, payload: &[u8]) -> Result<(), String> {
-            self.network
-                .lock()
-                .map_err(|_| "userspace network state poisoned".to_owned())?
-                .ingest_tunnel_payload(payload)
-                .map_err(|error| error.to_string())
+            self.engine
+                .ingest_downlink(payload)
+                .map_err(|error| error.to_string())?;
+            self.downlink_payloads = self.downlink_payloads.saturating_add(1);
+            if self.downlink_payloads == 1 {
+                log::info!(
+                    target: "nebulus::uplink",
+                    "first WFB tunnel downlink payload received bytes={}",
+                    payload.len(),
+                );
+            }
+            Ok(())
         }
 
         fn tick(
             &mut self,
-            now: u64,
+            monotonic_ms: u64,
             tx_queue: &mut WebTxQueue,
             adaptive: Option<Vec<u8>>,
         ) -> Result<(), String> {
-            let mut payloads = Vec::new();
-            {
-                let mut network = self
-                    .network
-                    .lock()
-                    .map_err(|_| "userspace network state poisoned".to_owned())?;
-                network.poll(now);
-                payloads.extend(network.drain_outbound());
-            }
             if let Some(payload) = adaptive {
-                payloads.push(payload);
+                self.pending_adaptive = Some(payload);
             }
-            if payloads.is_empty() {
+            let adaptive_bytes = self.pending_adaptive.as_ref().map(Vec::len);
+            if let Some(payload) = self.pending_adaptive.as_deref() {
+                self.engine
+                    .send_udp(
+                        openipc_core::ADAPTIVE_LINK_GS_PORT,
+                        openipc_core::ADAPTIVE_LINK_VTX_PORT,
+                        payload,
+                    )
+                    .map_err(|error| error.to_string())?;
+                self.pending_adaptive = None;
+            }
+            let Some(batch) = self
+                .engine
+                .ready_batch(monotonic_ms, TX_TRANSFERS_IN_FLIGHT)
+                .map_err(|error| error.to_string())?
+            else {
                 return Ok(());
+            };
+            if self.network_payloads == 0 {
+                log::info!(
+                    target: "nebulus::uplink",
+                    "first userspace-network tunnel aggregate ready packets={} bytes={} frames={}",
+                    batch.ip_packets(),
+                    batch.payload_bytes(),
+                    batch.frames().len(),
+                );
             }
-            if self
-                .last_session_ms
-                .is_none_or(|last| now.saturating_sub(last) >= 1_000)
-            {
-                if !tx_queue.enqueue(
-                    self.transmitter.session_radio_packet(self.tx_params),
-                    self.tx_options,
-                )? {
-                    return Err("WebUSB TX queue full before uplink session packet".to_owned());
+            self.network_payloads = self
+                .network_payloads
+                .saturating_add(batch.ip_packets() as u64);
+            if let Some(payload_bytes) = adaptive_bytes {
+                if self.adaptive_payloads == 0 {
+                    log::info!(
+                        target: "nebulus::adaptive",
+                        "first adaptive-link UDP payload queued through userspace network bytes={payload_bytes}",
+                    );
                 }
-                self.last_session_ms = Some(now);
+                self.adaptive_payloads = self.adaptive_payloads.saturating_add(1);
             }
-            for payload in payloads {
-                for frame in self
-                    .transmitter
-                    .radio_packets_for_payload(&payload, self.tx_params)
-                    .map_err(|error| error.to_string())?
-                {
-                    if !tx_queue.enqueue(frame, self.tx_options)? {
-                        return Err("WebUSB TX queue full; dropped uplink payload".to_owned());
-                    }
-                }
+            if tx_queue.enqueue_batch(&batch, self.tx_options)? {
+                self.engine
+                    .mark_submitted(&batch)
+                    .map_err(|error| error.to_string())?;
             }
             Ok(())
+        }
+
+        async fn service_tx(
+            &mut self,
+            tx_queue: &mut WebTxQueue,
+            monotonic_ms: u64,
+        ) -> Option<String> {
+            let (completions, error) = tx_queue.service().await;
+            for completion in completions {
+                if let Err(report_error) = self.engine.report_completion(
+                    completion.ticket,
+                    completion.outcome,
+                    monotonic_ms,
+                ) {
+                    return Some(report_error.to_string());
+                }
+            }
+            error
         }
     }
 
@@ -918,6 +958,27 @@ mod worker {
         endpoint: nusb::Endpoint<Bulk, Out>,
         stalled: bool,
         last_error: Option<String>,
+        submitted: u64,
+        completed: u64,
+        transfers: VecDeque<WebTransfer>,
+        pending_zlp: HashMap<u64, TxOutcome>,
+        in_flight_frames: usize,
+    }
+
+    enum WebTransfer {
+        Frame {
+            ticket: u64,
+            expected: usize,
+            terminating_zlp: bool,
+        },
+        Zlp {
+            ticket: u64,
+        },
+    }
+
+    struct WebTxCompletion {
+        ticket: u64,
+        outcome: TxOutcome,
     }
 
     impl WebTxQueue {
@@ -931,56 +992,152 @@ mod worker {
                     .await
                     .map_err(|error| format!("clear Jaguar1 bulk-OUT halt failed: {error}"))?;
             }
+            log::info!(
+                target: "nebulus::uplink",
+                "WebUSB TX endpoint prepared endpoint=0x{:02x} max_packet_size={} descriptor={:?}",
+                device.bulk_out_endpoint_address(),
+                endpoint.max_packet_size(),
+                RealtekTxDescriptor::for_chip_family(chip),
+            );
             Ok(Self {
                 device,
                 chip,
                 endpoint,
                 stalled: false,
                 last_error: None,
+                submitted: 0,
+                completed: 0,
+                transfers: VecDeque::new(),
+                pending_zlp: HashMap::new(),
+                in_flight_frames: 0,
             })
         }
 
-        fn enqueue(&mut self, frame: Vec<u8>, options: RealtekTxOptions) -> Result<bool, String> {
-            self.drain_ready();
+        fn enqueue_batch(
+            &mut self,
+            batch: &TxBatch,
+            options: RealtekTxOptions,
+        ) -> Result<bool, String> {
+            let mut prepared = Vec::with_capacity(batch.frames().len());
             let options = self
                 .device
                 .apply_persistent_tx_options(self.chip, options)
                 .map_err(|error| error.to_string())?;
-            let usb_frame =
-                build_usb_tx_frame(&frame, options).map_err(|error| error.to_string())?;
-            let terminate = options.descriptor.uses_terminated_bulk_out()
-                && !usb_frame.is_empty()
-                && usb_frame
-                    .len()
-                    .is_multiple_of(self.endpoint.max_packet_size());
-            let required = if terminate { 2 } else { 1 };
+            let mut required = 0usize;
+            for frame in batch.frames() {
+                let usb_frame = build_usb_tx_frame(frame.bytes(), options)
+                    .map_err(|error| error.to_string())?;
+                let terminate = options.descriptor.uses_terminated_bulk_out()
+                    && !usb_frame.is_empty()
+                    && usb_frame
+                        .len()
+                        .is_multiple_of(self.endpoint.max_packet_size());
+                required += if terminate { 2 } else { 1 };
+                prepared.push((frame.ticket(), frame.bytes().len(), usb_frame, terminate));
+            }
             if self.stalled || self.endpoint.pending() + required > TX_TRANSFERS_IN_FLIGHT {
                 return Ok(false);
             }
-            self.endpoint.submit(Buffer::from(usb_frame));
-            if terminate {
-                self.endpoint.submit(Buffer::new(0));
+            for (ticket, radio_bytes, usb_frame, terminate) in prepared {
+                let usb_bytes = usb_frame.len();
+                self.endpoint.submit(Buffer::from(usb_frame));
+                self.transfers.push_back(WebTransfer::Frame {
+                    ticket,
+                    expected: usb_bytes,
+                    terminating_zlp: terminate,
+                });
+                self.submitted = self.submitted.saturating_add(1);
+                if self.submitted == 1 {
+                    log::info!(
+                        target: "nebulus::uplink",
+                        "first WebUSB TX transfer queued endpoint=0x{:02x} radio_bytes={radio_bytes} usb_bytes={usb_bytes} terminate={terminate}",
+                        self.device.bulk_out_endpoint_address(),
+                    );
+                }
+                if terminate {
+                    self.endpoint.submit(Buffer::new(0));
+                    self.transfers.push_back(WebTransfer::Zlp { ticket });
+                }
             }
+            self.in_flight_frames = self.in_flight_frames.saturating_add(batch.frames().len());
             Ok(true)
         }
 
-        fn drain_ready(&mut self) {
+        fn drain_ready(&mut self) -> Vec<WebTxCompletion> {
+            let mut outcomes = Vec::new();
             while self.endpoint.pending() > 0 {
                 let Some(completion) = self.endpoint.next_complete().now_or_never() else {
                     break;
                 };
-                if let Err(error) = completion.status {
+                let Some(transfer) = self.transfers.pop_front() else {
                     self.stalled = true;
-                    self.last_error = Some(format!("WebUSB bulk OUT failed: {error}"));
-                    if self.stalled {
-                        break;
+                    self.last_error = Some(
+                        "WebUSB bulk OUT completed without matching submission metadata".to_owned(),
+                    );
+                    continue;
+                };
+                match transfer {
+                    WebTransfer::Frame {
+                        ticket,
+                        expected,
+                        terminating_zlp,
+                    } => {
+                        let outcome = web_completion_outcome(&completion, expected);
+                        if outcome != TxOutcome::Completed {
+                            self.stalled = true;
+                            self.last_error = Some(format!(
+                                "WebUSB bulk OUT failed after {}/{} completed/submitted frames: {:?}",
+                                self.completed, self.submitted, outcome
+                            ));
+                        }
+                        if terminating_zlp {
+                            self.pending_zlp.insert(ticket, outcome);
+                        } else {
+                            self.finish_frame(ticket, outcome, &mut outcomes);
+                        }
+                    }
+                    WebTransfer::Zlp { ticket } => {
+                        let data_outcome = self
+                            .pending_zlp
+                            .remove(&ticket)
+                            .unwrap_or(TxOutcome::Fatal(TxFailureKind::Other));
+                        let outcome = if data_outcome == TxOutcome::Completed {
+                            web_completion_outcome(&completion, 0)
+                        } else {
+                            data_outcome
+                        };
+                        if outcome != TxOutcome::Completed {
+                            self.stalled = true;
+                        }
+                        self.finish_frame(ticket, outcome, &mut outcomes);
                     }
                 }
             }
+            outcomes
         }
 
-        async fn service(&mut self) -> Option<String> {
-            self.drain_ready();
+        fn finish_frame(
+            &mut self,
+            ticket: u64,
+            outcome: TxOutcome,
+            outcomes: &mut Vec<WebTxCompletion>,
+        ) {
+            self.in_flight_frames = self.in_flight_frames.saturating_sub(1);
+            if outcome == TxOutcome::Completed {
+                self.completed = self.completed.saturating_add(1);
+                if self.completed == 1 {
+                    log::info!(
+                        target: "nebulus::uplink",
+                        "first WebUSB TX frame completed endpoint=0x{:02x}",
+                        self.device.bulk_out_endpoint_address(),
+                    );
+                }
+            }
+            outcomes.push(WebTxCompletion { ticket, outcome });
+        }
+
+        async fn service(&mut self) -> (Vec<WebTxCompletion>, Option<String>) {
+            let outcomes = self.drain_ready();
             if self.stalled {
                 if let Err(error) = self.endpoint.clear_halt().await {
                     self.last_error = Some(format!("clear WebUSB bulk-OUT halt failed: {error}"));
@@ -988,7 +1145,18 @@ mod worker {
                     self.stalled = false;
                 }
             }
-            self.last_error.take()
+            (outcomes, self.last_error.take())
+        }
+    }
+
+    fn web_completion_outcome(completion: &Completion, expected: usize) -> TxOutcome {
+        match completion.status {
+            Ok(()) if completion.actual_len == expected => TxOutcome::Completed,
+            Ok(()) => TxOutcome::Retryable(TxFailureKind::ShortWrite),
+            Err(TransferError::Cancelled) => TxOutcome::Retryable(TxFailureKind::Timeout),
+            Err(TransferError::Stall) => TxOutcome::Retryable(TxFailureKind::Stall),
+            Err(TransferError::Disconnected) => TxOutcome::Fatal(TxFailureKind::Disconnected),
+            Err(_) => TxOutcome::Retryable(TxFailureKind::Other),
         }
     }
 
@@ -1062,16 +1230,16 @@ mod worker {
             self.quality.record_fec(now, total, recovered, lost);
         }
 
-        fn feedback_due(&mut self, now: u64) -> Option<Vec<u8>> {
+        fn feedback_due(&mut self, schedule_now: u64, payload_now: u64) -> Option<Vec<u8>> {
             if !self.adaptive_enabled
                 || self
                     .last_feedback_ms
-                    .is_some_and(|last| now.saturating_sub(last) < 100)
+                    .is_some_and(|last| schedule_now.saturating_sub(last) < 100)
             {
                 return None;
             }
-            self.last_feedback_ms = Some(now);
-            Some(self.quality.feedback_ip_packet(now))
+            self.last_feedback_ms = Some(schedule_now);
+            Some(self.quality.feedback_udp_payload(payload_now))
         }
     }
 
@@ -1240,22 +1408,6 @@ mod worker {
                 .clear_halt()
                 .await
                 .map_err(|error| format!("clear {id} bulk-IN halt failed: {error}"))?;
-            while endpoint.pending() < RX_TRANSFERS_IN_FLIGHT {
-                endpoint.submit(endpoint.allocate(request.transfer_size));
-            }
-            log(
-                events,
-                context,
-                LogLevel::Info,
-                "usb",
-                format!(
-                    "{id}: bulk-IN queue armed endpoint=0x{:02x} pending={} transfer_size={} max_packet_size={}",
-                    device.bulk_in_endpoint_address(),
-                    endpoint.pending(),
-                    request.transfer_size,
-                    endpoint.max_packet_size(),
-                ),
-            );
             let metrics = Rc::new(RefCell::new(AdapterRuntimeMetrics {
                 source_id,
                 device_id: id.clone(),
@@ -1271,6 +1423,7 @@ mod worker {
                 endpoint_address: device.bulk_in_endpoint_address(),
                 endpoint,
                 consecutive_errors: 0,
+                first_error_ms: None,
                 metrics: Rc::clone(&metrics),
             });
             metric_handles.push(metrics);
@@ -1343,6 +1496,33 @@ mod worker {
         } else {
             None
         };
+        let uplink_started = Instant::now();
+
+        // Finish all adaptive/uplink control transfers before submitting any
+        // long-lived WebUSB reads. Chromium may reject pending transferIn()
+        // promises when TX power or endpoint state is changed concurrently.
+        // The native runtime already follows this ordering.
+        for radio in &mut radios {
+            while radio.endpoint.pending() < RX_TRANSFERS_IN_FLIGHT {
+                let buffer = radio.endpoint.allocate(request.transfer_size);
+                radio.endpoint.submit(buffer);
+            }
+            let metrics = radio.metrics.borrow();
+            log(
+                events,
+                context,
+                LogLevel::Info,
+                "usb",
+                format!(
+                    "{}: bulk-IN queue armed endpoint=0x{:02x} pending={} transfer_size={} max_packet_size={}",
+                    metrics.device_id,
+                    radio.endpoint_address,
+                    radio.endpoint.pending(),
+                    request.transfer_size,
+                    radio.endpoint.max_packet_size(),
+                ),
+            );
+        }
         let mut maintenance = devices
             .iter()
             .filter_map(|(device, chip)| WebMaintenance::start(Rc::clone(device), *chip))
@@ -1429,6 +1609,7 @@ mod worker {
                     context,
                 );
                 let now = now_ms();
+                let schedule_now = elapsed_ms(&uplink_started);
                 if request.vtx_control_enabled {
                     service_vtx_commands(
                         vtx_commands,
@@ -1442,15 +1623,15 @@ mod worker {
                         context,
                     );
                 }
-                let adaptive = link.feedback_due(now);
                 if let (Some(uplink), Some(tx_queue)) = (uplink.as_mut(), tx_queue.as_mut()) {
-                    if let Err(error) = uplink.tick(now, tx_queue, adaptive) {
-                        log(events, context, LogLevel::Warn, "uplink", error);
+                    if let Some(error) = uplink.service_tx(tx_queue, schedule_now).await {
+                        log(events, context, LogLevel::Warn, "adaptive", error);
                     }
                 }
-                if let Some(tx_queue) = tx_queue.as_mut() {
-                    if let Some(error) = tx_queue.service().await {
-                        log(events, context, LogLevel::Warn, "adaptive", error);
+                let adaptive = link.feedback_due(schedule_now, now);
+                if let (Some(uplink), Some(tx_queue)) = (uplink.as_mut(), tx_queue.as_mut()) {
+                    if let Err(error) = uplink.tick(schedule_now, tx_queue, adaptive) {
+                        log(events, context, LogLevel::Warn, "uplink", error);
                     }
                 }
                 continue;
@@ -1489,44 +1670,45 @@ mod worker {
                         }
                     }
                 }
-                if error == TransferError::Disconnected {
-                    radio.metrics.borrow_mut().online = false;
+                radio.consecutive_errors = radio.consecutive_errors.saturating_add(1);
+                let error_count = radio.consecutive_errors;
+                let error_now_ms = now_ms();
+                let first_error_ms = *radio.first_error_ms.get_or_insert(error_now_ms);
+                let error_elapsed_ms = error_now_ms.saturating_sub(first_error_ms);
+                if error_count == 1 || error_count.is_power_of_two() {
+                    let classification = if error == TransferError::Disconnected {
+                        " (Chromium NetworkError; retrying before declaring disconnect)"
+                    } else {
+                        ""
+                    };
                     log(
                         events,
                         context,
                         LogLevel::Warn,
-                        "diversity",
+                        "usb",
                         format!(
-                            "Radio {} disconnected; {}/{} WebUSB adapters remain",
+                            "radio {} bulk IN failed attempt={error_count} elapsed={error_elapsed_ms}ms: {error}{classification}",
                             radio.source_id + 1,
-                            radio_futures.len(),
-                            devices.len()
                         ),
                     );
-                    emit_diversity_update(
-                        events,
-                        context,
-                        &diversity,
-                        &metric_handles,
-                        &mut source_quality,
-                    );
-                    continue;
                 }
-                log(
-                    events,
-                    context,
-                    LogLevel::Warn,
-                    "usb",
-                    format!("radio {} bulk IN failed: {error}", radio.source_id + 1),
-                );
                 if error == TransferError::Stall {
-                    let _ = radio.endpoint.clear_halt().await;
-                    radio.consecutive_errors = 0;
-                } else {
-                    radio.consecutive_errors = radio.consecutive_errors.saturating_add(1);
+                    if let Err(clear_error) = radio.endpoint.clear_halt().await {
+                        log(
+                            events,
+                            context,
+                            LogLevel::Warn,
+                            "usb",
+                            format!(
+                                "radio {} bulk-IN clear-halt failed: {clear_error}",
+                                radio.source_id + 1
+                            ),
+                        );
+                    }
                 }
-                radio.endpoint.submit(completion.buffer);
-                if radio.consecutive_errors < 8 {
+                if error_elapsed_ms < WEBUSB_ERROR_RETRY_WINDOW_MS {
+                    sleep_ms(WEBUSB_ERROR_RETRY_BACKOFF_MS).await;
+                    radio.endpoint.submit(completion.buffer);
                     radio_futures.push(wait_for_radio(radio));
                 } else {
                     radio.metrics.borrow_mut().online = false;
@@ -1536,8 +1718,12 @@ mod worker {
                         LogLevel::Warn,
                         "diversity",
                         format!(
-                            "Radio {} stopped after repeated USB errors",
-                            radio.source_id + 1
+                            "Radio {} stopped after {} WebUSB errors over {} ms; {}/{} adapters remain",
+                            radio.source_id + 1,
+                            radio.consecutive_errors,
+                            error_elapsed_ms,
+                            radio_futures.len(),
+                            devices.len(),
                         ),
                     );
                     emit_diversity_update(
@@ -1551,6 +1737,7 @@ mod worker {
                 continue;
             }
             radio.consecutive_errors = 0;
+            radio.first_error_ms = None;
             {
                 let mut metrics = radio.metrics.borrow_mut();
                 metrics.transfers = metrics.transfers.saturating_add(1);
@@ -1795,6 +1982,9 @@ mod worker {
                     openipc_uplink::NetworkMetrics::default,
                     UplinkRuntime::network_metrics,
                 ),
+                uplink_tx: uplink
+                    .as_ref()
+                    .map_or_else(UplinkEngineMetrics::default, UplinkRuntime::engine_metrics),
                 routes: route_updates,
                 telemetry,
                 audio: route_processor.audio_stats(),
@@ -1832,15 +2022,14 @@ mod worker {
                     context,
                 );
             }
-            let adaptive = link.feedback_due(now);
             if let (Some(uplink), Some(tx_queue)) = (uplink.as_mut(), tx_queue.as_mut()) {
-                if let Err(error) = uplink.tick(now, tx_queue, adaptive) {
-                    log(events, context, LogLevel::Warn, "uplink", error);
-                }
-            }
-            if let Some(tx_queue) = tx_queue.as_mut() {
-                if let Some(error) = tx_queue.service().await {
+                let schedule_now = elapsed_ms(&uplink_started);
+                if let Some(error) = uplink.service_tx(tx_queue, schedule_now).await {
                     log(events, context, LogLevel::Warn, "adaptive", error);
+                }
+                let adaptive = link.feedback_due(schedule_now, now);
+                if let Err(error) = uplink.tick(schedule_now, tx_queue, adaptive) {
+                    log(events, context, LogLevel::Warn, "uplink", error);
                 }
             }
         }
@@ -2019,7 +2208,7 @@ mod worker {
             context,
             LogLevel::Info,
             "mock",
-            format!("Pre-recorded 1080p {mock_codec_label} + Opus RTP/WebCodecs mock started"),
+            format!("Pre-recorded 4K60 {mock_codec_label} + Opus RTP/WebCodecs mock started"),
         );
 
         let channel = ChannelId::default_video();
@@ -2359,6 +2548,12 @@ mod worker {
                 .set_tx_power_override_async(request.channel, request.tx_power)
                 .await
                 .map_err(|error| error.to_string())?;
+            log::info!(
+                target: "nebulus::adaptive",
+                "adaptive-link TX power override applied channel={} index={}",
+                request.channel,
+                request.tx_power,
+            );
         }
         Ok(LinkRuntime {
             quality: AdaptiveLink::new(),
@@ -2461,6 +2656,10 @@ mod worker {
 
     fn now_ms() -> u64 {
         js_sys::Date::now().max(0.0).min(u64::MAX as f64) as u64
+    }
+
+    fn elapsed_ms(started: &Instant) -> u64 {
+        started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
     }
 
     fn log(

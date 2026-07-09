@@ -4,7 +4,13 @@ use openipc_core::rtp::{
     Codec, RTP_PAYLOAD_TYPE_H264, RTP_PAYLOAD_TYPE_H265, RTP_PAYLOAD_TYPE_OPUS,
 };
 
-pub(crate) const MOCK_FPS: u32 = 240;
+pub(crate) const MOCK_FPS: u32 = 60;
+#[cfg(test)]
+const MOCK_WIDTH: u32 = 3_840;
+#[cfg(test)]
+const MOCK_HEIGHT: u32 = 2_160;
+#[cfg(test)]
+const MOCK_FRAMES_PER_LOOP: usize = 300;
 
 const CLOCK_RATE: u32 = 90_000;
 const AUDIO_CLOCK_RATE: u32 = 48_000;
@@ -523,19 +529,37 @@ mod tests {
     #[test]
     fn fixture_contains_decodable_access_units() {
         let stream = MockH264Stream::new().unwrap();
-        assert_eq!(stream.access_units.len(), 150);
+        assert_eq!(stream.access_units.len(), MOCK_FRAMES_PER_LOOP);
         assert!(stream.access_units[0]
             .iter()
             .any(|range| nal_type(&H264[range.clone()]) == 7));
         assert!(stream.access_units[0]
             .iter()
             .any(|range| nal_type(&H264[range.clone()]) == 8));
+
+        let sps = stream.access_units[0]
+            .iter()
+            .find(|range| nal_type(&H264[(*range).clone()]) == 7)
+            .map(|range| &H264[range.clone()])
+            .unwrap();
+        let pps = stream.access_units[0]
+            .iter()
+            .find(|range| nal_type(&H264[(*range).clone()]) == 8)
+            .map(|range| &H264[range.clone()])
+            .unwrap();
+        let info =
+            openipc_video::CodecConfig::H264(openipc_video::H264Config::new(sps, pps).unwrap())
+                .stream_info()
+                .unwrap();
+        assert_eq!(info.visible_dimensions.width, MOCK_WIDTH);
+        assert_eq!(info.visible_dimensions.height, MOCK_HEIGHT);
+        assert_eq!(info.bit_depth, 8);
     }
 
     #[test]
     fn h265_fixture_contains_parameter_sets_and_irap() {
         let stream = MockH265Stream::new().unwrap();
-        assert_eq!(stream.access_units.len(), 150);
+        assert_eq!(stream.access_units.len(), MOCK_FRAMES_PER_LOOP);
         for kind in [32, 33, 34] {
             assert!(stream.access_units[0]
                 .iter()
@@ -544,6 +568,23 @@ mod tests {
         assert!(stream.access_units[0]
             .iter()
             .any(|range| matches!(h265_nal_type(&H265[range.clone()]), 16..=23)));
+
+        let parameter_set = |kind| {
+            stream.access_units[0]
+                .iter()
+                .find(|range| h265_nal_type(&H265[(*range).clone()]) == kind)
+                .map(|range| &H265[range.clone()])
+                .unwrap()
+        };
+        let info = openipc_video::CodecConfig::H265(
+            openipc_video::H265Config::new(parameter_set(32), parameter_set(33), parameter_set(34))
+                .unwrap(),
+        )
+        .stream_info()
+        .unwrap();
+        assert_eq!(info.visible_dimensions.width, MOCK_WIDTH);
+        assert_eq!(info.visible_dimensions.height, MOCK_HEIGHT);
+        assert_eq!(info.bit_depth, 8);
     }
 
     #[test]
@@ -599,7 +640,7 @@ mod tests {
     fn loop_preserves_monotonic_rtp_timing_and_sequence() {
         let mut stream = MockH264Stream::new().unwrap();
         let first = stream.next_frame();
-        for _ in 1..150 {
+        for _ in 1..MOCK_FRAMES_PER_LOOP {
             stream.next_frame();
         }
         let looped = stream.next_frame();
@@ -610,9 +651,12 @@ mod tests {
         );
         assert_eq!(
             u32::from_be_bytes(looped.packets[0][4..8].try_into().unwrap()),
-            150 * (CLOCK_RATE / MOCK_FPS)
+            MOCK_FRAMES_PER_LOOP as u32 * (CLOCK_RATE / MOCK_FPS)
         );
-        assert_eq!(looped.packets[0][12] & 0x1f, 7);
+        assert!(looped
+            .packets
+            .iter()
+            .any(|packet| packet.get(12).is_some_and(|byte| byte & 0x1f == 7)));
     }
 
     #[test]

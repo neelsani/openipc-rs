@@ -244,9 +244,11 @@ scan. The macOS path also converts the normal uniquely owned Annex-B buffer to
 VideoToolbox length prefixes in place.
 
 Adaptive-link/VPN transmit and Jaguar3 maintenance do not run on the native RX
-thread. Browser adaptive feedback uses a retained bounded WebUSB OUT queue, and
-browser Jaguar3 maintenance runs as a separate local async task. Auxiliary TX
-is dropped under sustained overload rather than delaying incoming video.
+thread. Native and browser transmit share `UplinkEngine`: bounded control/TUN
+queues, control-first scheduling, same-tick IP aggregation, atomic FEC-batch
+admission, and completion-driven bounded retries. Browser Jaguar3 maintenance
+runs as a separate local async task. Sustained TUN overload is rejected at its
+queue boundary instead of delaying video or silently consuming control traffic.
 
 The default Metrics view focuses on six operational signals: best-path link
 score, unrecoverable post-FEC loss, FEC recovery percentage, encoded video
@@ -324,9 +326,10 @@ directory as fallbacks. Android uses app-owned storage without prompting.
 
 The **VPN / tunnel** section under Settings bridges recovered IP packets from
 radio port `0x20` into a native L3 interface at `10.5.0.3/24`. Packets read from
-that interface are encrypted,
-FEC-wrapped, injected through the userland Realtek driver, and transmitted on
-radio port `0xa0`. Linux may require elevated network-device permissions;
+that interface enter the shared `UserspaceNetwork` raw-IP queue, which applies
+OpenIPC tunnel framing before they are encrypted, FEC-wrapped, injected through
+the userland Realtek driver, and transmitted on radio port `0xa0`. Linux may
+require elevated network-device permissions;
 Windows uses Wintun through `rust-tun`; Android uses its system `VpnService`.
 
 The Windows release installer includes the matching `wintun.dll`. A
@@ -334,14 +337,14 @@ The Windows release installer includes the matching `wintun.dll`. A
 **Install Wintun** in Settings. Nebulus downloads the official signed 0.14.1
 archive, verifies its published SHA-256, and installs the architecture-matched
 DLL under `%LOCALAPPDATA%\Nebulus\wintun\0.14.1`. The installer runs outside
-the receiver thread. Adaptive-link feedback injects WFB packets directly
-through the Realtek driver and does not require Wintun or an enabled VPN route.
+the receiver thread. Adaptive-link uses the same userspace network and WFB
+transmitter but does not require Wintun or an enabled VPN route.
 
 Debug native and WASM builds also show **H.264 mock** or **H.265 mock**, based
 on the codec preference under Setup → Media. `Auto` selects H.265 to match the
-usual OpenIPC stream. The mock loops embedded, pre-recorded 1920x1080 video and
-48 kHz Opus fixtures, packetizes both tracks as RTP, and interleaves them on
-their media clocks. Native debug builds can start it automatically for
+usual OpenIPC stream. The mock loops embedded, pre-recorded 3840x2160p60 video
+and 48 kHz Opus fixtures, packetizes both tracks as RTP, and interleaves them
+on their media clocks. Native debug builds can start it automatically for
 profiling:
 
 ```sh

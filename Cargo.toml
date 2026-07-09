@@ -26,7 +26,7 @@ lto = "thin"
 codegen-units = 1
 panic = "abort"
 
-# Codec mocks are debug-only, but a 1080p decoder/readback/texture pipeline is
+# Codec mocks are debug-only, but a 4K60 decoder/readback/texture pipeline is
 # not a meaningful real-time test when any of its crates run at opt-level 0.
 [profile.dev]
 opt-level = 2

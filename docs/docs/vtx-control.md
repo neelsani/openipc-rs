@@ -122,6 +122,10 @@ bidirectional byte transfer without hardware.
 ## Optional OS VPN
 
 The TUN interface remains an additional native feature. Enabling it mirrors
-tunnel IP packets to the operating system, but internal VTX control does not
-depend on it. The same settings therefore work in a browser, where arbitrary
-TCP sockets and TUN devices are unavailable.
+downlink IP packets to the operating system. On uplink, the OS returns complete
+IP packets; Nebulus queues them with `UplinkEngine::enqueue_tunnel_packet`.
+They bypass smoltcp's socket layer, then join its output at the bounded
+scheduler so framing, aggregation, completion metrics, retries, and the WFB TX
+session remain shared with adaptive UDP and internal SSH.
+Internal VTX control does not depend on TUN, so the same settings work in a
+browser where arbitrary TCP sockets and TUN devices are unavailable.

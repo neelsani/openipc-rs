@@ -1,5 +1,7 @@
 //! Nebulus egui ground-station application.
 
+#![recursion_limit = "256"]
+
 #[cfg(target_os = "android")]
 mod android;
 mod app;

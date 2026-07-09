@@ -666,6 +666,7 @@ impl WebUsbRealtekDevice {
 
     #[wasm_bindgen(js_name = initializeMonitorAdvanced)]
     /// Initialize monitor mode with advanced bring-up options.
+    #[allow(clippy::too_many_arguments)]
     pub async fn initialize_monitor_advanced(
         &self,
         channel: u8,
@@ -695,6 +696,7 @@ impl WebUsbRealtekDevice {
 
     #[wasm_bindgen(js_name = initializeMonitorAdvancedWithTxgapk)]
     /// Initialize monitor mode with all calibration and bring-up options.
+    #[allow(clippy::too_many_arguments)]
     pub async fn initialize_monitor_advanced_with_txgapk(
         &self,
         channel: u8,
@@ -1187,6 +1189,13 @@ pub struct WebUsbPhydmWatchdog {
 }
 
 #[cfg(target_arch = "wasm32")]
+impl Default for WebUsbPhydmWatchdog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 impl WebUsbPhydmWatchdog {
     #[wasm_bindgen(constructor)]
@@ -1215,6 +1224,13 @@ impl WebUsbPhydmWatchdog {
 /// Stateful RTL8812 power-tracking helper for WebUSB apps.
 pub struct WebUsbPowerTracking8812 {
     state: PowerTrackingState,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Default for WebUsbPowerTracking8812 {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1273,6 +1289,13 @@ pub struct WebUsbJaguar3PowerTracking {
 }
 
 #[cfg(target_arch = "wasm32")]
+impl Default for WebUsbJaguar3PowerTracking {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 impl WebUsbJaguar3PowerTracking {
     #[wasm_bindgen(constructor)]
@@ -1301,6 +1324,13 @@ impl WebUsbJaguar3PowerTracking {
 /// Compatibility wrapper for the former RTL8822C-specific class name.
 pub struct WebUsbPowerTracking8822c {
     inner: WebUsbJaguar3PowerTracking,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Default for WebUsbPowerTracking8822c {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(target_arch = "wasm32")]

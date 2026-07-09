@@ -1,9 +1,10 @@
 use js_sys::{Array, Uint8Array};
 use openipc_core::ieee80211::WifiFrame;
 use openipc_core::realtek::{parse_rx_aggregate_with_kind, RxDescriptorKind, RxPacketType};
-use openipc_core::{
-    AdaptiveLinkSender, ChannelId, FecCounters, FrameLayout, RadioPort, WfbTxKeypair,
-};
+use openipc_core::{AdaptiveLink, ChannelId, FecCounters, FrameLayout, RadioPort, WfbTxKeypair};
+#[cfg(target_arch = "wasm32")]
+use openipc_uplink::TxFailureKind;
+use openipc_uplink::{TxOutcome, UplinkEngine};
 use wasm_bindgen::prelude::*;
 
 use crate::js::{counters_json, escape_json_str, ms_from_js};
@@ -17,16 +18,66 @@ use crate::webusb::WebUsbRealtekDevice;
 /// The app records RX quality and FEC counters, then calls `tick()` or
 /// `tickAndSend()` to produce/send encrypted WFB feedback packets.
 pub struct OpenIpcAdaptiveLink {
-    sender: AdaptiveLinkSender,
+    link: AdaptiveLink,
+    engine: UplinkEngine,
+    last_feedback_ms: Option<u64>,
     last_counters: FecCounters,
     rx_channel_id: ChannelId,
     rx_descriptor_kind: RxDescriptorKind,
 }
 
 impl OpenIpcAdaptiveLink {
+    fn prepare_batch(
+        &mut self,
+        schedule_ms: u64,
+        payload_now_ms: u64,
+    ) -> Result<Option<openipc_uplink::TxBatch>, String> {
+        if self
+            .last_feedback_ms
+            .is_none_or(|last| schedule_ms.saturating_sub(last) >= 100)
+        {
+            let feedback = self.link.feedback_udp_payload(payload_now_ms);
+            self.engine
+                .send_udp(
+                    openipc_core::ADAPTIVE_LINK_GS_PORT,
+                    openipc_core::ADAPTIVE_LINK_VTX_PORT,
+                    &feedback,
+                )
+                .map_err(|error| error.to_string())?;
+            self.last_feedback_ms = Some(schedule_ms);
+        }
+        self.engine
+            .ready_batch(schedule_ms, usize::MAX)
+            .map_err(|error| error.to_string())
+    }
+
+    fn frames_due(
+        &mut self,
+        schedule_ms: u64,
+        payload_now_ms: u64,
+    ) -> Result<Vec<Vec<u8>>, String> {
+        let Some(batch) = self.prepare_batch(schedule_ms, payload_now_ms)? else {
+            return Ok(Vec::new());
+        };
+        self.engine
+            .mark_submitted(&batch)
+            .map_err(|error| error.to_string())?;
+        let frames = batch
+            .frames()
+            .iter()
+            .map(|frame| frame.bytes().to_vec())
+            .collect::<Vec<_>>();
+        for frame in batch.frames() {
+            self.engine
+                .report_completion(frame.ticket(), TxOutcome::Completed, schedule_ms)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(frames)
+    }
+
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn record_rx_paths(&mut self, now_ms: u64, rssi: [u8; 4], snr: [i8; 4]) {
-        self.sender.record_rx_paths(now_ms, rssi, snr);
+        self.link.record_rx_paths(now_ms, rssi, snr);
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -48,10 +99,12 @@ impl OpenIpcAdaptiveLink {
     ) -> Result<OpenIpcAdaptiveLink, JsValue> {
         let keypair = WfbTxKeypair::from_bytes(keypair)
             .map_err(|err| JsValue::from_str(&format!("invalid adaptive-link keypair: {err}")))?;
-        let sender = AdaptiveLinkSender::new(link_id, keypair, epoch, fec_k, fec_n)
+        let engine = UplinkEngine::new(link_id, keypair, epoch, fec_k, fec_n)
             .map_err(|err| JsValue::from_str(&format!("invalid adaptive-link config: {err}")))?;
         Ok(Self {
-            sender,
+            link: AdaptiveLink::new(),
+            engine,
+            last_feedback_ms: None,
             last_counters: FecCounters::default(),
             rx_channel_id: ChannelId::from_link_port(link_id, RadioPort::Video),
             rx_descriptor_kind: RxDescriptorKind::Jaguar1,
@@ -68,8 +121,7 @@ impl OpenIpcAdaptiveLink {
     #[wasm_bindgen(js_name = recordRx)]
     /// Record one pair of RSSI/SNR samples for link-quality estimation.
     pub fn record_rx(&mut self, now_ms: f64, rssi0: u8, rssi1: u8, snr0: i8, snr1: i8) {
-        self.sender
-            .link_mut()
+        self.link
             .record_rx(ms_from_js(now_ms), rssi0, rssi1, snr0, snr1);
     }
 
@@ -92,7 +144,7 @@ impl OpenIpcAdaptiveLink {
             {
                 continue;
             }
-            self.sender
+            self.link
                 .record_rx_paths(now_ms, packet.attrib.rssi, packet.attrib.snr);
         }
         Ok(())
@@ -107,38 +159,33 @@ impl OpenIpcAdaptiveLink {
     #[wasm_bindgen(js_name = recordFec)]
     /// Record explicit FEC totals for the current time window.
     pub fn record_fec(&mut self, now_ms: f64, total: u32, recovered: u32, lost: u32) {
-        self.sender
+        self.link
             .record_fec(ms_from_js(now_ms), total, recovered, lost);
     }
 
     #[wasm_bindgen(js_name = requestKeyframe)]
     /// Force keyframe-request messages in upcoming feedback packets.
     pub fn request_keyframe(&mut self) {
-        self.sender.link_mut().request_keyframe();
+        self.link.request_keyframe();
     }
 
     #[wasm_bindgen(js_name = setKeyframeRequestMessages)]
     /// Configure how many feedback packets carry a keyframe request.
     pub fn set_keyframe_request_messages(&mut self, messages: u32) {
-        self.sender
-            .link_mut()
-            .set_keyframe_request_messages(messages);
+        self.link.set_keyframe_request_messages(messages);
     }
 
     #[wasm_bindgen(js_name = setVideoStartIdleMs)]
     /// Configure how long a quiet video stream is considered idle.
     pub fn set_video_start_idle_ms(&mut self, idle_ms: u32) {
-        self.sender
-            .link_mut()
-            .set_video_start_idle_ms(idle_ms as u64);
+        self.link.set_video_start_idle_ms(idle_ms as u64);
     }
 
     #[wasm_bindgen(js_name = tick)]
     /// Return feedback frames that should be sent at `now_ms`.
     pub fn tick(&mut self, now_ms: f64) -> Result<Array, JsValue> {
         let frames = self
-            .sender
-            .tick(ms_from_js(now_ms))
+            .frames_due(ms_from_js(crate::js::now_ms()), ms_from_js(now_ms))
             .map_err(|err| JsValue::from_str(&format!("adaptive-link tick failed: {err}")))?;
         let out = Array::new();
         for frame in frames {
@@ -156,7 +203,7 @@ impl OpenIpcAdaptiveLink {
     #[wasm_bindgen(js_name = quality)]
     /// Return the current link-quality report as JSON.
     pub fn quality(&mut self, now_ms: f64) -> String {
-        let quality = self.sender.link_mut().quality(ms_from_js(now_ms));
+        let quality = self.link.quality(ms_from_js(now_ms));
         format!(
             r#"{{"lostLastSecond":{},"recoveredLastSecond":{},"totalLastSecond":{},"rssi":[{},{}],"snr":[{},{}],"linkScore":[{},{}],"idrCode":"{}"}}"#,
             quality.lost_last_second,
@@ -183,12 +230,33 @@ impl OpenIpcAdaptiveLink {
             .lost_packets
             .saturating_sub(self.last_counters.lost_packets);
         self.last_counters = counters;
-        self.sender.record_fec(
+        self.link.record_fec(
             now_ms,
             total.min(u32::MAX as u64) as u32,
             recovered.min(u32::MAX as u64) as u32,
             lost.min(u32::MAX as u64) as u32,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OpenIpcAdaptiveLink;
+
+    #[test]
+    fn facade_routes_feedback_through_userspace_udp() {
+        let mut keypair = vec![3; 32];
+        keypair.extend_from_slice(&[9; 32]);
+        let mut adaptive = OpenIpcAdaptiveLink::new(0x7505d6, &keypair, 0, 1, 5).unwrap();
+        adaptive.set_keyframe_request_messages(0);
+
+        assert_eq!(
+            adaptive.frames_due(1_000, 1_000).unwrap().len(),
+            6,
+            "one WFB session plus five UDP feedback shards"
+        );
+        assert!(adaptive.frames_due(1_050, 1_050).unwrap().is_empty());
+        assert_eq!(adaptive.frames_due(1_100, 1_100).unwrap().len(), 5);
     }
 }
 
@@ -216,15 +284,41 @@ impl OpenIpcAdaptiveLink {
         current_channel: u8,
         channel_width_mhz: u16,
     ) -> Result<usize, JsValue> {
-        let frames = self
-            .sender
-            .tick(ms_from_js(now_ms))
-            .map_err(|err| JsValue::from_str(&format!("adaptive-link tick failed: {err}")))?;
-        let count = frames.len();
-        for frame in frames {
-            device
-                .send_packet_for_radio(&frame, current_channel, channel_width_mhz, false)
-                .await?;
+        let schedule_ms = ms_from_js(crate::js::now_ms());
+        let Some(batch) = self
+            .prepare_batch(schedule_ms, ms_from_js(now_ms))
+            .map_err(|err| JsValue::from_str(&format!("adaptive-link tick failed: {err}")))?
+        else {
+            return Ok(0);
+        };
+        self.engine
+            .mark_submitted(&batch)
+            .map_err(|err| JsValue::from_str(&err.to_string()))?;
+        let count = batch.frames().len();
+        for (index, frame) in batch.frames().iter().enumerate() {
+            let result = device
+                .send_packet_for_radio(frame.bytes(), current_channel, channel_width_mhz, false)
+                .await;
+            let outcome = if result.is_ok() {
+                TxOutcome::Completed
+            } else {
+                TxOutcome::Retryable(TxFailureKind::Other)
+            };
+            self.engine
+                .report_completion(frame.ticket(), outcome, schedule_ms)
+                .map_err(|err| JsValue::from_str(&err.to_string()))?;
+            if let Err(error) = result {
+                for unsent in &batch.frames()[index + 1..] {
+                    self.engine
+                        .report_completion(
+                            unsent.ticket(),
+                            TxOutcome::Retryable(TxFailureKind::Other),
+                            schedule_ms,
+                        )
+                        .map_err(|err| JsValue::from_str(&err.to_string()))?;
+                }
+                return Err(error);
+            }
         }
         Ok(count)
     }

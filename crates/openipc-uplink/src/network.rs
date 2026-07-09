@@ -7,20 +7,23 @@ use std::{
 use smoltcp::{
     iface::{Config as InterfaceConfig, Interface, SocketHandle, SocketSet},
     phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken},
-    socket::tcp,
+    socket::{tcp, udp},
     time::Instant,
-    wire::{HardwareAddress, IpAddress, IpCidr},
+    wire::{HardwareAddress, IpAddress, IpCidr, IpEndpoint},
 };
 
 use crate::{
     frame_ip_packet, parse_tunnel_packets,
     stream::{StreamState, VirtualTcpStream, STREAM_QUEUE_CAPACITY},
-    TunnelFramingError,
+    TunnelFramingError, MAX_TUNNEL_PACKET_LEN,
 };
 
 const DEFAULT_MTU: usize = 1_500;
 const DEFAULT_TCP_BUFFER_SIZE: usize = 128 * 1024;
 const FIRST_EPHEMERAL_PORT: u16 = 49_152;
+const UDP_TX_PACKET_CAPACITY: usize = 16;
+const IPV4_UDP_HEADER_LEN: usize = 20 + 8;
+const DEVICE_PACKET_QUEUE_CAPACITY: usize = 256;
 
 /// Addressing and buffer policy for the userspace WFB tunnel network.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +58,14 @@ pub struct NetworkMetrics {
     pub tcp_connections_opened: u64,
     pub tcp_connection_failures: u64,
     pub tcp_connections_active: usize,
+    pub udp_datagrams_queued: u64,
+    pub udp_bytes_queued: u64,
+    pub udp_send_failures: u64,
+    pub raw_ip_packets_queued: u64,
+    pub raw_ip_bytes_queued: u64,
+    pub raw_ip_send_failures: u64,
+    pub inbound_queue_full: u64,
+    pub outbound_queue_full: u64,
 }
 
 /// Failure produced while configuring or driving the userspace network.
@@ -63,6 +74,27 @@ pub enum NetworkError {
     InvalidConfig(&'static str),
     TunnelFraming(TunnelFramingError),
     TcpConnect(String),
+    UdpPayloadTooLarge {
+        length: usize,
+        maximum: usize,
+    },
+    UdpBind {
+        port: u16,
+        error: String,
+    },
+    UdpSend {
+        local_port: u16,
+        remote_port: u16,
+        error: String,
+    },
+    IpPacketTooLarge {
+        length: usize,
+        mtu: usize,
+    },
+    PacketQueueFull {
+        direction: &'static str,
+        capacity: usize,
+    },
 }
 
 impl fmt::Display for NetworkError {
@@ -71,6 +103,35 @@ impl fmt::Display for NetworkError {
             Self::InvalidConfig(message) => formatter.write_str(message),
             Self::TunnelFraming(error) => error.fmt(formatter),
             Self::TcpConnect(error) => write!(formatter, "userspace TCP connect failed: {error}"),
+            Self::UdpPayloadTooLarge { length, maximum } => write!(
+                formatter,
+                "userspace UDP payload is too large: {length} bytes (maximum {maximum})"
+            ),
+            Self::UdpBind { port, error } => {
+                write!(
+                    formatter,
+                    "userspace UDP bind on port {port} failed: {error}"
+                )
+            }
+            Self::UdpSend {
+                local_port,
+                remote_port,
+                error,
+            } => write!(
+                formatter,
+                "userspace UDP {local_port} -> {remote_port} send failed: {error}"
+            ),
+            Self::IpPacketTooLarge { length, mtu } => write!(
+                formatter,
+                "outbound IP packet is too large: {length} bytes (tunnel MTU {mtu})"
+            ),
+            Self::PacketQueueFull {
+                direction,
+                capacity,
+            } => write!(
+                formatter,
+                "userspace network {direction} packet queue is full ({capacity} packets)"
+            ),
         }
     }
 }
@@ -89,7 +150,7 @@ struct Connection {
     was_active: bool,
 }
 
-/// IPv4/TCP stack that exchanges packets through OpenIPC WFB tunnel payloads.
+/// IPv4/UDP/TCP stack and raw-IP queue for OpenIPC WFB tunnel payloads.
 ///
 /// Call [`ingest_tunnel_payload`](Self::ingest_tunnel_payload) for every
 /// recovered port `0x20` payload, call [`poll`](Self::poll) regularly, and send
@@ -101,6 +162,7 @@ pub struct UserspaceNetwork {
     interface: Interface,
     sockets: SocketSet<'static>,
     connections: HashMap<u64, Connection>,
+    udp_sockets: HashMap<u16, SocketHandle>,
     next_connection_id: u64,
     next_ephemeral_port: u16,
     metrics: NetworkMetrics,
@@ -114,6 +176,11 @@ impl UserspaceNetwork {
                 "tunnel MTU must be at least 576",
             ));
         }
+        if config.mtu > MAX_TUNNEL_PACKET_LEN {
+            return Err(NetworkError::InvalidConfig(
+                "tunnel MTU must fit the 16-bit OpenIPC length prefix",
+            ));
+        }
         if config.tcp_buffer_size == 0 {
             return Err(NetworkError::InvalidConfig(
                 "TCP buffer size must be greater than zero",
@@ -124,7 +191,7 @@ impl UserspaceNetwork {
                 "IPv4 prefix length must not exceed 32",
             ));
         }
-        let mut device = TunnelDevice::new(config.mtu);
+        let mut device = TunnelDevice::new(config.mtu, DEVICE_PACKET_QUEUE_CAPACITY);
         let interface_config = InterfaceConfig::new(HardwareAddress::Ip);
         let mut interface = Interface::new(interface_config, &mut device, Instant::from_millis(0));
         interface.update_ip_addrs(|addresses| {
@@ -146,6 +213,7 @@ impl UserspaceNetwork {
             interface,
             sockets: SocketSet::new(Vec::new()),
             connections: HashMap::new(),
+            udp_sockets: HashMap::new(),
             next_connection_id: 1,
             next_ephemeral_port: FIRST_EPHEMERAL_PORT,
             metrics: NetworkMetrics::default(),
@@ -193,16 +261,122 @@ impl UserspaceNetwork {
         Ok(VirtualTcpStream::new(state))
     }
 
+    /// Queue a UDP datagram to the configured remote VTX address.
+    ///
+    /// The datagram is converted into IPv4 by smoltcp on the next [`poll`](Self::poll).
+    /// The resulting IP packet is returned by [`drain_outbound`](Self::drain_outbound)
+    /// with OpenIPC's two-byte tunnel length prefix.
+    pub fn send_udp(
+        &mut self,
+        local_port: u16,
+        remote_port: u16,
+        payload: &[u8],
+    ) -> Result<(), NetworkError> {
+        let maximum = self.config.mtu.saturating_sub(IPV4_UDP_HEADER_LEN);
+        if payload.len() > maximum {
+            self.metrics.udp_send_failures += 1;
+            return Err(NetworkError::UdpPayloadTooLarge {
+                length: payload.len(),
+                maximum,
+            });
+        }
+
+        let remote = IpEndpoint::new(
+            IpAddress::v4(
+                self.config.remote_address[0],
+                self.config.remote_address[1],
+                self.config.remote_address[2],
+                self.config.remote_address[3],
+            ),
+            remote_port,
+        );
+        let handle = match self.udp_socket(local_port) {
+            Ok(handle) => handle,
+            Err(error) => {
+                self.metrics.udp_send_failures += 1;
+                return Err(error);
+            }
+        };
+        let result = self
+            .sockets
+            .get_mut::<udp::Socket>(handle)
+            .send_slice(payload, remote)
+            .map_err(|error| NetworkError::UdpSend {
+                local_port,
+                remote_port,
+                error: error.to_string(),
+            });
+        match result {
+            Ok(()) => {
+                self.metrics.udp_datagrams_queued += 1;
+                self.metrics.udp_bytes_queued += payload.len() as u64;
+                Ok(())
+            }
+            Err(error) => {
+                self.metrics.udp_send_failures += 1;
+                Err(error)
+            }
+        }
+    }
+
+    /// Queue a complete IP packet produced by an external network stack.
+    ///
+    /// This is the boundary for native TUN/Wintun/VpnService traffic. The OS
+    /// has already built the IP and transport headers, so the packet bypasses
+    /// smoltcp socket processing but shares its outbound queue, tunnel framing,
+    /// ordering, metrics, and WFB transmitter.
+    pub fn queue_outbound_ip_packet(&mut self, packet: &[u8]) -> Result<(), NetworkError> {
+        self.queue_outbound_ip_packet_owned(packet.to_vec())
+    }
+
+    /// Queue an owned complete IP packet without copying it into the queue.
+    ///
+    /// Native TUN readers should prefer this method because they already own a
+    /// freshly read packet buffer.
+    pub fn queue_outbound_ip_packet_owned(&mut self, packet: Vec<u8>) -> Result<(), NetworkError> {
+        if packet.is_empty() {
+            self.metrics.raw_ip_send_failures += 1;
+            return Err(NetworkError::TunnelFraming(TunnelFramingError::EmptyPacket));
+        }
+        if packet.len() > self.config.mtu {
+            self.metrics.raw_ip_send_failures += 1;
+            return Err(NetworkError::IpPacketTooLarge {
+                length: packet.len(),
+                mtu: self.config.mtu,
+            });
+        }
+        if self.device.outbound.len() >= self.device.queue_capacity {
+            self.metrics.raw_ip_send_failures += 1;
+            self.metrics.outbound_queue_full += 1;
+            return Err(NetworkError::PacketQueueFull {
+                direction: "outbound",
+                capacity: self.device.queue_capacity,
+            });
+        }
+        let packet_len = packet.len();
+        self.device.outbound.push_back(packet);
+        self.metrics.raw_ip_packets_queued += 1;
+        self.metrics.raw_ip_bytes_queued += packet_len as u64;
+        Ok(())
+    }
+
     /// Queue a recovered WFB tunnel payload for IPv4/TCP processing.
     pub fn ingest_tunnel_payload(&mut self, payload: &[u8]) -> Result<(), NetworkError> {
-        for packet in parse_tunnel_packets(payload) {
-            let packet = match packet {
-                Ok(packet) => packet,
-                Err(error) => {
-                    self.metrics.malformed_tunnel_packets += 1;
-                    return Err(error.into());
-                }
-            };
+        let packets = match parse_tunnel_packets(payload).collect::<Result<Vec<_>, _>>() {
+            Ok(packets) => packets,
+            Err(error) => {
+                self.metrics.malformed_tunnel_packets += 1;
+                return Err(error.into());
+            }
+        };
+        if self.device.inbound.len().saturating_add(packets.len()) > self.device.queue_capacity {
+            self.metrics.inbound_queue_full += 1;
+            return Err(NetworkError::PacketQueueFull {
+                direction: "inbound",
+                capacity: self.device.queue_capacity,
+            });
+        }
+        for packet in packets {
             self.metrics.tunnel_packets_received += 1;
             self.metrics.tunnel_bytes_received += packet.len() as u64;
             self.device.inbound.push_back(packet.to_vec());
@@ -226,11 +400,23 @@ impl UserspaceNetwork {
 
     /// Return framed IP packets that must be transmitted on WFB tunnel TX.
     pub fn drain_outbound(&mut self) -> impl Iterator<Item = Vec<u8>> + '_ {
-        self.device.outbound.drain(..).filter_map(|packet| {
+        self.drain_outbound_limited(usize::MAX)
+    }
+
+    /// Return at most `limit` framed outbound IP packets, retaining the rest.
+    pub fn drain_outbound_limited(&mut self, limit: usize) -> impl Iterator<Item = Vec<u8>> + '_ {
+        let amount = limit.min(self.device.outbound.len());
+        self.device.outbound.drain(..amount).filter_map(|packet| {
+            let framed = frame_ip_packet(&packet).ok()?;
             self.metrics.tunnel_packets_sent += 1;
             self.metrics.tunnel_bytes_sent += packet.len() as u64;
-            frame_ip_packet(&packet).ok()
+            Some(framed)
         })
+    }
+
+    /// Number of smoltcp-produced IP packets waiting for the uplink scheduler.
+    pub fn outbound_queue_len(&self) -> usize {
+        self.device.outbound.len()
     }
 
     /// Current cumulative network counters.
@@ -246,6 +432,28 @@ impl UserspaceNetwork {
             selected + 1
         };
         selected
+    }
+
+    fn udp_socket(&mut self, local_port: u16) -> Result<SocketHandle, NetworkError> {
+        if let Some(handle) = self.udp_sockets.get(&local_port) {
+            return Ok(*handle);
+        }
+
+        let receive = udp::PacketBuffer::new(Vec::new(), Vec::new());
+        let transmit = udp::PacketBuffer::new(
+            vec![udp::PacketMetadata::EMPTY; UDP_TX_PACKET_CAPACITY],
+            vec![0; self.config.mtu * UDP_TX_PACKET_CAPACITY],
+        );
+        let mut socket = udp::Socket::new(receive, transmit);
+        socket
+            .bind(local_port)
+            .map_err(|error| NetworkError::UdpBind {
+                port: local_port,
+                error: error.to_string(),
+            })?;
+        let handle = self.sockets.add(socket);
+        self.udp_sockets.insert(local_port, handle);
+        Ok(handle)
     }
 
     fn move_application_writes(&mut self) {
@@ -350,14 +558,16 @@ impl UserspaceNetwork {
 
 struct TunnelDevice {
     mtu: usize,
+    queue_capacity: usize,
     inbound: VecDeque<Vec<u8>>,
     outbound: VecDeque<Vec<u8>>,
 }
 
 impl TunnelDevice {
-    fn new(mtu: usize) -> Self {
+    fn new(mtu: usize, queue_capacity: usize) -> Self {
         Self {
             mtu,
+            queue_capacity,
             inbound: VecDeque::new(),
             outbound: VecDeque::new(),
         }
@@ -394,12 +604,15 @@ impl Device for TunnelDevice {
     type TxToken<'a> = TunnelTxToken<'a>;
 
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+        if self.outbound.len() >= self.queue_capacity {
+            return None;
+        }
         let packet = self.inbound.pop_front()?;
         Some((TunnelRxToken(packet), TunnelTxToken(&mut self.outbound)))
     }
 
     fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
-        Some(TunnelTxToken(&mut self.outbound))
+        (self.outbound.len() < self.queue_capacity).then_some(TunnelTxToken(&mut self.outbound))
     }
 
     fn capabilities(&self) -> DeviceCapabilities {
@@ -418,7 +631,25 @@ mod tests {
     use smoltcp::socket::tcp;
     use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-    use super::{NetworkConfig, UserspaceNetwork};
+    use super::{NetworkConfig, NetworkError, UserspaceNetwork, DEFAULT_MTU};
+
+    fn ipv4_payload(tunnel_packet: &[u8]) -> &[u8] {
+        crate::parse_tunnel_payload(tunnel_packet).unwrap()
+    }
+
+    fn internet_checksum_sum(bytes: &[u8]) -> u16 {
+        let mut sum = 0u32;
+        for chunk in bytes.chunks_exact(2) {
+            sum += u32::from(u16::from_be_bytes([chunk[0], chunk[1]]));
+        }
+        if let Some(last) = bytes.chunks_exact(2).remainder().first() {
+            sum += u32::from(*last) << 8;
+        }
+        while sum >> 16 != 0 {
+            sum = (sum & 0xffff) + (sum >> 16);
+        }
+        sum as u16
+    }
 
     fn exchange(left: &mut UserspaceNetwork, right: &mut UserspaceNetwork) {
         let packets = left.drain_outbound().collect::<Vec<_>>();
@@ -440,6 +671,174 @@ mod tests {
             packets[0].len() - 2
         );
         assert_eq!(packets[0][2] >> 4, 4);
+    }
+
+    #[test]
+    fn network_rejects_mtu_larger_than_tunnel_prefix() {
+        let config = NetworkConfig {
+            mtu: crate::MAX_TUNNEL_PACKET_LEN + 1,
+            ..NetworkConfig::default()
+        };
+        assert!(matches!(
+            UserspaceNetwork::new(config),
+            Err(NetworkError::InvalidConfig(
+                "tunnel MTU must fit the 16-bit OpenIPC length prefix"
+            ))
+        ));
+    }
+
+    #[test]
+    fn udp_send_emits_compatible_length_prefixed_ipv4_packet() {
+        let mut network = UserspaceNetwork::new(NetworkConfig::default()).unwrap();
+        let payload = b"adaptive-link feedback";
+        network.send_udp(54_321, 9_999, payload).unwrap();
+        network.poll(1_000);
+
+        let packets = network.drain_outbound().collect::<Vec<_>>();
+        assert_eq!(packets.len(), 1);
+        let ip = ipv4_payload(&packets[0]);
+        let header_len = usize::from(ip[0] & 0x0f) * 4;
+        assert_eq!(ip[0] >> 4, 4);
+        assert_eq!(header_len, 20);
+        assert_eq!(usize::from(u16::from_be_bytes([ip[2], ip[3]])), ip.len());
+        assert_eq!(ip[9], 17);
+        assert_eq!(&ip[12..16], &[10, 5, 0, 1]);
+        assert_eq!(&ip[16..20], &[10, 5, 0, 10]);
+        assert_eq!(internet_checksum_sum(&ip[..header_len]), u16::MAX);
+
+        let udp = &ip[header_len..];
+        assert_eq!(u16::from_be_bytes([udp[0], udp[1]]), 54_321);
+        assert_eq!(u16::from_be_bytes([udp[2], udp[3]]), 9_999);
+        assert_eq!(usize::from(u16::from_be_bytes([udp[4], udp[5]])), udp.len());
+        assert_ne!(u16::from_be_bytes([udp[6], udp[7]]), 0);
+        assert_eq!(&udp[8..], payload);
+        let mut udp_checksum_input = Vec::with_capacity(12 + udp.len());
+        udp_checksum_input.extend_from_slice(&ip[12..20]);
+        udp_checksum_input.extend_from_slice(&[0, ip[9]]);
+        udp_checksum_input.extend_from_slice(&(udp.len() as u16).to_be_bytes());
+        udp_checksum_input.extend_from_slice(udp);
+        assert_eq!(internet_checksum_sum(&udp_checksum_input), u16::MAX);
+
+        let metrics = network.metrics();
+        assert_eq!(metrics.udp_datagrams_queued, 1);
+        assert_eq!(metrics.udp_bytes_queued, payload.len() as u64);
+        assert_eq!(metrics.udp_send_failures, 0);
+        assert_eq!(metrics.tunnel_packets_sent, 1);
+    }
+
+    #[test]
+    fn udp_sender_reuses_port_and_preserves_datagram_order() {
+        let mut network = UserspaceNetwork::new(NetworkConfig::default()).unwrap();
+        network.send_udp(54_321, 9_999, b"first").unwrap();
+        network.send_udp(54_321, 9_999, b"second").unwrap();
+        assert_eq!(network.udp_sockets.len(), 1);
+
+        network.poll(2_000);
+        let packets = network.drain_outbound().collect::<Vec<_>>();
+        let payloads = packets
+            .iter()
+            .map(|packet| {
+                let ip = ipv4_payload(packet);
+                let header_len = usize::from(ip[0] & 0x0f) * 4;
+                &ip[header_len + 8..]
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(payloads, [b"first".as_slice(), b"second".as_slice()]);
+    }
+
+    #[test]
+    fn raw_ip_packet_shares_outbound_framing_and_preserves_bytes() {
+        let mut network = UserspaceNetwork::new(NetworkConfig::default()).unwrap();
+        let packet = [
+            0x45, 0, 0, 20, 0, 1, 0, 0, 64, 1, 0, 0, 10, 5, 0, 3, 10, 5, 0, 10,
+        ];
+        network.queue_outbound_ip_packet(&packet).unwrap();
+
+        let framed = network.drain_outbound().collect::<Vec<_>>();
+        assert_eq!(framed.len(), 1);
+        assert_eq!(ipv4_payload(&framed[0]), packet);
+        let metrics = network.metrics();
+        assert_eq!(metrics.raw_ip_packets_queued, 1);
+        assert_eq!(metrics.raw_ip_bytes_queued, packet.len() as u64);
+        assert_eq!(metrics.raw_ip_send_failures, 0);
+        assert_eq!(metrics.tunnel_packets_sent, 1);
+    }
+
+    #[test]
+    fn smoltcp_output_precedes_later_tun_packet_in_shared_queue() {
+        let mut network = UserspaceNetwork::new(NetworkConfig::default()).unwrap();
+        network.send_udp(54_321, 9_999, b"adaptive").unwrap();
+        network.poll(1_000);
+        let tun_packet = [
+            0x45, 0, 0, 20, 0, 2, 0, 0, 64, 1, 0, 0, 10, 5, 0, 3, 10, 5, 0, 10,
+        ];
+        network.queue_outbound_ip_packet(&tun_packet).unwrap();
+
+        let framed = network.drain_outbound().collect::<Vec<_>>();
+        assert_eq!(framed.len(), 2);
+        assert_eq!(ipv4_payload(&framed[0])[9], 17, "adaptive UDP stays first");
+        assert_eq!(ipv4_payload(&framed[1]), tun_packet);
+    }
+
+    #[test]
+    fn raw_ip_packet_rejects_empty_and_oversized_input() {
+        let mut network = UserspaceNetwork::new(NetworkConfig::default()).unwrap();
+        assert_eq!(
+            network.queue_outbound_ip_packet(&[]),
+            Err(NetworkError::TunnelFraming(
+                crate::TunnelFramingError::EmptyPacket
+            ))
+        );
+        let oversized = vec![0; DEFAULT_MTU + 1];
+        assert_eq!(
+            network.queue_outbound_ip_packet(&oversized),
+            Err(NetworkError::IpPacketTooLarge {
+                length: DEFAULT_MTU + 1,
+                mtu: DEFAULT_MTU,
+            })
+        );
+        assert_eq!(network.metrics().raw_ip_send_failures, 2);
+        assert_eq!(network.drain_outbound().count(), 0);
+    }
+
+    #[test]
+    fn raw_ip_queue_is_bounded_before_packet_ownership_is_lost() {
+        let mut network = UserspaceNetwork::new(NetworkConfig::default()).unwrap();
+        let packet = [
+            0x45, 0, 0, 20, 0, 1, 0, 0, 64, 1, 0, 0, 10, 5, 0, 3, 10, 5, 0, 10,
+        ];
+        for _ in 0..super::DEVICE_PACKET_QUEUE_CAPACITY {
+            network.queue_outbound_ip_packet(&packet).unwrap();
+        }
+        assert_eq!(
+            network.queue_outbound_ip_packet(&packet),
+            Err(NetworkError::PacketQueueFull {
+                direction: "outbound",
+                capacity: super::DEVICE_PACKET_QUEUE_CAPACITY,
+            })
+        );
+        assert_eq!(network.metrics().outbound_queue_full, 1);
+        assert_eq!(
+            network.drain_outbound().count(),
+            super::DEVICE_PACKET_QUEUE_CAPACITY
+        );
+    }
+
+    #[test]
+    fn udp_sender_rejects_payload_larger_than_tunnel_mtu() {
+        let mut network = UserspaceNetwork::new(NetworkConfig::default()).unwrap();
+        let maximum = DEFAULT_MTU - 28;
+        let payload = vec![0; maximum + 1];
+        assert_eq!(
+            network.send_udp(54_321, 9_999, &payload),
+            Err(NetworkError::UdpPayloadTooLarge {
+                length: maximum + 1,
+                maximum,
+            })
+        );
+        assert_eq!(network.metrics().udp_send_failures, 1);
+        network.poll(3_000);
+        assert_eq!(network.drain_outbound().count(), 0);
     }
 
     #[test]

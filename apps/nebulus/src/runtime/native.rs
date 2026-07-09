@@ -310,7 +310,7 @@ mod worker {
         io::BufWriter,
         path::PathBuf,
         sync::{
-            atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
+            atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering},
             mpsc::{self, SyncSender, TrySendError},
             Arc, Mutex, OnceLock,
         },
@@ -326,14 +326,17 @@ mod worker {
             RxAggregateDiagnostics, RxDescriptorKind, RxPacketType,
         },
         AdaptiveLink, ChannelId, DiversityCombiner, DiversityDecision, DiversitySourceId,
-        DiversityStats, FecCounters, FrameLayout, PayloadRouteId, RadioPort, ReceiverRuntime,
-        TxRadioParams, WfbKeypair, WfbTransmitter, WfbTxKeypair, WifiFrame,
+        DiversityStats, FecCounters, FrameLayout, PayloadRouteId, ReceiverRuntime, WfbKeypair,
+        WfbTxKeypair, WifiFrame,
     };
     use openipc_rtl88xx::{
-        ChannelWidth, ChipFamily, DriverOptions, Jaguar3PowerTrackingState, MonitorOptions,
-        RadioConfig, RealtekDevice, RealtekTxDescriptor, RealtekTxOptions,
+        ChannelWidth, ChipFamily, DriverError, DriverOptions, Jaguar3PowerTrackingState,
+        MonitorOptions, RadioConfig, RealtekDevice, RealtekTxDescriptor, RealtekTxOptions,
     };
-    use openipc_uplink::{NetworkConfig, UserspaceNetwork};
+    use openipc_uplink::{
+        TxBatch, TxFailureKind, TxFrame, TxOutcome, UplinkEngine, UplinkEngineMetrics,
+        UserspaceNetwork,
+    };
     #[cfg(target_os = "android")]
     use openipc_video::AndroidSurfaceDecoder as AppDecoder;
     #[cfg(not(target_os = "android"))]
@@ -1131,15 +1134,22 @@ mod worker {
     }
 
     enum RadioCommand {
-        Transmit {
-            frame: Vec<u8>,
+        TransmitBatch {
+            frames: Vec<TxFrame>,
             options: RealtekTxOptions,
         },
+    }
+
+    struct RadioCompletion {
+        ticket: u64,
+        outcome: TxOutcome,
     }
 
     /// Keeps auxiliary USB OUT and radio maintenance off the RX thread.
     struct RadioWorker {
         sender: Option<SyncSender<RadioCommand>>,
+        completions: mpsc::Receiver<RadioCompletion>,
+        outstanding_frames: Arc<AtomicUsize>,
         worker: Option<JoinHandle<()>>,
     }
 
@@ -1166,6 +1176,9 @@ mod worker {
                 })
                 .transpose()?;
             let (sender, receiver) = mpsc::sync_channel(Self::QUEUE_CAPACITY);
+            let (completion_sender, completions) = mpsc::channel();
+            let outstanding_frames = Arc::new(AtomicUsize::new(0));
+            let worker_outstanding = Arc::clone(&outstanding_frames);
             let events = Arc::clone(events);
             let context = context.clone();
             let worker = std::thread::Builder::new()
@@ -1184,24 +1197,48 @@ mod worker {
                         };
                         let wait = interval.saturating_sub(last_maintenance.elapsed());
                         match receiver.recv_timeout(wait) {
-                            Ok(RadioCommand::Transmit { frame, options }) => {
-                                let result = endpoint.as_mut().map_or_else(
-                                    || Err("radio TX endpoint is unavailable".to_owned()),
-                                    |endpoint| {
-                                        device
-                                            .send_packet_on_tracked(endpoint, &frame, options)
-                                            .map(|_| ())
-                                            .map_err(|error| error.to_string())
-                                    },
-                                );
-                                if let Err(error) = result {
-                                    let now = Instant::now();
-                                    if last_tx_error_log.is_none_or(|last: Instant| {
-                                        now.duration_since(last) >= Duration::from_secs(1)
-                                    }) {
-                                        log(&events, &context, LogLevel::Warn, "radio-tx", error);
-                                        last_tx_error_log = Some(now);
+                            Ok(RadioCommand::TransmitBatch { frames, options }) => {
+                                for frame in frames {
+                                    let result = endpoint.as_mut().map_or_else(
+                                        || {
+                                            Err(DriverError::Nusb(
+                                                "radio TX endpoint is unavailable".to_owned(),
+                                            ))
+                                        },
+                                        |endpoint| {
+                                            device
+                                                .send_packet_on_tracked(
+                                                    endpoint,
+                                                    frame.bytes(),
+                                                    options,
+                                                )
+                                                .map(|_| ())
+                                        },
+                                    );
+                                    let outcome = match &result {
+                                        Ok(()) => TxOutcome::Completed,
+                                        Err(error) => tx_outcome(error),
+                                    };
+                                    if let Err(error) = result {
+                                        let now = Instant::now();
+                                        if last_tx_error_log.is_none_or(|last: Instant| {
+                                            now.duration_since(last) >= Duration::from_secs(1)
+                                        }) {
+                                            log(
+                                                &events,
+                                                &context,
+                                                LogLevel::Warn,
+                                                "radio-tx",
+                                                error.to_string(),
+                                            );
+                                            last_tx_error_log = Some(now);
+                                        }
                                     }
+                                    let _ = completion_sender.send(RadioCompletion {
+                                        ticket: frame.ticket(),
+                                        outcome,
+                                    });
+                                    worker_outstanding.fetch_sub(1, Ordering::AcqRel);
                                 }
                             }
                             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -1221,17 +1258,61 @@ mod worker {
                 .map_err(|error| format!("start radio background worker failed: {error}"))?;
             Ok(Some(Self {
                 sender: Some(sender),
+                completions,
+                outstanding_frames,
                 worker: Some(worker),
             }))
         }
 
-        fn enqueue(&self, frame: Vec<u8>, options: RealtekTxOptions) -> bool {
+        fn available_frame_slots(&self) -> usize {
+            Self::QUEUE_CAPACITY.saturating_sub(self.outstanding_frames.load(Ordering::Acquire))
+        }
+
+        fn enqueue_batch(&self, batch: &TxBatch, options: RealtekTxOptions) -> bool {
             let Some(sender) = self.sender.as_ref() else {
                 return false;
             };
-            sender
-                .try_send(RadioCommand::Transmit { frame, options })
-                .is_ok()
+            let frame_count = batch.frames().len();
+            if frame_count > self.available_frame_slots() {
+                return false;
+            }
+            self.outstanding_frames
+                .fetch_add(frame_count, Ordering::AcqRel);
+            if sender
+                .try_send(RadioCommand::TransmitBatch {
+                    frames: batch.frames().to_vec(),
+                    options,
+                })
+                .is_err()
+            {
+                self.outstanding_frames
+                    .fetch_sub(frame_count, Ordering::AcqRel);
+                return false;
+            }
+            true
+        }
+
+        fn drain_completions(&self) -> impl Iterator<Item = RadioCompletion> + '_ {
+            std::iter::from_fn(|| self.completions.try_recv().ok())
+        }
+    }
+
+    fn tx_outcome(error: &DriverError) -> TxOutcome {
+        match error {
+            DriverError::BulkOutShort { .. } => TxOutcome::Retryable(TxFailureKind::ShortWrite),
+            DriverError::Nusb(message) => {
+                let message = message.to_ascii_lowercase();
+                if message.contains("disconnect") || message.contains("no device") {
+                    TxOutcome::Fatal(TxFailureKind::Disconnected)
+                } else if message.contains("stall") {
+                    TxOutcome::Retryable(TxFailureKind::Stall)
+                } else if message.contains("timeout") || message.contains("cancel") {
+                    TxOutcome::Retryable(TxFailureKind::Timeout)
+                } else {
+                    TxOutcome::Retryable(TxFailureKind::Other)
+                }
+            }
+            _ => TxOutcome::Fatal(TxFailureKind::Other),
         }
     }
 
@@ -1246,11 +1327,9 @@ mod worker {
 
     struct UplinkRuntime {
         bridge: Option<crate::tun_bridge::TunBridge>,
-        network: Arc<Mutex<UserspaceNetwork>>,
-        transmitter: WfbTransmitter,
+        engine: UplinkEngine,
+        pending_adaptive: Option<Vec<u8>>,
         tx_options: RealtekTxOptions,
-        tx_params: TxRadioParams,
-        last_session_ms: Option<u64>,
         metrics: VpnMetrics,
     }
 
@@ -1266,21 +1345,12 @@ mod worker {
                 .unwrap_or_default();
             let keypair = WfbTxKeypair::from_bytes(&request.key_bytes)
                 .map_err(|error| format!("uplink transmit key is invalid: {error}"))?;
-            let transmitter = WfbTransmitter::new(
-                ChannelId::from_link_port(request.channel_id >> 8, RadioPort::TunnelTx),
-                keypair,
-                0,
-                1,
-                5,
-            )
-            .map_err(|error| error.to_string())?;
+            let engine = UplinkEngine::new(request.channel_id >> 8, keypair, 0, 1, 5)
+                .map_err(|error| error.to_string())?;
             Ok(Self {
                 bridge,
-                network: Arc::new(Mutex::new(
-                    UserspaceNetwork::new(NetworkConfig::default())
-                        .map_err(|error| error.to_string())?,
-                )),
-                transmitter,
+                engine,
+                pending_adaptive: None,
                 tx_options: RealtekTxOptions {
                     current_channel: request.channel,
                     configured_channel_width: channel_width(request.channel_width_mhz)?,
@@ -1289,8 +1359,6 @@ mod worker {
                     capabilities: Some(openipc_rtl88xx::TxCapabilities::for_family(chip)),
                     ..RealtekTxOptions::default()
                 },
-                tx_params: TxRadioParams::openipc_uplink_default(),
-                last_session_ms: None,
                 metrics: VpnMetrics {
                     active: request.vpn_enabled,
                     interface_name,
@@ -1300,13 +1368,7 @@ mod worker {
         }
 
         fn write_downlink(&mut self, payload: &[u8]) {
-            if self
-                .network
-                .lock()
-                .map_err(|_| ())
-                .and_then(|mut network| network.ingest_tunnel_payload(payload).map_err(|_| ()))
-                .is_err()
-            {
+            if self.engine.ingest_downlink(payload).is_err() {
                 self.metrics.errors += 1;
             }
             if let Some(bridge) = self.bridge.as_mut() {
@@ -1322,32 +1384,59 @@ mod worker {
         }
 
         fn network(&self) -> Arc<Mutex<UserspaceNetwork>> {
-            Arc::clone(&self.network)
+            self.engine.network()
         }
 
         fn network_metrics(&self) -> openipc_uplink::NetworkMetrics {
-            self.network.lock().map_or_else(
+            self.engine.network().lock().map_or_else(
                 |_| openipc_uplink::NetworkMetrics::default(),
                 |network| network.metrics(),
             )
         }
 
-        fn tick(&mut self, now: u64, radio: &RadioWorker, adaptive: Option<Vec<u8>>) {
-            let mut payloads = Vec::new();
-            match self.network.lock() {
-                Ok(mut network) => {
-                    network.poll(now);
-                    payloads.extend(network.drain_outbound());
+        fn engine_metrics(&self) -> UplinkEngineMetrics {
+            self.engine.metrics()
+        }
+
+        fn tick(&mut self, monotonic_ms: u64, radio: &RadioWorker, adaptive: Option<Vec<u8>>) {
+            for completion in radio.drain_completions() {
+                if self
+                    .engine
+                    .report_completion(completion.ticket, completion.outcome, monotonic_ms)
+                    .is_err()
+                {
+                    self.metrics.errors += 1;
                 }
-                Err(_) => self.metrics.errors += 1,
             }
             if let Some(payload) = adaptive {
-                payloads.push(payload);
+                self.pending_adaptive = Some(payload);
             }
+            if let Some(payload) = self.pending_adaptive.as_deref() {
+                if self
+                    .engine
+                    .send_udp(
+                        openipc_core::ADAPTIVE_LINK_GS_PORT,
+                        openipc_core::ADAPTIVE_LINK_VTX_PORT,
+                        payload,
+                    )
+                    .is_err()
+                {
+                    self.metrics.errors += 1;
+                } else {
+                    self.pending_adaptive = None;
+                }
+            }
+
             if let Some(bridge) = self.bridge.as_mut() {
-                for _ in 0..32 {
+                let limit = 32.min(self.engine.tunnel_capacity_remaining());
+                for _ in 0..limit {
                     match bridge.read_uplink() {
-                        Ok(Some(payload)) => payloads.push(payload),
+                        Ok(Some(packet)) => {
+                            if self.engine.enqueue_tunnel_packet(packet).is_err() {
+                                self.metrics.errors += 1;
+                                break;
+                            }
+                        }
                         Ok(None) => break,
                         Err(_) => {
                             self.metrics.errors += 1;
@@ -1356,44 +1445,22 @@ mod worker {
                     }
                 }
             }
-            if payloads.is_empty() {
-                return;
-            }
-            let session_due = self
-                .last_session_ms
-                .is_none_or(|last| now.saturating_sub(last) >= 1_000);
-            if session_due {
-                let frame = self.transmitter.session_radio_packet(self.tx_params);
-                if radio.enqueue(frame, self.tx_options) {
-                    self.last_session_ms = Some(now);
-                } else {
-                    self.metrics.errors += 1;
-                    return;
-                }
-            }
-            for payload in payloads {
-                let payload_bytes = payload.len() as u64;
-                match self
-                    .transmitter
-                    .radio_packets_for_payload(&payload, self.tx_params)
-                {
-                    Ok(frames) => {
-                        let mut sent = true;
-                        for frame in frames {
-                            if !radio.enqueue(frame, self.tx_options) {
-                                sent = false;
-                                self.metrics.errors += 1;
-                                break;
-                            }
-                        }
-                        if sent {
-                            self.metrics.uplink_packets += 1;
-                            self.metrics.uplink_bytes += payload_bytes;
-                        }
+
+            match self
+                .engine
+                .ready_batch(monotonic_ms, radio.available_frame_slots())
+            {
+                Ok(Some(batch)) if radio.enqueue_batch(&batch, self.tx_options) => {
+                    if self.engine.mark_submitted(&batch).is_err() {
+                        self.metrics.errors += 1;
                     }
-                    Err(_) => self.metrics.errors += 1,
                 }
+                Ok(_) => {}
+                Err(_) => self.metrics.errors += 1,
             }
+            let engine = self.engine.metrics();
+            self.metrics.uplink_packets = engine.aggregates_completed;
+            self.metrics.uplink_bytes = engine.aggregate_bytes_completed;
         }
     }
 
@@ -1771,6 +1838,7 @@ mod worker {
         };
         let radio =
             RadioWorker::start(Arc::clone(&device), chip, uplink.is_some(), events, context)?;
+        let uplink_started = Instant::now();
         let diversity_radio_workers = adapters
             .iter()
             .skip(1)
@@ -1893,9 +1961,10 @@ mod worker {
                         context,
                     );
                     let now = now_ms();
-                    let adaptive = link.feedback_due(now);
+                    let schedule_now = elapsed_ms(&uplink_started);
+                    let adaptive = link.feedback_due(schedule_now, now);
                     if let (Some(uplink), Some(radio)) = (uplink.as_mut(), radio.as_ref()) {
-                        uplink.tick(now, radio, adaptive);
+                        uplink.tick(schedule_now, radio, adaptive);
                     }
                     continue;
                 }
@@ -2132,6 +2201,9 @@ mod worker {
                     openipc_uplink::NetworkMetrics::default,
                     UplinkRuntime::network_metrics,
                 ),
+                uplink_tx: uplink
+                    .as_ref()
+                    .map_or_else(UplinkEngineMetrics::default, UplinkRuntime::engine_metrics),
                 routes: route_updates,
                 telemetry,
                 audio: route_processor.audio_stats(),
@@ -2170,9 +2242,10 @@ mod worker {
                     );
                 }
             }
-            let adaptive = link.feedback_due(now);
+            let schedule_now = elapsed_ms(&uplink_started);
+            let adaptive = link.feedback_due(schedule_now, now);
             if let (Some(uplink), Some(radio)) = (uplink.as_mut(), radio.as_ref()) {
-                uplink.tick(now, radio, adaptive);
+                uplink.tick(schedule_now, radio, adaptive);
             }
         }
 
@@ -2260,7 +2333,7 @@ mod worker {
             context,
             LogLevel::Info,
             "mock",
-            format!("Pre-recorded 1080p {mock_codec_label} + Opus RTP mock started"),
+            format!("Pre-recorded 4K60 {mock_codec_label} + Opus RTP mock started"),
         );
 
         let mut receiver = ReceiverRuntime::with_mock_video_route(
@@ -2549,16 +2622,16 @@ mod worker {
             self.quality.record_fec(now, total, recovered, lost);
         }
 
-        fn feedback_due(&mut self, now: u64) -> Option<Vec<u8>> {
+        fn feedback_due(&mut self, schedule_now: u64, payload_now: u64) -> Option<Vec<u8>> {
             if !self.adaptive_enabled
                 || self
                     .last_feedback_ms
-                    .is_some_and(|last| now.saturating_sub(last) < 100)
+                    .is_some_and(|last| schedule_now.saturating_sub(last) < 100)
             {
                 return None;
             }
-            self.last_feedback_ms = Some(now);
-            Some(self.quality.feedback_ip_packet(now))
+            self.last_feedback_ms = Some(schedule_now);
+            Some(self.quality.feedback_udp_payload(payload_now))
         }
     }
 
@@ -2598,6 +2671,10 @@ mod worker {
             .unwrap_or_default()
             .as_millis()
             .min(u128::from(u64::MAX)) as u64
+    }
+
+    fn elapsed_ms(started: &Instant) -> u64 {
+        started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
     }
 
     fn send(events: &super::EventQueue, context: &eframe::egui::Context, event: RuntimeEvent) {

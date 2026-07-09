@@ -924,13 +924,29 @@ impl RealtekDevice {
             })?;
         }
         self.record_tx_submission();
-        let attempts = 1;
+        let attempts = BULK_RETRY_ATTEMPTS;
         for attempt in 0..attempts {
             endpoint.submit(Buffer::from(transfer));
             let completion = endpoint.next_complete().await;
             match completion.status {
                 Ok(()) => {
                     log::trace!(target: "openipc_rtl88xx::usb", "bulk OUT complete endpoint=0x{:02x} bytes={}", self.bulk_out_ep, completion.actual_len);
+                    if completion.actual_len != transfer.len() {
+                        if attempt + 1 < attempts {
+                            let _ = endpoint.clear_halt().await;
+                            crate::time::sleep_ms(retry_delay_ms(attempt)).await;
+                            continue;
+                        }
+                        if terminate {
+                            self.tx_wedged
+                                .store(true, std::sync::atomic::Ordering::Release);
+                        }
+                        self.record_tx_failure(crate::TxErrorKind::ShortWrite);
+                        return Err(DriverError::BulkOutShort {
+                            expected: transfer.len(),
+                            actual: completion.actual_len,
+                        });
+                    }
                     if terminate
                         && !transfer.is_empty()
                         && transfer.len().is_multiple_of(endpoint.max_packet_size())
@@ -1024,13 +1040,29 @@ impl RealtekDevice {
             })?;
         }
         self.record_tx_submission();
-        let attempts = 1;
+        let attempts = BULK_RETRY_ATTEMPTS;
         for attempt in 0..attempts {
             let completion =
                 endpoint.transfer_blocking(Buffer::from(transfer), crate::device::tx_timeout());
             match completion.status {
                 Ok(()) => {
                     log::trace!(target: "openipc_rtl88xx::usb", "bulk OUT complete endpoint=0x{:02x} bytes={}", self.bulk_out_ep, completion.actual_len);
+                    if completion.actual_len != transfer.len() {
+                        if attempt + 1 < attempts {
+                            let _ = endpoint.clear_halt().wait();
+                            crate::time::sleep_ms(retry_delay_ms(attempt)).await;
+                            continue;
+                        }
+                        if terminate {
+                            self.tx_wedged
+                                .store(true, std::sync::atomic::Ordering::Release);
+                        }
+                        self.record_tx_failure(crate::TxErrorKind::ShortWrite);
+                        return Err(DriverError::BulkOutShort {
+                            expected: transfer.len(),
+                            actual: completion.actual_len,
+                        });
+                    }
                     if terminate
                         && !transfer.is_empty()
                         && transfer.len().is_multiple_of(endpoint.max_packet_size())

@@ -37,7 +37,9 @@ pub mod wfb_tx;
 /// WiFi channel/frequency helpers and sweep-list parsing.
 pub mod wifi;
 
-pub use adaptive::{AdaptiveLink, AdaptiveLinkSender, LinkQuality};
+pub use adaptive::{
+    AdaptiveLink, AdaptiveLinkSender, LinkQuality, ADAPTIVE_LINK_GS_PORT, ADAPTIVE_LINK_VTX_PORT,
+};
 pub use channel::{ChannelId, RadioPort};
 pub use diversity::{
     DiversityCombiner, DiversityDecision, DiversitySourceId, DiversitySourceStats, DiversityStats,

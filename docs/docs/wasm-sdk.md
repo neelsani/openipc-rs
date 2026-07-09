@@ -358,7 +358,10 @@ while (running) {
 ```
 
 `tickAndSend` only sends when the adaptive-link interval says a feedback packet
-is due. Call it from the receive loop after updating counters.
+is due. The supplied `Date.now()` value is embedded in feedback, while cadence,
+IP/TCP timers, and retries use a monotonic Performance clock internally.
+`tickAndSend` reports full WebUSB completions to the shared bounded retry
+scheduler. Call it from the receive loop after updating counters.
 
 ## Browser Requirements
 

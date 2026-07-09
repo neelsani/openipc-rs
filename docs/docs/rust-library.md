@@ -635,24 +635,35 @@ async fn configure_radio_experiments(
 
 ## Build Adaptive-Link Feedback
 
-The adaptive-link pieces live in `openipc-core`; the actual send operation comes
-from the driver.
+`openipc-core` builds the adaptive feedback payload. Queue it through
+`openipc-uplink` so adaptive feedback and SSH use the same userspace IP stack on
+native, Android, and WASM targets.
 
 ```rust
-use openipc_core::{AdaptiveLinkSender, WfbTxKeypair};
+use openipc_core::{
+    AdaptiveLink, ADAPTIVE_LINK_GS_PORT, ADAPTIVE_LINK_VTX_PORT,
+};
+use openipc_uplink::UplinkEngine;
 
-fn make_sender(key_bytes: &[u8]) -> Result<AdaptiveLinkSender, Box<dyn std::error::Error>> {
-    let keypair = WfbTxKeypair::from_bytes(key_bytes)?;
-    Ok(AdaptiveLinkSender::new(
-        openipc_core::channel::DEFAULT_LINK_ID,
-        keypair,
-        0,
-        1,
-        5,
-    )?)
+fn queue_feedback(
+    link: &mut AdaptiveLink,
+    uplink: &mut UplinkEngine,
+    unix_ms: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let payload = link.feedback_udp_payload(unix_ms);
+    uplink.send_udp(
+        ADAPTIVE_LINK_GS_PORT,
+        ADAPTIVE_LINK_VTX_PORT,
+        &payload,
+    )?;
+    Ok(())
 }
 ```
 
-The receiver loop records RSSI/SNR and FEC counters, then periodically asks the
-sender for an encrypted WFB uplink packet. Native and browser code use the same
-packet builder.
+The receiver loop records RSSI/SNR and FEC counters, queues feedback every 100
+ms, and asks `UplinkEngine::ready_batch` for one atomically admissible radio
+frame group. After the platform sink accepts the whole batch, call
+`mark_submitted`, then return each real USB completion with
+`report_completion`. Nebulus uses this shared path for adaptive-link, SSH, and
+optional native TUN traffic so those paths share one session epoch, bounded
+priority policy, packet aggregation, and retry accounting.

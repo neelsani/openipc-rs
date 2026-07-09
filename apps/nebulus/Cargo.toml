@@ -141,6 +141,9 @@ web-sys = { version = "0.3", features = [
     "console",
 ] }
 
+[dev-dependencies]
+crypto_box = "0.9"
+
 [package.metadata.android]
 package = "dev.neels.openipc.nebulus"
 apk_name = "Nebulus"

@@ -14,7 +14,7 @@ flowchart LR
         Core["openipc-core<br/>WFB, FEC, RTP, Annex-B, raw payloads"]
         Rtl["openipc-rtl88xx<br/>Realtek USB HAL"]
         Video["openipc-video<br/>platform H.264/H.265 decode"]
-        Uplink["openipc-uplink<br/>userspace IPv4/TCP and SSH"]
+        Uplink["openipc-uplink<br/>userspace IPv4/UDP/TCP and SSH"]
     end
 
     Nebulus["Nebulus<br/>egui native, Android, or WASM"] --> Rtl
@@ -45,8 +45,8 @@ flowchart LR
   returns bytes and packet sequence metadata; application crates decide whether
   those bytes are MAVLink, MSP, CRSF, IP, or something else.
 - Adaptive-link quality windows and feedback packet construction.
-- WFB tunnel framing, userspace IPv4/TCP, virtual async streams, SSH, and typed
-  VTX control in `openipc-uplink`.
+- WFB tunnel framing, userspace IPv4/UDP/TCP, virtual async streams, SSH, and
+  typed VTX control in `openipc-uplink`.
 - WFB uplink encryption, FEC parity generation, radiotap headers, and 802.11
   wrapping.
 
@@ -84,8 +84,8 @@ protocol details, then let each target own the APIs that make sense there.
   maintenance task allow the receive future to continue while those promises
   are pending.
 - Browser VTX control uses no browser socket. Rust/WASM feeds recovered tunnel
-  packets into smoltcp; Russh consumes the virtual TCP stream, and outbound IP
-  packets return through WebUSB bulk OUT.
+  packets into smoltcp; Russh consumes its virtual TCP stream, adaptive-link
+  uses its UDP socket, and outbound IP packets return through WebUSB bulk OUT.
 
 ### Desktop Application
 
@@ -141,13 +141,21 @@ Adaptive-link feedback flows the other direction:
 ```mermaid
 flowchart TD
     A["RSSI/SNR/FEC windows"] --> B["adaptive-link feedback text"]
-    B --> C["IPv4/UDP payload"]
-    C --> D["WFB encrypt/FEC"]
+    B --> C["smoltcp IPv4/UDP"]
+    T["Native OS TUN<br/>complete IP packet"] --> Q["UplinkEngine<br/>bounded priority queues"]
+    C --> Q
+    Q --> P["same-tick IP aggregation<br/>atomic FEC batch"]
+    P --> D["WFB encrypt/FEC"]
     D --> E["radiotap + 802.11 frame"]
     E --> F["Realtek TX descriptor"]
     F --> G["USB bulk OUT"]
 ```
 
-Nebulus uses one WFB tunnel TX session for adaptive feedback, internal VTX
-TCP/SSH traffic, and optional native TUN traffic. One transmitter per link and
-radio port avoids competing session epochs on port `0xa0`.
+Nebulus uses one `UplinkEngine`, one `UserspaceNetwork`, and one WFB tunnel TX
+session for adaptive feedback, internal VTX TCP/SSH traffic, and optional native
+TUN traffic. The OS-built TUN packet bypasses smoltcp socket processing but
+joins a lower-priority bounded queue before OpenIPC length framing. The engine
+aggregates small IP packets, atomically admits complete session/data/FEC frame
+groups, and retains failed frames for bounded retry until the native or WebUSB
+sink reports a real completion. One transmitter per link and radio port avoids
+competing session epochs on port `0xa0`.

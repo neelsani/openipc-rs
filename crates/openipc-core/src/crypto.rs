@@ -104,14 +104,13 @@ fn chacha20poly1305_legacy_tag(
         .try_into()
         .map_err(|_| CryptoError::InvalidKey)?;
 
-    let mut mac_data = Vec::with_capacity(
-        aad.len() + pad16_len(aad.len()) + ciphertext.len() + pad16_len(ciphertext.len()) + 16,
-    );
+    // WFB uses libsodium's original 64-bit-nonce construction, which predates
+    // the IETF layout. Its lengths immediately follow their respective byte
+    // strings and neither section is padded to a 16-byte boundary.
+    let mut mac_data = Vec::with_capacity(aad.len() + ciphertext.len() + 16);
     mac_data.extend_from_slice(aad);
-    mac_data.extend(std::iter::repeat_n(0, pad16_len(aad.len())));
-    mac_data.extend_from_slice(ciphertext);
-    mac_data.extend(std::iter::repeat_n(0, pad16_len(ciphertext.len())));
     mac_data.extend_from_slice(&(aad.len() as u64).to_le_bytes());
+    mac_data.extend_from_slice(ciphertext);
     mac_data.extend_from_slice(&(ciphertext.len() as u64).to_le_bytes());
 
     let tag = Poly1305::new((&poly_key).into()).compute_unpadded(&mac_data);
@@ -134,10 +133,6 @@ fn apply_chacha20_legacy_keystream(
     cipher.seek(offset);
     cipher.apply_keystream(data);
     Ok(())
-}
-
-const fn pad16_len(len: usize) -> usize {
-    (16 - (len % 16)) % 16
 }
 
 #[cfg(test)]
@@ -169,6 +164,31 @@ mod tests {
         assert_eq!(
             decrypt_chacha20poly1305_legacy(&key, &nonce, b"aad", &encrypted).unwrap_err(),
             CryptoError::AuthenticationFailed
+        );
+    }
+
+    #[test]
+    fn matches_libsodium_original_construction_vector() {
+        // libsodium test/default/aead_chacha20poly1305.{c,exp}. This guards
+        // against accidentally using the padded IETF Poly1305 input layout.
+        let key = [
+            0x42, 0x90, 0xbc, 0xb1, 0x54, 0x17, 0x35, 0x31, 0xf3, 0x14, 0xaf, 0x57, 0xf3, 0xbe,
+            0x3b, 0x50, 0x06, 0xda, 0x37, 0x1e, 0xce, 0x27, 0x2a, 0xfa, 0x1b, 0x5d, 0xbd, 0xd1,
+            0x10, 0x0a, 0x10, 0x07,
+        ];
+        let nonce = [0xcd, 0x7c, 0xf6, 0x7b, 0xe3, 0x9c, 0x79, 0x4a];
+        let aad = [0x87, 0xe2, 0x29, 0xd4, 0x50, 0x08, 0x45, 0xa0, 0x79, 0xc0];
+        let plaintext = [0x86, 0xd0, 0x99, 0x74, 0x84, 0x0b, 0xde, 0xd2, 0xa5, 0xca];
+        let expected = [
+            0xe3, 0xe4, 0x46, 0xf7, 0xed, 0xe9, 0xa1, 0x9b, 0x62, 0xa4, 0x67, 0x7d, 0xab, 0xf4,
+            0xe3, 0xd2, 0x4b, 0x87, 0x6b, 0xb2, 0x84, 0x75, 0x38, 0x96, 0xe1, 0xd6,
+        ];
+
+        let encrypted = encrypt_chacha20poly1305_legacy(&key, &nonce, &aad, &plaintext).unwrap();
+        assert_eq!(encrypted, expected);
+        assert_eq!(
+            decrypt_chacha20poly1305_legacy(&key, &nonce, &aad, &expected).unwrap(),
+            plaintext
         );
     }
 }

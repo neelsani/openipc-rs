@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.35 - 2026-07-09
+
+### Features
+- Feat: add comprehensive receiver diagnostics (90ce016)
+
+### Fixes
+- Fix(core): match libsodium WFB authentication (56e6774)
+
+
 ## 0.1.34 - 2026-07-08
 
 ### Changes

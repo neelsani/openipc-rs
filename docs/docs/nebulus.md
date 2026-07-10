@@ -274,13 +274,18 @@ Run `trunk serve` without `--release` to expose the development-only
 **H.264 mock** or **H.265 mock** button. The codec follows Setup → Media → Codec
 preference; `Auto` uses H.265 because that is the normal OpenIPC default. The
 same button is available from a debug native build started with
-`cargo run -p nebulus --bin nebulus`. It loops embedded, pre-recorded
-3840x2160p60 video with 48 kHz Opus audio. Rust packetizes and interleaves both
-tracks as RTP. Video runs through the normal depacketizer and production
-decode/presentation path; audio runs through the configured mixed-audio route,
+`cargo run -p nebulus --bin nebulus`. Its small arrow selects 720p, 1080p, or
+4K plus a 30, 60, 120, or 240 FPS RTP cadence. The choice is explicit and
+behaves identically on every target. Rust packetizes and interleaves the chosen
+pre-recorded video fixture with 48 kHz Opus as RTP. Video runs through the
+normal depacketizer and production decode/presentation path; audio runs through the configured mixed-audio route,
 Opus decoder, volume control, and output queue. WASM uses WebCodecs only for
 video decoding; the mock does not use an encoder. It requires no USB adapter
-and is omitted from release builds.
+and is omitted from release builds. Video fixtures are not part of the
+crates.io package: a source checkout uses its local copies, packaged native
+debug builds download and cache only the selected resolution/codec, and the
+browser uses its HTTP cache. Nebulus verifies a pinned SHA-256 before parsing
+any downloaded fixture.
 
 ## Android
 

@@ -204,7 +204,10 @@ impl ReceiverInfo {
     }
 
     #[cfg(debug_assertions)]
-    pub(crate) fn codec_mock(codec: openipc_core::Codec) -> Self {
+    pub(crate) fn codec_mock(
+        codec: openipc_core::Codec,
+        config: super::codec_mock::MockVideoConfig,
+    ) -> Self {
         let codec = match codec {
             openipc_core::Codec::H264 => "H.264",
             openipc_core::Codec::H265 => "H.265",
@@ -213,7 +216,7 @@ impl ReceiverInfo {
             transport: ReceiverTransport::Synthetic,
             id: "codec-mock".to_owned(),
             source_id: 0,
-            label: format!("Pre-recorded 4K60 {codec} + Opus"),
+            label: format!("Pre-recorded {} {codec} + Opus", config.label()),
             vendor_id: None,
             product_id: None,
             chip: "Synthetic A/V RTP".to_owned(),
@@ -283,6 +286,8 @@ pub(crate) struct StartRequest {
     pub(crate) minimum_epoch: u64,
     pub(crate) transfer_size: usize,
     pub(crate) codec_preference: CodecPreference,
+    #[cfg(debug_assertions)]
+    pub(crate) mock_video: super::codec_mock::MockVideoConfig,
     pub(crate) rtp_reorder: bool,
     pub(crate) adaptive_link: bool,
     pub(crate) tx_power: u8,

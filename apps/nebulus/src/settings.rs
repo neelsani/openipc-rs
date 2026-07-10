@@ -1169,11 +1169,14 @@ mod tests {
 
     use crate::telemetry::MavlinkSigningPolicy;
 
+    #[cfg(debug_assertions)]
+    use super::CodecPreference;
     use super::{
-        CodecPreference, GuiTheme, HudMetric, OsdProfile, PayloadRouteSettings, ReceiverProfile,
-        ReceiverSource, RouteAction, Settings, DEFAULT_UDP_RTP_PORT,
+        GuiTheme, HudMetric, OsdProfile, PayloadRouteSettings, ReceiverProfile, ReceiverSource,
+        RouteAction, Settings, DEFAULT_UDP_RTP_PORT,
     };
 
+    #[cfg(debug_assertions)]
     #[test]
     fn codec_mock_uses_h265_for_auto_and_honors_explicit_h264() {
         assert_eq!(

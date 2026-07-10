@@ -8,6 +8,8 @@ mod uplink_control;
 
 #[cfg(debug_assertions)]
 pub(crate) mod codec_mock;
+#[cfg(debug_assertions)]
+pub(crate) mod mock_fixture;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;

@@ -18,6 +18,8 @@ use super::{
 };
 
 const STALL_RECOVERY_AFTER: Duration = Duration::from_millis(500);
+const BACKPRESSURE_RECOVERY_WINDOW: Duration = Duration::from_millis(100);
+const BACKPRESSURE_RECOVERY_DROPS: u8 = 3;
 
 struct PendingFrame {
     timestamp: VideoTimestamp,
@@ -58,6 +60,8 @@ pub struct AndroidSurfaceDecoder {
     pending: HashMap<u64, PendingFrame>,
     next_token: u64,
     backpressure_warning_emitted: bool,
+    last_backpressure_at: Option<Instant>,
+    backpressure_drops_in_window: u8,
     capabilities: DecoderCapabilities,
 }
 
@@ -82,6 +86,8 @@ impl AndroidSurfaceDecoder {
             pending: HashMap::new(),
             next_token: 1,
             backpressure_warning_emitted: false,
+            last_backpressure_at: None,
+            backpressure_drops_in_window: 0,
             capabilities: Self::probe_capabilities(),
         })
     }
@@ -149,6 +155,8 @@ impl AndroidSurfaceDecoder {
         self.active_config = Some(config);
         self.waiting_for_keyframe = true;
         self.backpressure_warning_emitted = false;
+        self.last_backpressure_at = None;
+        self.backpressure_drops_in_window = 0;
         self.stats.update(|stats| {
             stats.reconfigurations += 1;
             stats.frames_in_flight = 0;
@@ -205,12 +213,30 @@ impl AndroidSurfaceDecoder {
     }
 
     fn record_backpressure_drop(&mut self) {
+        let now = Instant::now();
+        if self
+            .last_backpressure_at
+            .is_none_or(|last| now.duration_since(last) > BACKPRESSURE_RECOVERY_WINDOW)
+        {
+            self.backpressure_drops_in_window = 0;
+        }
+        self.last_backpressure_at = Some(now);
+        self.backpressure_drops_in_window = self.backpressure_drops_in_window.saturating_add(1);
         if !self.backpressure_warning_emitted {
             log::warn!(
                 target: "openipc_video::mediacodec_surface",
                 "decoder backpressure; dropping the newest access unit to preserve latency"
             );
             self.backpressure_warning_emitted = true;
+        }
+        if self.backpressure_drops_in_window >= BACKPRESSURE_RECOVERY_DROPS {
+            log::warn!(
+                target: "openipc_video::mediacodec_surface",
+                "sustained decoder backpressure; suppressing dependent access units until the next keyframe"
+            );
+            self.waiting_for_keyframe = true;
+            self.last_backpressure_at = None;
+            self.backpressure_drops_in_window = 0;
         }
         let frames_in_flight = self.pending.len();
         self.stats.update(|stats| {
@@ -236,6 +262,8 @@ impl AndroidSurfaceDecoder {
             self.pending.clear();
             self.waiting_for_keyframe = true;
             self.backpressure_warning_emitted = false;
+            self.last_backpressure_at = None;
+            self.backpressure_drops_in_window = 0;
             self.stats.update(|stats| {
                 stats.decode_errors += 1;
                 stats.frames_in_flight = 0;
@@ -339,6 +367,9 @@ impl VideoDecoder for AndroidSurfaceDecoder {
         }
         if frame.keyframe {
             self.waiting_for_keyframe = false;
+            self.last_backpressure_at = None;
+            self.backpressure_drops_in_window = 0;
+            self.backpressure_warning_emitted = false;
         }
         Ok(if reconfigured {
             SubmitOutcome::Reconfigured
@@ -362,6 +393,9 @@ impl VideoDecoder for AndroidSurfaceDecoder {
         self.active_config = None;
         self.active_dimensions = None;
         self.waiting_for_keyframe = true;
+        self.last_backpressure_at = None;
+        self.backpressure_drops_in_window = 0;
+        self.backpressure_warning_emitted = false;
         self.stats.update(|stats| stats.frames_in_flight = 0);
         Ok(())
     }

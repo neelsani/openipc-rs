@@ -183,6 +183,8 @@ pub struct NebulusApp {
     pub(crate) data_page: crate::ui::DataPage,
     pub(crate) monitor_page: crate::ui::MonitorPage,
     pub(crate) runtime: Runtime,
+    #[cfg(debug_assertions)]
+    pub(crate) mock_video: crate::runtime::codec_mock::MockVideoConfig,
     runtime_events: Vec<RuntimeEvent>,
     pub(crate) texture: Option<egui::TextureHandle>,
     pub(crate) video_renderer: Option<crate::video::PlatformVideoRenderer>,
@@ -292,6 +294,8 @@ impl NebulusApp {
             data_page: crate::ui::DataPage::Routes,
             monitor_page: crate::ui::MonitorPage::Metrics,
             runtime: Runtime::new(context.egui_ctx.clone()),
+            #[cfg(debug_assertions)]
+            mock_video: crate::runtime::codec_mock::MockVideoConfig::default(),
             runtime_events: Vec::with_capacity(16),
             texture: None,
             video_renderer,
@@ -418,6 +422,8 @@ impl NebulusApp {
             minimum_epoch: self.settings.minimum_epoch,
             transfer_size: self.settings.transfer_size,
             codec_preference: self.settings.codec_preference,
+            #[cfg(debug_assertions)]
+            mock_video: self.mock_video,
             rtp_reorder: self.settings.rtp_reorder,
             adaptive_link: self.settings.adaptive_link
                 && self.settings.receiver_source == crate::settings::ReceiverSource::Usb,
@@ -2221,9 +2227,13 @@ impl eframe::App for NebulusApp {
             self.process_tray(context);
             self.process_events(context);
         }
-        // Video frames and coalesced runtime events request repaints directly.
-        // A fixed 60 Hz wakeup wastes CPU/GPU time and competes with decode on
-        // mobile devices when no new frame is ready.
+        // SurfaceTexture is a latest-frame mailbox independent of egui's event
+        // queue. Keep Android painting while video is live so coalesced worker
+        // wakeups cannot reduce presentation to a fraction of decoder output.
+        #[cfg(target_os = "android")]
+        if self.state == ReceiverState::Receiving && self.frame_size.is_some() {
+            context.request_repaint();
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

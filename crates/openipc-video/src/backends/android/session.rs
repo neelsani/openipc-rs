@@ -19,6 +19,7 @@ use super::AndroidVideoFrame;
 const BUFFER_FLAG_KEY_FRAME: u32 = 1;
 const BUFFER_FLAG_CODEC_CONFIG: u32 = 2;
 const MAX_DRAINED_OUTPUTS: usize = 64;
+const INPUT_BUFFER_WAIT: Duration = Duration::from_millis(8);
 
 #[derive(Default)]
 pub(crate) struct SessionPoll {
@@ -111,12 +112,11 @@ impl MediaCodecSession {
         keyframe: bool,
     ) -> Result<SessionSubmit, VideoError> {
         let mut completed = self.poll()?;
-        // A very short wait avoids a false backpressure event while MediaCodec
-        // returns an input slot, without permitting an encoded queue to grow.
-        let input_wait = Duration::from_millis(2);
+        // Absorb normal input-slot handoff jitter instead of dropping one
+        // reference picture. This remains below half of a 60 Hz frame interval.
         let input = self
             .codec
-            .dequeue_input_buffer(input_wait)
+            .dequeue_input_buffer(INPUT_BUFFER_WAIT)
             .map_err(|error| android_error("AMediaCodec_dequeueInputBuffer", error))?;
         let DequeuedInputBufferResult::Buffer(mut input) = input else {
             return Ok(SessionSubmit::Backpressure(completed));

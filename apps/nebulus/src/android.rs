@@ -204,25 +204,6 @@ pub(crate) fn set_current_thread_priority(priority: i32) -> Result<(), String> {
     .map_err(|error: jni::errors::Error| format!("set Android thread priority failed: {error}"))
 }
 
-/// Return whether Android appears to be running in the SDK emulator.
-pub(crate) fn is_probably_emulator() -> Result<bool, String> {
-    let app = app()?;
-    let vm = java_vm(&app)?;
-    vm.attach_current_thread(|env| {
-        let raw_activity = app.activity_as_ptr() as jni::sys::jobject;
-        // SAFETY: android-activity owns this activity global reference.
-        let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&raw_activity)? };
-        env.call_method(
-            &activity,
-            jni_str!("isProbablyEmulator"),
-            jni_sig!("()Z"),
-            &[],
-        )?
-        .z()
-    })
-    .map_err(|error: jni::errors::Error| format!("detect Android emulator failed: {error}"))
-}
-
 pub(crate) fn open_key_file(context: eframe::egui::Context) -> Result<(), String> {
     *KEY_FILE_CONTEXT
         .get_or_init(|| Mutex::new(None))
@@ -345,6 +326,42 @@ pub(crate) fn recordings_directory() -> Result<std::path::PathBuf, String> {
         .internal_data_path()
         .map(|root| root.join("nebulus").join("recordings"))
         .ok_or_else(|| "Android internal storage is unavailable".to_owned())
+}
+
+/// App-private cache for development codec fixtures.
+#[cfg(debug_assertions)]
+pub(crate) fn mock_fixture_directory() -> Result<std::path::PathBuf, String> {
+    app()?
+        .internal_data_path()
+        .map(|root| root.join("nebulus").join("mock"))
+        .ok_or_else(|| "Android internal storage is unavailable".to_owned())
+}
+
+/// Download a bounded binary fixture through Android's platform TLS stack.
+#[cfg(debug_assertions)]
+pub(crate) fn download_mock_fixture(url: &str, maximum_bytes: usize) -> Result<Vec<u8>, String> {
+    let maximum_bytes = i32::try_from(maximum_bytes)
+        .map_err(|_| "mock fixture byte limit exceeds Android's JNI range".to_owned())?;
+    let app = app()?;
+    let vm = java_vm(&app)?;
+    vm.attach_current_thread(|env| {
+        let raw_activity = app.activity_as_ptr() as jni::sys::jobject;
+        // SAFETY: android-activity owns this activity global reference.
+        let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&raw_activity)? };
+        let url = env.new_string(url)?;
+        let array = env
+            .call_method(
+                &activity,
+                jni_str!("downloadMockFixture"),
+                jni_sig!("(Ljava/lang/String;I)[B"),
+                &[JValue::Object(url.as_ref()), JValue::Int(maximum_bytes)],
+            )?
+            .check_null()?
+            .l()?;
+        let array = env.cast_local::<JByteArray>(array)?;
+        env.convert_byte_array(&array)
+    })
+    .map_err(|error: jni::errors::Error| format!("Android mock download failed: {error}"))
 }
 
 pub(crate) fn take_key_file_result() -> Option<Result<SelectedKeyFile, String>> {

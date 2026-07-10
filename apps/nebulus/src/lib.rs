@@ -45,6 +45,33 @@ pub fn create_app(context: &eframe::CreationContext<'_>) -> NebulusApp {
     NebulusApp::new(context)
 }
 
+/// Run Nebulus on desktop without exposing eframe types to the binary crate.
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+pub fn run_desktop() -> Result<(), String> {
+    init_logging();
+    let wgpu_options = eframe::egui_wgpu::WgpuConfiguration::default().with_surface_config(
+        eframe::egui_wgpu::SurfaceConfig {
+            present_mode: eframe::wgpu::PresentMode::AutoNoVsync,
+            desired_maximum_frame_latency: Some(1),
+        },
+    );
+    eframe::run_native(
+        "Nebulus",
+        eframe::NativeOptions {
+            viewport: eframe::egui::ViewportBuilder::default()
+                .with_app_id("dev.neels.openipc.nebulus")
+                .with_title("Nebulus")
+                .with_inner_size([1360.0, 860.0])
+                .with_min_inner_size([760.0, 540.0]),
+            wgpu_options,
+            dithering: false,
+            ..Default::default()
+        },
+        Box::new(|context| Ok(Box::new(create_app(context)))),
+    )
+    .map_err(|error| error.to_string())
+}
+
 /// Android NativeActivity entrypoint used by cargo-apk/xbuild packages.
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]

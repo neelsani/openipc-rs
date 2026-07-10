@@ -458,7 +458,7 @@ fn hex_preview(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
     use std::time::Duration;
 
     use openipc_core::{
@@ -466,10 +466,10 @@ mod tests {
         WfbKeypair,
     };
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
     use super::configure_mock_receiver;
     use super::{configure_receiver, RouteProcessor};
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
     use crate::settings::RouteAction;
     use crate::{runtime::StartRequest, settings::Settings, telemetry::crc8_dvb_s2};
 
@@ -489,6 +489,8 @@ mod tests {
             minimum_epoch: settings.minimum_epoch,
             transfer_size: settings.transfer_size,
             codec_preference: settings.codec_preference,
+            #[cfg(debug_assertions)]
+            mock_video: crate::runtime::codec_mock::MockVideoConfig::default(),
             rtp_reorder: false,
             adaptive_link: false,
             tx_power: settings.tx_power,
@@ -528,7 +530,7 @@ mod tests {
         assert_eq!(options.rtp_payload_taps[0].route_id, PayloadRouteId::new(3));
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
     #[test]
     fn mock_receiver_can_delegate_raw_video_rtp_to_the_decode_worker() {
         let settings = Settings::default();
@@ -562,7 +564,7 @@ mod tests {
         assert!(raw_video_packets > 0);
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
     #[test]
     fn mock_udp_route_forwards_the_raw_mixed_rtp_packet() {
         let listener = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();

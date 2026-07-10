@@ -2175,12 +2175,33 @@ mod worker {
         let events = &handles.events;
         let context = &handles.context;
         let recording_audio_config = route_processor.recording_audio_config();
-        use crate::runtime::{codec_mock::MockAvStream, route_runtime::configure_mock_receiver};
+        use crate::runtime::{
+            codec_mock::MockAvStream, mock_fixture, route_runtime::configure_mock_receiver,
+        };
         let mock_codec = request.codec_preference.mock_codec();
         let mock_codec_label = match mock_codec {
             openipc_core::Codec::H264 => "H.264",
             openipc_core::Codec::H265 => "H.265",
         };
+
+        log(
+            events,
+            context,
+            LogLevel::Info,
+            "mock",
+            format!(
+                "Loading {} {mock_codec_label} development fixture",
+                request.mock_video.label()
+            ),
+        );
+        let fixture = mock_fixture::load(request.mock_video, mock_codec).await?;
+        log(
+            events,
+            context,
+            LogLevel::Info,
+            "mock",
+            format!("Codec fixture ready from {}", fixture.origin),
+        );
 
         let decoder = WebDecodeWorker::new(
             request.rtp_reorder,
@@ -2206,7 +2227,10 @@ mod worker {
             events,
             context,
             RuntimeEvent::Connected {
-                receivers: vec![crate::runtime::ReceiverInfo::codec_mock(mock_codec)],
+                receivers: vec![crate::runtime::ReceiverInfo::codec_mock(
+                    mock_codec,
+                    request.mock_video,
+                )],
                 decoder: worker_decoder_environment(),
             },
         );
@@ -2216,7 +2240,10 @@ mod worker {
             context,
             LogLevel::Info,
             "mock",
-            format!("Pre-recorded 4K60 {mock_codec_label} + Opus RTP/WebCodecs mock started"),
+            format!(
+                "Pre-recorded {} {mock_codec_label} + Opus RTP/WebCodecs mock started",
+                request.mock_video.label()
+            ),
         );
 
         let channel = ChannelId::default_video();
@@ -2229,7 +2256,8 @@ mod worker {
             options.raw_payload_routes.push(VIDEO_ROUTE);
         }
         let runtime = receiver.video_runtime();
-        let mut source = MockAvStream::new(mock_codec)?;
+        let mut source =
+            MockAvStream::new_with_config(mock_codec, request.mock_video, fixture.bytes)?;
         let mock_started = Instant::now();
         let mut payload_sequence = 1u64;
         let mut recorder: Option<BrowserRecorder> = None;

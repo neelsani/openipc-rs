@@ -166,11 +166,13 @@ pub(crate) fn mux_mp4<W: Write>(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(debug_assertions)]
     use openipc_core::{RtpDepacketizer, RtpHeader};
 
+    use super::frame_delta_ticks;
+    #[cfg(debug_assertions)]
     use super::{
-        frame_delta_ticks, mux_mp4, AudioTrackConfig, Mp4TrackConfig, RecordedAccessUnit,
-        RecordedAudioPacket,
+        mux_mp4, AudioTrackConfig, Mp4TrackConfig, RecordedAccessUnit, RecordedAudioPacket,
     };
 
     #[test]
@@ -185,16 +187,19 @@ mod tests {
         assert_eq!(frame_delta_ticks(10, 200_000, 1_530), 1_530);
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     fn muxes_h264_and_opus_tracks() {
         assert_mock_av_mux(openipc_core::Codec::H264, b"avc1");
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     fn muxes_h265_and_opus_tracks() {
         assert_mock_av_mux(openipc_core::Codec::H265, b"hvc1");
     }
 
+    #[cfg(debug_assertions)]
     fn assert_mock_av_mux(codec: openipc_core::Codec, video_sample_entry: &[u8; 4]) {
         let mut source = crate::runtime::codec_mock::MockAvStream::new(codec).unwrap();
         let mut depacketizer = RtpDepacketizer::new();

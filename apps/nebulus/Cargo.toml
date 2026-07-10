@@ -8,6 +8,7 @@ description = "Low-latency native OpenIPC FPV ground station built with egui"
 publish = true
 readme = "README.md"
 default-run = "nebulus"
+exclude = ["assets/*.h264", "assets/*.h265"]
 
 [features]
 default = []

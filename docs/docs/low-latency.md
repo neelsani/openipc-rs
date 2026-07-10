@@ -57,11 +57,17 @@ MediaCodec realtime/low-latency configuration.
 Nebulus polls native decoder output at most 2 ms apart after submission begins,
 independently of whether the next USB aggregate has completed. This prevents a
 50 ms idle USB wait from capping a 60 FPS MediaCodec stream at 20 observed or
-presented frames per second. Physical Android devices permit eight in-flight
-frames for normal hardware pipeline depth. The Android SDK emulator permits
-twelve because Goldfish's software codec advertises an eight-frame output
-delay. These are decoder-work bounds, not playback queues; output remains
-latest-only.
+presented frames per second. Android permits eight in-flight frames for normal
+decoder pipeline depth. This is a decoder-work bound, not a playback queue;
+output remains latest-only. The emulator and physical devices use the same
+decoder policy and receive the same encoded stream.
+
+Android's SurfaceTexture is a latest-frame mailbox outside egui's event queue.
+While receiving, Nebulus continuously repaints that surface at the display
+cadence; decoder notifications may be coalesced without reducing presentation
+FPS. MediaCodec input-slot waits are bounded to less than half of a 60 Hz frame
+so a normal slot handoff does not drop a reference picture, while sustained
+pressure still drops newest input and waits for a clean random-access frame.
 
 ## Browser Path
 

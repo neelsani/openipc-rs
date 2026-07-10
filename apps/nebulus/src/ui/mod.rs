@@ -479,19 +479,7 @@ fn receiver_buttons(app: &mut NebulusApp, ui: &mut egui::Ui) {
                 app.start_receiver(ui.ctx());
             }
             #[cfg(debug_assertions)]
-            if action_button(
-                ui,
-                match app.settings.codec_preference.mock_codec() {
-                    openipc_core::Codec::H264 => "H.264 mock",
-                    openipc_core::Codec::H265 => "H.265 mock",
-                },
-                ActionTone::Neutral,
-            )
-            .on_hover_text("Uses the codec preference under Setup > Media")
-            .clicked()
-            {
-                app.start_codec_mock(ui.ctx());
-            }
+            mock_button(app, ui);
         }
         ReceiverState::Receiving | ReceiverState::Ready => {
             if app.state == ReceiverState::Receiving {
@@ -522,6 +510,70 @@ fn receiver_buttons(app: &mut NebulusApp, ui: &mut egui::Ui) {
             );
         }
     }
+}
+
+#[cfg(debug_assertions)]
+fn mock_button(app: &mut NebulusApp, ui: &mut egui::Ui) {
+    use crate::runtime::codec_mock::{MockResolution, MOCK_FPS_OPTIONS};
+
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        let codec = match app.settings.codec_preference.mock_codec() {
+            openipc_core::Codec::H264 => "H.264 mock",
+            openipc_core::Codec::H265 => "H.265 mock",
+        };
+        if action_button(ui, codec, ActionTone::Neutral)
+            .on_hover_text(format!(
+                "Start the {} mock; codec follows Setup > Media",
+                app.mock_video.label()
+            ))
+            .clicked()
+        {
+            app.start_codec_mock(ui.ctx());
+        }
+
+        let fill = ui.visuals().widgets.inactive.weak_bg_fill;
+        let stroke = ui.visuals().widgets.inactive.bg_stroke.color;
+        let arrow = egui::Button::new("")
+            .fill(fill)
+            .stroke(Stroke::new(1.0, stroke))
+            .corner_radius(4)
+            .min_size(egui::vec2(22.0, 27.0));
+        let mut config = egui::containers::menu::MenuConfig::default();
+        config.close_behavior = egui::PopupCloseBehavior::CloseOnClickOutside;
+        let (response, _) = egui::containers::menu::MenuButton::from_button(arrow)
+            .config(config)
+            .ui(ui, |ui| {
+                ui.set_min_width(170.0);
+                ui.label(egui::RichText::new("Resolution").strong());
+                for resolution in MockResolution::ALL {
+                    ui.selectable_value(
+                        &mut app.mock_video.resolution,
+                        resolution,
+                        resolution.label(),
+                    );
+                }
+                ui.separator();
+                ui.label(egui::RichText::new("Frame rate").strong());
+                ui.horizontal_wrapped(|ui| {
+                    for fps in MOCK_FPS_OPTIONS {
+                        ui.selectable_value(&mut app.mock_video.fps, fps, format!("{fps} FPS"));
+                    }
+                });
+            });
+        let center = response.rect.center();
+        let color = ui.style().interact(&response).fg_stroke.color;
+        ui.painter().add(egui::Shape::convex_polygon(
+            vec![
+                center + egui::vec2(-3.5, -1.5),
+                center + egui::vec2(3.5, -1.5),
+                center + egui::vec2(0.0, 2.5),
+            ],
+            color,
+            Stroke::NONE,
+        ));
+        response.on_hover_text(format!("Configure {} mock", app.mock_video.label()));
+    });
 }
 
 #[derive(Clone, Copy)]

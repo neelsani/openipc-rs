@@ -276,9 +276,11 @@ latency. Android requests its fastest same-resolution display mode, disables
 egui vsync, raises the receive thread priority, and configures MediaCodec for
 low latency. Once decoding starts, the receiver polls platform output at most
 2 ms apart instead of tying presentation to the cadence of USB completions.
-Physical devices allow eight MediaCodec frames in flight to accommodate normal
-hardware pipeline depth; the SDK emulator allows twelve for Goldfish's delayed
-software codec. Neither limit is a playback queue: output remains latest-only.
+Android allows eight MediaCodec frames in flight to accommodate normal pipeline
+depth without becoming a playback queue. Nebulus continuously presents the
+decoder's latest SurfaceTexture while receiving so worker-event coalescing
+cannot cap Android rendering below the display cadence. Output remains
+latest-only.
 Native audio requests a 256-frame output buffer and keeps no more than 20 ms of
 queued PCM.
 
@@ -345,10 +347,16 @@ transmitter but does not require Wintun or an enabled VPN route.
 
 Debug native and WASM builds also show **H.264 mock** or **H.265 mock**, based
 on the codec preference under Setup → Media. `Auto` selects H.265 to match the
-usual OpenIPC stream. The mock loops embedded, pre-recorded 3840x2160p60 video
-and 48 kHz Opus fixtures, packetizes both tracks as RTP, and interleaves them
-on their media clocks. Native debug builds can start it automatically for
-profiling:
+usual OpenIPC stream. The adjacent arrow selects 720p, 1080p, or 4K and a
+30/60/120/240 FPS RTP cadence. These are explicit development controls and are
+identical on every target. The mock loops pre-recorded 60 FPS video
+and 48 kHz Opus fixtures, packetizes both tracks as RTP, and interleaves them on
+their media clocks. Higher selected rates replay access units faster to stress
+the normal depacketizer and decoder path. The large video fixtures are excluded
+from the crates.io package. Source builds read them locally; packaged desktop
+and Android debug builds download the selected fixture once and cache it, while
+the browser uses its HTTP cache. SHA-256 verification happens before playback.
+Native debug builds can start it automatically for profiling:
 
 ```sh
 NEBULUS_CODEC_MOCK=1 cargo run -p nebulus --bin nebulus
@@ -357,7 +365,7 @@ NEBULUS_CODEC_MOCK=1 cargo run -p nebulus --bin nebulus
 Video passes through the normal RTP depacketizer and `openipc-video`; audio passes through
 the configured mixed-audio RTP tap, `ropus`, and the normal output queue. The
 native build uses its platform video decoder and WASM uses WebCodecs decoding;
-neither mock uses an encoder. Release builds omit the button and mock assets.
+neither mock uses an encoder. Release builds omit the button and mock loader.
 
 ## Validate
 

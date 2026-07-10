@@ -5,6 +5,7 @@ use openipc_core::rtp::{
 };
 
 pub(crate) const MOCK_FPS: u32 = 60;
+pub(crate) const MOCK_FPS_OPTIONS: [u32; 4] = [30, 60, 120, 240];
 #[cfg(test)]
 const MOCK_WIDTH: u32 = 3_840;
 #[cfg(test)]
@@ -19,9 +20,107 @@ const AUDIO_PACKETS_PER_LOOP: usize = 250;
 const RTP_PAYLOAD_BYTES: usize = 1_100;
 const VIDEO_SSRC: u32 = 0x4f49_5043;
 const AUDIO_SSRC: u32 = 0x4f49_5041;
-const H264: &[u8] = include_bytes!("../../assets/mock.h264");
-const H265: &[u8] = include_bytes!("../../assets/mock.h265");
 const OPUS_OGG: &[u8] = include_bytes!("../../assets/mock.opus.ogg");
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum MockResolution {
+    Hd720,
+    FullHd1080,
+    #[default]
+    UltraHd2160,
+}
+
+impl MockResolution {
+    pub(crate) const ALL: [Self; 3] = [Self::Hd720, Self::FullHd1080, Self::UltraHd2160];
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Hd720 => "720p",
+            Self::FullHd1080 => "1080p",
+            Self::UltraHd2160 => "2160p (4K)",
+        }
+    }
+
+    pub(crate) const fn short_label(self) -> &'static str {
+        match self {
+            Self::Hd720 => "720p",
+            Self::FullHd1080 => "1080p",
+            Self::UltraHd2160 => "4K",
+        }
+    }
+
+    #[cfg(test)]
+    const fn dimensions(self) -> (u32, u32) {
+        match self {
+            Self::Hd720 => (1_280, 720),
+            Self::FullHd1080 => (1_920, 1_080),
+            Self::UltraHd2160 => (3_840, 2_160),
+        }
+    }
+
+    pub(crate) const fn fixture_name(self, codec: Codec) -> &'static str {
+        match (self, codec) {
+            (Self::Hd720, Codec::H264) => "mock-720p.h264",
+            (Self::Hd720, Codec::H265) => "mock-720p.h265",
+            (Self::FullHd1080, Codec::H264) => "mock-1080p.h264",
+            (Self::FullHd1080, Codec::H265) => "mock-1080p.h265",
+            (Self::UltraHd2160, Codec::H264) => "mock.h264",
+            (Self::UltraHd2160, Codec::H265) => "mock.h265",
+        }
+    }
+
+    pub(crate) const fn fixture_sha256(self, codec: Codec) -> &'static str {
+        match (self, codec) {
+            (Self::Hd720, Codec::H264) => {
+                "a996a0b35fe71c18ca7e59546557a804b0231c9ef2bfecaea74a2bbfc089b06c"
+            }
+            (Self::Hd720, Codec::H265) => {
+                "c092ebf17b327f1f5abdc65f7d9c6224e45e484693807344d2122b620ed8ac09"
+            }
+            (Self::FullHd1080, Codec::H264) => {
+                "e1a22b9ef65aa25034381f658f09ef58cd9c00b092d85fecf93a7b1830c46b80"
+            }
+            (Self::FullHd1080, Codec::H265) => {
+                "127c2344662257266113c30fa794189e171f370520813a34c4c0699195c8c4c6"
+            }
+            (Self::UltraHd2160, Codec::H264) => {
+                "7cee9eb9a146a4dc86e323d77d9141f3cce6e8ca21c469863e6c608cad6b8e51"
+            }
+            (Self::UltraHd2160, Codec::H265) => {
+                "098df0d672df6b50d0c787c177c9edcf885c800d35db9536768d50bfa75f2eac"
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MockVideoConfig {
+    pub(crate) resolution: MockResolution,
+    pub(crate) fps: u32,
+}
+
+impl MockVideoConfig {
+    pub(crate) fn label(self) -> String {
+        format!("{}{}", self.resolution.short_label(), self.fps)
+    }
+
+    fn validate(self) -> Result<Self, String> {
+        if MOCK_FPS_OPTIONS.contains(&self.fps) {
+            Ok(self)
+        } else {
+            Err(format!("unsupported mock frame rate: {} FPS", self.fps))
+        }
+    }
+}
+
+impl Default for MockVideoConfig {
+    fn default() -> Self {
+        Self {
+            resolution: MockResolution::UltraHd2160,
+            fps: MOCK_FPS,
+        }
+    }
+}
 
 pub(crate) struct MockRtpFrame {
     pub(crate) packets: Vec<Vec<u8>>,
@@ -36,6 +135,7 @@ pub(crate) struct MockRtpEvent {
 /// Interleaves the pre-encoded video and audio fixtures on their RTP clocks.
 pub(crate) struct MockAvStream {
     video: MockVideoStream,
+    fps: u32,
     audio_packets: Vec<Vec<u8>>,
     audio_index: usize,
     audio_timestamp: u32,
@@ -45,7 +145,18 @@ pub(crate) struct MockAvStream {
 }
 
 impl MockAvStream {
+    #[cfg(test)]
     pub(crate) fn new(codec: Codec) -> Result<Self, String> {
+        let config = MockVideoConfig::default();
+        Self::new_with_config(codec, config, test_fixture(config.resolution, codec)?)
+    }
+
+    pub(crate) fn new_with_config(
+        codec: Codec,
+        config: MockVideoConfig,
+        video_data: Vec<u8>,
+    ) -> Result<Self, String> {
+        let config = config.validate()?;
         let mut audio_packets = ogg_packets(OPUS_OGG)?;
         audio_packets
             .retain(|packet| !packet.starts_with(b"OpusHead") && !packet.starts_with(b"OpusTags"));
@@ -57,7 +168,8 @@ impl MockAvStream {
         }
         audio_packets.truncate(AUDIO_PACKETS_PER_LOOP);
         Ok(Self {
-            video: MockVideoStream::new(codec)?,
+            video: MockVideoStream::new_with_config(codec, config, video_data)?,
+            fps: config.fps,
             audio_packets,
             audio_index: 0,
             audio_timestamp: 0,
@@ -72,7 +184,7 @@ impl MockAvStream {
         let mut packets = Vec::new();
         if self.next_video_micros == due {
             packets.extend(self.video.next_frame().packets);
-            self.next_video_micros += 1_000_000 / u64::from(MOCK_FPS);
+            self.next_video_micros += 1_000_000 / u64::from(self.fps);
         }
         if self.next_audio_micros == due {
             let payload = &self.audio_packets[self.audio_index];
@@ -118,10 +230,15 @@ pub(crate) enum MockVideoStream {
 }
 
 impl MockVideoStream {
-    pub(crate) fn new(codec: Codec) -> Result<Self, String> {
+    pub(crate) fn new_with_config(
+        codec: Codec,
+        config: MockVideoConfig,
+        video_data: Vec<u8>,
+    ) -> Result<Self, String> {
+        let config = config.validate()?;
         match codec {
-            Codec::H264 => MockH264Stream::new().map(Self::H264),
-            Codec::H265 => MockH265Stream::new().map(Self::H265),
+            Codec::H264 => MockH264Stream::new_with_data(video_data, config.fps).map(Self::H264),
+            Codec::H265 => MockH265Stream::new_with_data(video_data, config.fps).map(Self::H265),
         }
     }
 
@@ -135,28 +252,40 @@ impl MockVideoStream {
 
 /// Loops a pre-encoded Annex-B fixture and packetizes each access unit as RTP.
 pub(crate) struct MockH264Stream {
+    data: Vec<u8>,
     access_units: Vec<Vec<Range<usize>>>,
     frame_index: usize,
     timestamp: u32,
+    timestamp_step: u32,
     sequence: u16,
 }
 
 impl MockH264Stream {
+    #[cfg(test)]
     pub(crate) fn new() -> Result<Self, String> {
-        let access_units = access_units(H264);
+        Self::new_with_data(
+            test_fixture(MockResolution::UltraHd2160, Codec::H264)?,
+            MOCK_FPS,
+        )
+    }
+
+    fn new_with_data(data: Vec<u8>, fps: u32) -> Result<Self, String> {
+        let access_units = access_units(&data);
         if access_units.is_empty() {
             return Err("embedded H.264 mock contains no access units".to_owned());
         }
         if !access_units[0]
             .iter()
-            .any(|range| nal_type(&H264[range.clone()]) == 5)
+            .any(|range| nal_type(&data[range.clone()]) == 5)
         {
             return Err("embedded H.264 mock does not begin with an IDR".to_owned());
         }
         Ok(Self {
+            data,
             access_units,
             frame_index: 0,
             timestamp: 0,
+            timestamp_step: CLOCK_RATE / fps,
             sequence: 1,
         })
     }
@@ -165,7 +294,7 @@ impl MockH264Stream {
         let access_unit = &self.access_units[self.frame_index];
         let mut packets = Vec::new();
         for (index, range) in access_unit.iter().enumerate() {
-            let nalu = &H264[range.clone()];
+            let nalu = &self.data[range.clone()];
             let last_nalu = index + 1 == access_unit.len();
             packetize_h264_nalu(
                 nalu,
@@ -176,22 +305,32 @@ impl MockH264Stream {
             );
         }
         self.frame_index = (self.frame_index + 1) % self.access_units.len();
-        self.timestamp = self.timestamp.wrapping_add(CLOCK_RATE / MOCK_FPS);
+        self.timestamp = self.timestamp.wrapping_add(self.timestamp_step);
         MockRtpFrame { packets }
     }
 }
 
 /// Loops a pre-encoded Annex-B HEVC fixture and packetizes it as RFC 7798 RTP.
 pub(crate) struct MockH265Stream {
+    data: Vec<u8>,
     access_units: Vec<Vec<Range<usize>>>,
     frame_index: usize,
     timestamp: u32,
+    timestamp_step: u32,
     sequence: u16,
 }
 
 impl MockH265Stream {
+    #[cfg(test)]
     pub(crate) fn new() -> Result<Self, String> {
-        let access_units = h265_access_units(H265);
+        Self::new_with_data(
+            test_fixture(MockResolution::UltraHd2160, Codec::H265)?,
+            MOCK_FPS,
+        )
+    }
+
+    fn new_with_data(data: Vec<u8>, fps: u32) -> Result<Self, String> {
+        let access_units = h265_access_units(&data);
         if access_units.is_empty() {
             return Err("embedded H.265 mock contains no access units".to_owned());
         }
@@ -199,21 +338,23 @@ impl MockH265Stream {
         for (kind, label) in [(32, "VPS"), (33, "SPS"), (34, "PPS")] {
             if !first
                 .iter()
-                .any(|range| h265_nal_type(&H265[range.clone()]) == kind)
+                .any(|range| h265_nal_type(&data[range.clone()]) == kind)
             {
                 return Err(format!("embedded H.265 mock does not begin with a {label}"));
             }
         }
         if !first
             .iter()
-            .any(|range| matches!(h265_nal_type(&H265[range.clone()]), 16..=23))
+            .any(|range| matches!(h265_nal_type(&data[range.clone()]), 16..=23))
         {
             return Err("embedded H.265 mock does not begin with an IRAP picture".to_owned());
         }
         Ok(Self {
+            data,
             access_units,
             frame_index: 0,
             timestamp: 0,
+            timestamp_step: CLOCK_RATE / fps,
             sequence: 1,
         })
     }
@@ -222,7 +363,7 @@ impl MockH265Stream {
         let access_unit = &self.access_units[self.frame_index];
         let mut packets = Vec::new();
         for (index, range) in access_unit.iter().enumerate() {
-            let nalu = &H265[range.clone()];
+            let nalu = &self.data[range.clone()];
             packetize_h265_nalu(
                 nalu,
                 self.timestamp,
@@ -232,7 +373,7 @@ impl MockH265Stream {
             );
         }
         self.frame_index = (self.frame_index + 1) % self.access_units.len();
-        self.timestamp = self.timestamp.wrapping_add(CLOCK_RATE / MOCK_FPS);
+        self.timestamp = self.timestamp.wrapping_add(self.timestamp_step);
         MockRtpFrame { packets }
     }
 }
@@ -523,6 +664,15 @@ fn ogg_packets(data: &[u8]) -> Result<Vec<Vec<u8>>, String> {
 }
 
 #[cfg(test)]
+fn test_fixture(resolution: MockResolution, codec: Codec) -> Result<Vec<u8>, String> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets")
+        .join(resolution.fixture_name(codec));
+    std::fs::read(&path)
+        .map_err(|error| format!("could not read mock fixture {}: {error}", path.display()))
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -532,20 +682,20 @@ mod tests {
         assert_eq!(stream.access_units.len(), MOCK_FRAMES_PER_LOOP);
         assert!(stream.access_units[0]
             .iter()
-            .any(|range| nal_type(&H264[range.clone()]) == 7));
+            .any(|range| nal_type(&stream.data[range.clone()]) == 7));
         assert!(stream.access_units[0]
             .iter()
-            .any(|range| nal_type(&H264[range.clone()]) == 8));
+            .any(|range| nal_type(&stream.data[range.clone()]) == 8));
 
         let sps = stream.access_units[0]
             .iter()
-            .find(|range| nal_type(&H264[(*range).clone()]) == 7)
-            .map(|range| &H264[range.clone()])
+            .find(|range| nal_type(&stream.data[(*range).clone()]) == 7)
+            .map(|range| &stream.data[range.clone()])
             .unwrap();
         let pps = stream.access_units[0]
             .iter()
-            .find(|range| nal_type(&H264[(*range).clone()]) == 8)
-            .map(|range| &H264[range.clone()])
+            .find(|range| nal_type(&stream.data[(*range).clone()]) == 8)
+            .map(|range| &stream.data[range.clone()])
             .unwrap();
         let info =
             openipc_video::CodecConfig::H264(openipc_video::H264Config::new(sps, pps).unwrap())
@@ -563,17 +713,17 @@ mod tests {
         for kind in [32, 33, 34] {
             assert!(stream.access_units[0]
                 .iter()
-                .any(|range| h265_nal_type(&H265[range.clone()]) == kind));
+                .any(|range| h265_nal_type(&stream.data[range.clone()]) == kind));
         }
         assert!(stream.access_units[0]
             .iter()
-            .any(|range| matches!(h265_nal_type(&H265[range.clone()]), 16..=23)));
+            .any(|range| matches!(h265_nal_type(&stream.data[range.clone()]), 16..=23)));
 
         let parameter_set = |kind| {
             stream.access_units[0]
                 .iter()
-                .find(|range| h265_nal_type(&H265[(*range).clone()]) == kind)
-                .map(|range| &H265[range.clone()])
+                .find(|range| h265_nal_type(&stream.data[(*range).clone()]) == kind)
+                .map(|range| &stream.data[range.clone()])
                 .unwrap()
         };
         let info = openipc_video::CodecConfig::H265(
@@ -585,6 +735,99 @@ mod tests {
         assert_eq!(info.visible_dimensions.width, MOCK_WIDTH);
         assert_eq!(info.visible_dimensions.height, MOCK_HEIGHT);
         assert_eq!(info.bit_depth, 8);
+    }
+
+    #[test]
+    fn selectable_fixtures_match_their_advertised_resolution() {
+        for resolution in MockResolution::ALL {
+            let expected = resolution.dimensions();
+            let h264 = MockH264Stream::new_with_data(
+                test_fixture(resolution, Codec::H264).unwrap(),
+                MOCK_FPS,
+            )
+            .unwrap();
+            assert_eq!(h264.access_units.len(), MOCK_FRAMES_PER_LOOP);
+            let h264_parameter_set = |kind| {
+                h264.access_units[0]
+                    .iter()
+                    .find(|range| nal_type(&h264.data[(*range).clone()]) == kind)
+                    .map(|range| &h264.data[range.clone()])
+                    .unwrap()
+            };
+            let h264_info = openipc_video::CodecConfig::H264(
+                openipc_video::H264Config::new(h264_parameter_set(7), h264_parameter_set(8))
+                    .unwrap(),
+            )
+            .stream_info()
+            .unwrap();
+            assert_eq!(
+                (
+                    h264_info.visible_dimensions.width,
+                    h264_info.visible_dimensions.height
+                ),
+                expected
+            );
+
+            let h265 = MockH265Stream::new_with_data(
+                test_fixture(resolution, Codec::H265).unwrap(),
+                MOCK_FPS,
+            )
+            .unwrap();
+            assert_eq!(h265.access_units.len(), MOCK_FRAMES_PER_LOOP);
+            let h265_parameter_set = |kind| {
+                h265.access_units[0]
+                    .iter()
+                    .find(|range| h265_nal_type(&h265.data[(*range).clone()]) == kind)
+                    .map(|range| &h265.data[range.clone()])
+                    .unwrap()
+            };
+            let h265_info = openipc_video::CodecConfig::H265(
+                openipc_video::H265Config::new(
+                    h265_parameter_set(32),
+                    h265_parameter_set(33),
+                    h265_parameter_set(34),
+                )
+                .unwrap(),
+            )
+            .stream_info()
+            .unwrap();
+            assert_eq!(
+                (
+                    h265_info.visible_dimensions.width,
+                    h265_info.visible_dimensions.height
+                ),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn selected_frame_rate_controls_rtp_clock_and_pacing() {
+        let config = MockVideoConfig {
+            resolution: MockResolution::Hd720,
+            fps: 240,
+        };
+        let mut stream = MockAvStream::new_with_config(
+            Codec::H264,
+            config,
+            test_fixture(config.resolution, Codec::H264).unwrap(),
+        )
+        .unwrap();
+        let first = stream.next_event();
+        assert_eq!(first.next_due_micros, 1_000_000 / 240);
+        let second = stream.next_event();
+        let packet = second
+            .packets
+            .iter()
+            .find(|packet| packet[1] & 0x7f == RTP_PAYLOAD_TYPE_H264)
+            .unwrap();
+        assert_eq!(u32::from_be_bytes(packet[4..8].try_into().unwrap()), 375);
+
+        let invalid = MockVideoConfig {
+            resolution: MockResolution::Hd720,
+            fps: 0,
+        };
+        assert!(MockAvStream::new_with_config(Codec::H264, invalid, Vec::new()).is_err());
     }
 
     #[test]
@@ -745,7 +988,13 @@ mod tests {
         use openipc_video::{DecoderOptions, PlatformDecoder, VideoDecoder as _};
 
         for codec in [Codec::H264, Codec::H265] {
-            let mut source = MockVideoStream::new(codec).unwrap();
+            let config = MockVideoConfig::default();
+            let mut source = MockVideoStream::new_with_config(
+                codec,
+                config,
+                test_fixture(config.resolution, codec).unwrap(),
+            )
+            .unwrap();
             let mut receiver = ReceiverRuntime::with_mock_video_route(
                 FrameLayout::WithFcs,
                 PayloadRouteId::new(1),

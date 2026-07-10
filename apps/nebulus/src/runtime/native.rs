@@ -1069,17 +1069,12 @@ mod worker {
     fn decoder_options() -> DecoderOptions {
         #[cfg(target_os = "android")]
         {
-            let emulator = crate::android::is_probably_emulator().unwrap_or(false);
-            // Goldfish advertises an eight-frame output delay. Real hardware
-            // gets enough room for normal pipeline depth without becoming a
-            // playback queue; decoded output remains latest-only.
-            let max_frames_in_flight = if emulator { 12 } else { 8 };
+            let max_frames_in_flight = 8;
             log::info!(
                 target: "nebulus::decoder",
-                "Android decoder policy output_poll_ms={} max_frames_in_flight={} pressure=drop-newest stall_reset_ms=500 emulator={}",
+                "Android decoder policy output_poll_ms={} max_frames_in_flight={} pressure=drop-newest stall_reset_ms=500",
                 DECODER_OUTPUT_POLL_INTERVAL.as_millis(),
-                max_frames_in_flight,
-                emulator
+                max_frames_in_flight
             );
             DecoderOptions {
                 max_frames_in_flight,
@@ -2352,16 +2347,35 @@ mod worker {
     ) -> Result<(), String> {
         use crate::runtime::{
             codec_mock::MockAvStream,
+            mock_fixture,
             route_runtime::{configure_mock_receiver, RouteProcessor},
         };
 
-        let mut decoder = create_decoder(&request)
-            .map_err(|error| format!("native mock decoder unavailable: {error}"))?;
         let mock_codec = request.codec_preference.mock_codec();
         let mock_codec_label = match mock_codec {
             openipc_core::Codec::H264 => "H.264",
             openipc_core::Codec::H265 => "H.265",
         };
+        log(
+            events,
+            context,
+            LogLevel::Info,
+            "mock",
+            format!(
+                "Loading {} {mock_codec_label} development fixture",
+                request.mock_video.label()
+            ),
+        );
+        let fixture = mock_fixture::load_sync(request.mock_video, mock_codec)?;
+        log(
+            events,
+            context,
+            LogLevel::Info,
+            "mock",
+            format!("Codec fixture ready from {}", fixture.origin),
+        );
+        let mut decoder = create_decoder(&request)
+            .map_err(|error| format!("native mock decoder unavailable: {error}"))?;
         let presenter = FramePresenter::new(events, context);
         let mut route_processor = RouteProcessor::new(&request)?;
         let recording_audio_config = route_processor.recording_audio_config();
@@ -2382,7 +2396,10 @@ mod worker {
             events,
             context,
             RuntimeEvent::Connected {
-                receivers: vec![crate::runtime::ReceiverInfo::codec_mock(mock_codec)],
+                receivers: vec![crate::runtime::ReceiverInfo::codec_mock(
+                    mock_codec,
+                    request.mock_video,
+                )],
                 decoder: decoder_environment(decoder.capabilities()),
             },
         );
@@ -2392,7 +2409,10 @@ mod worker {
             context,
             LogLevel::Info,
             "mock",
-            format!("Pre-recorded 4K60 {mock_codec_label} + Opus RTP mock started"),
+            format!(
+                "Pre-recorded {} {mock_codec_label} + Opus RTP mock started",
+                request.mock_video.label()
+            ),
         );
 
         let mut receiver = ReceiverRuntime::with_mock_video_route(
@@ -2404,7 +2424,8 @@ mod worker {
         receiver.set_rtp_reorder_enabled(request.rtp_reorder);
         let options = configure_mock_receiver(&mut receiver, &request);
         let runtime = receiver.video_runtime();
-        let mut source = MockAvStream::new(mock_codec)?;
+        let mut source =
+            MockAvStream::new_with_config(mock_codec, request.mock_video, fixture.bytes)?;
         let mock_started = Instant::now();
         let mut payload_sequence = 1u64;
         let mut recorder: Option<EncodedRecorder> = None;

@@ -14,6 +14,7 @@ use super::session::{android_error, media_format, mime_type};
 const BUFFER_FLAG_KEY_FRAME: u32 = 1;
 const BUFFER_FLAG_CODEC_CONFIG: u32 = 2;
 const MAX_DRAINED_OUTPUTS: usize = 64;
+const INPUT_BUFFER_WAIT: Duration = Duration::from_millis(8);
 
 #[derive(Debug, Default)]
 pub(super) struct SurfacePoll {
@@ -83,13 +84,11 @@ impl SurfaceMediaCodecSession {
         keyframe: bool,
     ) -> Result<SurfaceSessionSubmit, VideoError> {
         let mut completed = self.poll()?;
-        // A very short wait avoids declaring overload during the normal handoff
-        // between MediaCodec input buffers. It is bounded well below one video
-        // frame and only blocks when every codec input slot is busy.
-        let input_wait = Duration::from_millis(2);
+        // Absorb normal input-slot handoff jitter instead of dropping one
+        // reference picture. This remains below half of a 60 Hz frame interval.
         let input = self
             .codec
-            .dequeue_input_buffer(input_wait)
+            .dequeue_input_buffer(INPUT_BUFFER_WAIT)
             .map_err(|error| android_error("AMediaCodec_dequeueInputBuffer", error))?;
         let DequeuedInputBufferResult::Buffer(mut input) = input else {
             return Ok(SurfaceSessionSubmit::Backpressure(completed));

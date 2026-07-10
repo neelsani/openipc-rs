@@ -6,7 +6,6 @@ import android.database.Cursor;
 import android.graphics.SurfaceTexture;
 import android.net.Uri;
 import android.net.VpnService;
-import android.os.Build;
 import android.os.Bundle;
 import android.provider.OpenableColumns;
 import android.view.Display;
@@ -62,16 +61,6 @@ public final class NebulusActivity extends NativeActivity {
         attributes.preferredDisplayModeId = fastest.getModeId();
         attributes.preferredRefreshRate = fastest.getRefreshRate();
         getWindow().setAttributes(attributes);
-    }
-
-    /** Distinguish the high-latency software emulator codec from real hardware. */
-    public boolean isProbablyEmulator() {
-        return Build.FINGERPRINT.startsWith("generic")
-            || Build.FINGERPRINT.contains("emulator")
-            || Build.MODEL.contains("Emulator")
-            || Build.MODEL.contains("sdk_gphone")
-            || Build.HARDWARE.contains("goldfish")
-            || Build.HARDWARE.contains("ranchu");
     }
 
     /** Create the MediaCodec producer surface for a GL_TEXTURE_EXTERNAL_OES name. */
@@ -176,6 +165,51 @@ public final class NebulusActivity extends NativeActivity {
                 }
             }
         }, "nebulus-preset-download").start();
+    }
+
+    /** Download a debug codec fixture on the calling Rust worker thread. */
+    public byte[] downloadMockFixture(String url, int maximumBytes) throws Exception {
+        URL current = new URL(url);
+        HttpURLConnection connection = null;
+        try {
+            for (int redirects = 0; redirects <= 5; redirects++) {
+                if (!"https".equalsIgnoreCase(current.getProtocol())) {
+                    throw new IllegalArgumentException("Codec fixture downloads require HTTPS");
+                }
+                connection = (HttpURLConnection) current.openConnection();
+                connection.setInstanceFollowRedirects(false);
+                connection.setConnectTimeout(10_000);
+                connection.setReadTimeout(60_000);
+                connection.setRequestProperty("Accept", "application/octet-stream");
+                connection.setRequestProperty("User-Agent", "Nebulus/Android codec fixture loader");
+                int status = connection.getResponseCode();
+                if (status >= 300 && status < 400) {
+                    String location = connection.getHeaderField("Location");
+                    connection.disconnect();
+                    connection = null;
+                    if (location == null) {
+                        throw new IllegalStateException("Codec fixture redirect has no Location header");
+                    }
+                    current = new URL(current, location);
+                    continue;
+                }
+                if (status < 200 || status >= 300) {
+                    throw new IllegalStateException("Codec fixture request returned HTTP " + status);
+                }
+                long length = connection.getContentLengthLong();
+                if (length > maximumBytes) {
+                    throw new IllegalArgumentException("Codec fixture is too large");
+                }
+                try (InputStream input = connection.getInputStream()) {
+                    return readStream(input, maximumBytes);
+                }
+            }
+            throw new IllegalStateException("Codec fixture request exceeded five redirects");
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
     }
 
     private static boolean isAllowedPresetUrl(URL url) {

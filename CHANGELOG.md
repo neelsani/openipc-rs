@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.36 - 2026-07-10
+
+### Features
+- Feat: harden userspace uplink and codec fixtures
+
+Share a completion-aware priority uplink engine across native, web, and CLI targets, with bounded queues, aggregation, retry handling, monotonic scheduling, and detailed diagnostics. Replace development codec assets with reproducible 4K60 H.264 and H.265 fixtures and add integration coverage and documentation. (22f3b11)
+
+### Fixes
+- Fix(android): decouple decoder output from USB polling (32c9ae7)
+
+
 ## 0.1.35 - 2026-07-09
 
 ### Features

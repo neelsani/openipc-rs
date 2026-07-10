@@ -86,10 +86,7 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
         );
     }
 
-    let fullscreen_rect = egui::Rect::from_min_size(
-        rect.right_bottom() - egui::vec2(42.0, 42.0),
-        egui::vec2(36.0, 36.0),
-    );
+    let fullscreen_rect = fullscreen_button_rect(rect, cfg!(target_os = "android"));
     let fullscreen = ui
         .put(
             fullscreen_rect,
@@ -110,6 +107,24 @@ pub(crate) fn show(app: &mut NebulusApp, ui: &mut egui::Ui) {
     if response.double_clicked() {
         app.set_video_fullscreen(ui.ctx(), !app.video_fullscreen);
     }
+}
+
+fn fullscreen_button_rect(video_rect: egui::Rect, avoid_bottom_system_ui: bool) -> egui::Rect {
+    const BUTTON_SIZE: f32 = 36.0;
+    const EDGE_INSET: f32 = 6.0;
+
+    let min = if avoid_bottom_system_ui {
+        egui::pos2(
+            video_rect.right() - BUTTON_SIZE - EDGE_INSET,
+            video_rect.top() + EDGE_INSET,
+        )
+    } else {
+        egui::pos2(
+            video_rect.right() - BUTTON_SIZE - EDGE_INSET,
+            video_rect.bottom() - BUTTON_SIZE - EDGE_INSET,
+        )
+    };
+    egui::Rect::from_min_size(min, egui::vec2(BUTTON_SIZE, BUTTON_SIZE))
 }
 
 fn draw_osd(app: &NebulusApp, painter: &egui::Painter, video_rect: egui::Rect) {
@@ -147,5 +162,22 @@ fn draw_fullscreen_icon(ui: &egui::Ui, response: &egui::Response, active: bool) 
             painter.line_segment([corner, corner + egui::vec2(horizontal, 0.0)], stroke);
             painter.line_segment([corner, corner + egui::vec2(0.0, vertical)], stroke);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn android_fullscreen_button_avoids_the_bottom_system_area() {
+        let video = egui::Rect::from_min_max(egui::pos2(10.0, 20.0), egui::pos2(410.0, 820.0));
+        let android = fullscreen_button_rect(video, true);
+        let desktop = fullscreen_button_rect(video, false);
+
+        assert_eq!(android.right(), video.right() - 6.0);
+        assert_eq!(android.top(), video.top() + 6.0);
+        assert_eq!(desktop.bottom(), video.bottom() - 6.0);
+        assert!(android.bottom() < desktop.top());
     }
 }

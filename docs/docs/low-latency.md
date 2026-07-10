@@ -54,11 +54,14 @@ urgent-display priority for rendering, PixelPilot's `-16` receive priority,
 the fastest same-resolution display mode, a non-vsynced egui surface, and a
 MediaCodec realtime/low-latency configuration.
 
-Physical Android devices use the normal three-frame decoder bound. Nebulus
-detects the Android SDK emulator and permits twelve in-flight frames only
-there, because Goldfish's software codec advertises an eight-frame output
-delay. Emulator throughput and latency are therefore development signals, not
-representative performance measurements.
+Nebulus polls native decoder output at most 2 ms apart after submission begins,
+independently of whether the next USB aggregate has completed. This prevents a
+50 ms idle USB wait from capping a 60 FPS MediaCodec stream at 20 observed or
+presented frames per second. Physical Android devices permit eight in-flight
+frames for normal hardware pipeline depth. The Android SDK emulator permits
+twelve because Goldfish's software codec advertises an eight-frame output
+delay. These are decoder-work bounds, not playback queues; output remains
+latest-only.
 
 ## Browser Path
 
@@ -86,17 +89,21 @@ ignored by the browser.
   adapter wait for protocol processing.
 - RTP reordering is disabled by default; enable it only for measured
   out-of-order delivery.
-- Decoder input is bounded per platform. Overload discards stale work, resets
-  dependency state, and resumes at a keyframe instead of growing latency.
+- Decoder input is bounded per platform. Android drops the newest access unit
+  on transient MediaCodec pressure and continues immediately, accepting a
+  possibly damaged picture over an extended blackout. A true codec stall still
+  resets dependency state and resumes at a keyframe.
 - Decoded output is latest-only.
 - Runtime metrics and counters are emitted at 20 Hz. Worker output transfer is
   paced by animation frames and remains independent of that throttle.
 - Native audio requests a 256-frame device buffer and caps queued PCM at 20 ms.
   Web Audio restarts near 5 ms and trims a schedule that exceeds 40 ms.
 
-After decoder reset or overload, playback waits for codec parameter sets and a
-new H.264 IDR or H.265 random-access frame. This avoids presenting corrupted
-delta frames. A shorter transmitter keyframe interval reduces recovery time.
+After decoder reset, playback waits for codec parameter sets and a new H.264 IDR
+or H.265 random-access frame. A shorter transmitter keyframe interval reduces
+recovery time. Android's transient-pressure path intentionally does not reset:
+for FPV, a temporarily damaged frame is preferable to suppressing every frame
+until the next IDR.
 
 ## Source-Side Settings
 

@@ -15,9 +15,24 @@ const BUFFER_FLAG_KEY_FRAME: u32 = 1;
 const BUFFER_FLAG_CODEC_CONFIG: u32 = 2;
 const MAX_DRAINED_OUTPUTS: usize = 64;
 
+#[derive(Debug, Default)]
+pub(super) struct SurfacePoll {
+    pub(super) latest_token: Option<u64>,
+    pub(super) rendered_outputs: usize,
+}
+
+impl SurfacePoll {
+    fn append(&mut self, newer: Self) {
+        self.rendered_outputs = self.rendered_outputs.saturating_add(newer.rendered_outputs);
+        if newer.latest_token.is_some() {
+            self.latest_token = newer.latest_token;
+        }
+    }
+}
+
 pub(super) enum SurfaceSessionSubmit {
-    Accepted(Option<u64>),
-    Backpressure(Option<u64>),
+    Accepted(SurfacePoll),
+    Backpressure(SurfacePoll),
 }
 
 /// MediaCodec session that renders directly into an application-owned surface.
@@ -67,7 +82,7 @@ impl SurfaceMediaCodecSession {
         bitstream: &[u8],
         keyframe: bool,
     ) -> Result<SurfaceSessionSubmit, VideoError> {
-        let before = self.poll()?;
+        let mut completed = self.poll()?;
         // A very short wait avoids declaring overload during the normal handoff
         // between MediaCodec input buffers. It is bounded well below one video
         // frame and only blocks when every codec input slot is busy.
@@ -77,7 +92,7 @@ impl SurfaceMediaCodecSession {
             .dequeue_input_buffer(input_wait)
             .map_err(|error| android_error("AMediaCodec_dequeueInputBuffer", error))?;
         let DequeuedInputBufferResult::Buffer(mut input) = input else {
-            return Ok(SurfaceSessionSubmit::Backpressure(before));
+            return Ok(SurfaceSessionSubmit::Backpressure(completed));
         };
         let destination = input.buffer_mut();
         if bitstream.len() > destination.len() {
@@ -101,16 +116,16 @@ impl SurfaceMediaCodecSession {
                 if keyframe { BUFFER_FLAG_KEY_FRAME } else { 0 },
             )
             .map_err(|error| android_error("AMediaCodec_queueInputBuffer", error))?;
-        let after = self.poll()?;
-        Ok(SurfaceSessionSubmit::Accepted(after.or(before)))
+        completed.append(self.poll()?);
+        Ok(SurfaceSessionSubmit::Accepted(completed))
     }
 
     /// Release all ready output buffers to the SurfaceTexture producer queue.
     ///
     /// SurfaceTexture's consumer latches the newest image during the egui paint
     /// callback, so draining here avoids stalling MediaCodec behind old frames.
-    pub(super) fn poll(&self) -> Result<Option<u64>, VideoError> {
-        let mut latest_token = None;
+    pub(super) fn poll(&self) -> Result<SurfacePoll, VideoError> {
+        let mut completed = SurfacePoll::default();
         for _ in 0..MAX_DRAINED_OUTPUTS {
             match self
                 .codec
@@ -124,9 +139,10 @@ impl SurfaceMediaCodecSession {
                         .release_output_buffer(output, render)
                         .map_err(|error| android_error("AMediaCodec_releaseOutputBuffer", error))?;
                     if render {
-                        latest_token = u64::try_from(info.presentation_time_us())
+                        completed.rendered_outputs = completed.rendered_outputs.saturating_add(1);
+                        completed.latest_token = u64::try_from(info.presentation_time_us())
                             .ok()
-                            .or(latest_token);
+                            .or(completed.latest_token);
                     }
                 }
                 DequeuedOutputBufferInfoResult::TryAgainLater => break,
@@ -134,7 +150,7 @@ impl SurfaceMediaCodecSession {
                 | DequeuedOutputBufferInfoResult::OutputBuffersChanged => {}
             }
         }
-        Ok(latest_token)
+        Ok(completed)
     }
 }
 

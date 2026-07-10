@@ -274,10 +274,13 @@ texture; decoded pixel arrays never cross the WASM boundary.
 Desktop builds request non-vsynced wgpu presentation with one frame of surface
 latency. Android requests its fastest same-resolution display mode, disables
 egui vsync, raises the receive thread priority, and configures MediaCodec for
-low latency. Physical Android devices retain a three-frame decoder bound; the
-SDK emulator alone gets a larger allowance for Goldfish's delayed software
-codec. Native audio requests a 256-frame output buffer and keeps no more than
-20 ms of queued PCM.
+low latency. Once decoding starts, the receiver polls platform output at most
+2 ms apart instead of tying presentation to the cadence of USB completions.
+Physical devices allow eight MediaCodec frames in flight to accommodate normal
+hardware pipeline depth; the SDK emulator allows twelve for Goldfish's delayed
+software codec. Neither limit is a playback queue: output remains latest-only.
+Native audio requests a 256-frame output buffer and keeps no more than 20 ms of
+queued PCM.
 
 ## Included Controls
 

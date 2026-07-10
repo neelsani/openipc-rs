@@ -414,6 +414,12 @@ pub(crate) struct BatchMetrics {
     pub(crate) snr: [i32; 2],
     pub(crate) link_score: [i32; 2],
     pub(crate) decoder_drops: u64,
+    pub(crate) decoder_waiting_drops: u64,
+    pub(crate) decoder_backpressure_drops: u64,
+    pub(crate) decoder_output_drops: u64,
+    pub(crate) decoder_transport_drops: u64,
+    pub(crate) decoder_frames_in_flight: usize,
+    pub(crate) decoder_max_latency_ms: f64,
     pub(crate) decoder_errors: u64,
     pub(crate) fec: FecCounters,
     pub(crate) counters: ReceiverBatchCounters,
@@ -450,6 +456,12 @@ impl BatchMetrics {
         self.snr = newer.snr;
         self.link_score = newer.link_score;
         self.decoder_drops = newer.decoder_drops;
+        self.decoder_waiting_drops = newer.decoder_waiting_drops;
+        self.decoder_backpressure_drops = newer.decoder_backpressure_drops;
+        self.decoder_output_drops = newer.decoder_output_drops;
+        self.decoder_transport_drops = newer.decoder_transport_drops;
+        self.decoder_frames_in_flight = newer.decoder_frames_in_flight;
+        self.decoder_max_latency_ms = newer.decoder_max_latency_ms;
         self.decoder_errors = newer.decoder_errors;
         self.fec = newer.fec;
         merge_counters(&mut self.counters, newer.counters);

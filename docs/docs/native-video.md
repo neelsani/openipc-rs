@@ -110,6 +110,10 @@ The input limit bounds work owned by the platform decoder. Output has a
 single-slot mailbox. When rendering is late, a new decoded frame replaces the
 old pending output rather than growing a stale playback queue.
 
+Applications must poll `latest_frame` independently of their input transport.
+For example, blocking for 50 ms on USB before polling a 60 FPS decoder caps
+fresh output observation at 20 Hz even when the codec itself is keeping up.
+
 `require_hardware` is strict on platforms that can classify decoders. Android
 API 26 does not expose that classification through NDK MediaCodec, and
 WebCodecs exposes `prefer-hardware` rather than a guarantee; those backends make
@@ -214,7 +218,10 @@ an output buffer has been released to the surface, but it never maps decoded
 pixels. This is the lowest-overhead option for `SurfaceTexture`, `SurfaceView`,
 or another renderer-owned Android surface. Nebulus uses a SurfaceTexture-backed
 external OES texture so MediaCodec output is sampled directly by egui's GLES
-paint callback.
+paint callback. It polls MediaCodec output at most 2 ms apart once the first
+access unit has been submitted and uses an eight-frame hardware pipeline bound.
+Transient input pressure drops only the newest access unit; a true 500 ms codec
+stall resets the session and waits for a new random-access frame.
 
 ```rust,no_run
 # #[cfg(target_os = "android")]

@@ -1967,6 +1967,14 @@ mod worker {
                     .saturating_add(stats.output_drops)
                     .saturating_add(worker_snapshot.access_unit_queue_drops())
                     .saturating_add(worker_snapshot.transport_dropped_batches),
+                decoder_waiting_drops: stats.waiting_drops,
+                decoder_backpressure_drops: stats.backpressure_drops,
+                decoder_output_drops: stats.output_drops,
+                decoder_transport_drops: worker_snapshot
+                    .access_unit_queue_drops()
+                    .saturating_add(worker_snapshot.transport_dropped_batches),
+                decoder_frames_in_flight: stats.frames_in_flight,
+                decoder_max_latency_ms: stats.max_decode_latency_us as f64 / 1_000.0,
                 decoder_errors: stats.decode_errors,
                 fec: batch.fec_counters,
                 counters: batch.counters,
@@ -2342,6 +2350,14 @@ mod worker {
                 .saturating_add(stats.output_drops)
                 .saturating_add(worker_snapshot.access_unit_queue_drops())
                 .saturating_add(worker_snapshot.transport_dropped_batches);
+            metrics.decoder_waiting_drops = stats.waiting_drops;
+            metrics.decoder_backpressure_drops = stats.backpressure_drops;
+            metrics.decoder_output_drops = stats.output_drops;
+            metrics.decoder_transport_drops = worker_snapshot
+                .access_unit_queue_drops()
+                .saturating_add(worker_snapshot.transport_dropped_batches);
+            metrics.decoder_frames_in_flight = stats.frames_in_flight;
+            metrics.decoder_max_latency_ms = stats.max_decode_latency_us as f64 / 1_000.0;
             metrics.decoder_errors = stats.decode_errors;
             metrics.audio = route_processor.audio_stats();
             if let Some(metrics) = metrics_throttle.push(metrics) {

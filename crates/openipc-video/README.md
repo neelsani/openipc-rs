@@ -55,6 +55,12 @@ behind, a newer output replaces the stale one instead of increasing latency.
 hardware preference. `DecoderStats` reports waits, dropped inputs, replaced
 outputs, platform errors, queue depth, and submit-to-output latency.
 
+Drive output independently of the input transport. `submit` opportunistically
+drains ready output, but an application that can block waiting for USB or a
+socket should also call `latest_frame` from a short render/decoder tick. Android
+reports every MediaCodec output drained in a batch while retaining only the
+newest surface for presentation.
+
 Decoder configuration and backpressure are also emitted through the standard
 [`log`](https://docs.rs/log) facade. The crate does not install a logger; the
 embedding application controls filtering and output.

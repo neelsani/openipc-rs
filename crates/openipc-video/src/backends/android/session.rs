@@ -20,9 +20,24 @@ const BUFFER_FLAG_KEY_FRAME: u32 = 1;
 const BUFFER_FLAG_CODEC_CONFIG: u32 = 2;
 const MAX_DRAINED_OUTPUTS: usize = 64;
 
+#[derive(Default)]
+pub(crate) struct SessionPoll {
+    pub(crate) latest: Option<AndroidVideoFrame>,
+    pub(crate) rendered_outputs: usize,
+}
+
+impl SessionPoll {
+    fn append(&mut self, newer: Self) {
+        self.rendered_outputs = self.rendered_outputs.saturating_add(newer.rendered_outputs);
+        if newer.latest.is_some() {
+            self.latest = newer.latest;
+        }
+    }
+}
+
 pub(crate) enum SessionSubmit {
-    Accepted(Option<AndroidVideoFrame>),
-    Backpressure(Option<AndroidVideoFrame>),
+    Accepted(SessionPoll),
+    Backpressure(SessionPoll),
 }
 
 pub(crate) struct MediaCodecSession {
@@ -95,7 +110,7 @@ impl MediaCodecSession {
         bitstream: &[u8],
         keyframe: bool,
     ) -> Result<SessionSubmit, VideoError> {
-        let before = self.poll()?;
+        let mut completed = self.poll()?;
         // A very short wait avoids a false backpressure event while MediaCodec
         // returns an input slot, without permitting an encoded queue to grow.
         let input_wait = Duration::from_millis(2);
@@ -104,7 +119,7 @@ impl MediaCodecSession {
             .dequeue_input_buffer(input_wait)
             .map_err(|error| android_error("AMediaCodec_dequeueInputBuffer", error))?;
         let DequeuedInputBufferResult::Buffer(mut input) = input else {
-            return Ok(SessionSubmit::Backpressure(before));
+            return Ok(SessionSubmit::Backpressure(completed));
         };
         let destination = input.buffer_mut();
         if bitstream.len() > destination.len() {
@@ -128,12 +143,12 @@ impl MediaCodecSession {
                 if keyframe { BUFFER_FLAG_KEY_FRAME } else { 0 },
             )
             .map_err(|error| android_error("AMediaCodec_queueInputBuffer", error))?;
-        let after = self.poll()?;
-        Ok(SessionSubmit::Accepted(after.or(before)))
+        completed.append(self.poll()?);
+        Ok(SessionSubmit::Accepted(completed))
     }
 
-    pub(crate) fn poll(&self) -> Result<Option<AndroidVideoFrame>, VideoError> {
-        let mut latest = None;
+    pub(crate) fn poll(&self) -> Result<SessionPoll, VideoError> {
+        let mut completed = SessionPoll::default();
         for _ in 0..MAX_DRAINED_OUTPUTS {
             match self
                 .codec
@@ -146,13 +161,14 @@ impl MediaCodecSession {
                         .release_output_buffer(output, render)
                         .map_err(|error| android_error("AMediaCodec_releaseOutputBuffer", error))?;
                     if render {
+                        completed.rendered_outputs = completed.rendered_outputs.saturating_add(1);
                         // Release the previous candidate before asking
                         // acquireLatestImage to lock another buffer. Holding
                         // it during acquisition can exhaust a small reader
                         // pool even though only the newest frame is retained.
-                        drop(latest.take());
+                        drop(completed.latest.take());
                         if let Some(frame) = self.acquire_latest()? {
-                            latest = Some(frame);
+                            completed.latest = Some(frame);
                         }
                     }
                 }
@@ -161,10 +177,10 @@ impl MediaCodecSession {
                 | DequeuedOutputBufferInfoResult::OutputBuffersChanged => {}
             }
         }
-        if latest.is_none() {
-            latest = self.acquire_latest()?;
+        if completed.latest.is_none() {
+            completed.latest = self.acquire_latest()?;
         }
-        Ok(latest)
+        Ok(completed)
     }
 
     fn acquire_latest(&self) -> Result<Option<AndroidVideoFrame>, VideoError> {

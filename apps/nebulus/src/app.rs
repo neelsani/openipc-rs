@@ -1867,6 +1867,12 @@ impl NebulusApp {
         self.metrics.snr = batch.snr;
         self.metrics.link_score = batch.link_score;
         self.metrics.decoder_drops = batch.decoder_drops;
+        self.metrics.decoder_waiting_drops = batch.decoder_waiting_drops;
+        self.metrics.decoder_backpressure_drops = batch.decoder_backpressure_drops;
+        self.metrics.decoder_output_drops = batch.decoder_output_drops;
+        self.metrics.decoder_transport_drops = batch.decoder_transport_drops;
+        self.metrics.decoder_frames_in_flight = batch.decoder_frames_in_flight;
+        self.metrics.decoder_max_latency_ms = batch.decoder_max_latency_ms;
         self.metrics.decoder_errors = batch.decoder_errors;
         self.metrics.usb_latency_ms = batch.usb_latency_ms;
         self.metrics.pipeline_latency_ms = batch.pipeline_latency_ms;

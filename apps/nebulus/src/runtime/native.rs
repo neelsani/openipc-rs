@@ -352,6 +352,16 @@ mod worker {
         },
     };
 
+    const DECODER_OUTPUT_POLL_INTERVAL: Duration = Duration::from_millis(2);
+
+    fn receiver_wait(housekeeping_remaining: Duration, decoder_started: bool) -> Duration {
+        if decoder_started {
+            housekeeping_remaining.min(DECODER_OUTPUT_POLL_INTERVAL)
+        } else {
+            housekeeping_remaining
+        }
+    }
+
     mod udp;
 
     pub(super) fn run_udp_rtp(
@@ -1059,16 +1069,21 @@ mod worker {
     fn decoder_options() -> DecoderOptions {
         #[cfg(target_os = "android")]
         {
-            if crate::android::is_probably_emulator().unwrap_or(false) {
-                // Goldfish advertises an eight-frame output delay. This larger
-                // allowance is strictly an emulator compatibility policy; real
-                // devices retain the three-frame low-latency default.
-                DecoderOptions {
-                    max_frames_in_flight: 12,
-                    ..DecoderOptions::default()
-                }
-            } else {
-                DecoderOptions::default()
+            let emulator = crate::android::is_probably_emulator().unwrap_or(false);
+            // Goldfish advertises an eight-frame output delay. Real hardware
+            // gets enough room for normal pipeline depth without becoming a
+            // playback queue; decoded output remains latest-only.
+            let max_frames_in_flight = if emulator { 12 } else { 8 };
+            log::info!(
+                target: "nebulus::decoder",
+                "Android decoder policy output_poll_ms={} max_frames_in_flight={} pressure=drop-newest stall_reset_ms=500 emulator={}",
+                DECODER_OUTPUT_POLL_INTERVAL.as_millis(),
+                max_frames_in_flight,
+                emulator
+            );
+            DecoderOptions {
+                max_frames_in_flight,
+                ..DecoderOptions::default()
             }
         }
         #[cfg(not(target_os = "android"))]
@@ -1107,6 +1122,18 @@ mod worker {
                 },
             );
         }
+    }
+
+    fn poll_latest_decoder_frame(
+        decoder: &mut AppDecoder,
+        presenter: &FramePresenter,
+    ) -> openipc_video::DecoderStats {
+        let decoded = decoder.latest_frame();
+        let stats = decoder.stats();
+        if let Some(decoded) = decoded {
+            presenter.submit(decoded, stats.last_decode_latency_us as f64 / 1_000.0);
+        }
+        stats
     }
 
     fn create_decoder(_request: &StartRequest) -> Result<AppDecoder, String> {
@@ -1901,15 +1928,44 @@ mod worker {
         let mut first_usb_completion = false;
         let mut first_non_empty_aggregate = false;
         let mut first_rx_descriptor = false;
+        let mut last_housekeeping = Instant::now();
         while !stop.load(Ordering::Relaxed) {
-            let wait = if uplink.is_some() {
+            let housekeeping_interval = if uplink.is_some() {
                 Duration::from_millis(10)
             } else {
                 Duration::from_millis(50)
             };
+            let housekeeping_remaining =
+                housekeeping_interval.saturating_sub(last_housekeeping.elapsed());
+            let decoder_started = decoder.stats().access_units_submitted > 0;
+            let wait = receiver_wait(housekeeping_remaining, decoder_started);
             let event = match capture_events.recv_timeout(wait) {
                 Ok(event) => event,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let stats = poll_latest_decoder_frame(&mut decoder, &presenter);
+                    if stats.decode_errors > last_decode_errors {
+                        last_decode_errors = stats.decode_errors;
+                        log(
+                            events,
+                            context,
+                            LogLevel::Warn,
+                            "decoder",
+                            format!("decoder errors: {last_decode_errors}"),
+                        );
+                        if let Err(error) = decoder.flush() {
+                            log(
+                                events,
+                                context,
+                                LogLevel::Warn,
+                                "decoder",
+                                format!("decoder recovery failed: {error}"),
+                            );
+                        }
+                    }
+                    if last_housekeeping.elapsed() < housekeeping_interval {
+                        continue;
+                    }
+                    last_housekeeping = Instant::now();
                     let online_count = captures.online_count();
                     if online_count != last_online_count {
                         let level = if online_count == adapters.len() {
@@ -2132,10 +2188,7 @@ mod worker {
             }
             let decode_submit_latency_ms = decode_submit_start.elapsed().as_secs_f64() * 1000.0;
             let video_submit_path_ms = batch_start.elapsed().as_secs_f64() * 1000.0;
-            let stats = decoder.stats();
-            if let Some(decoded) = decoder.latest_frame() {
-                presenter.submit(decoded, stats.last_decode_latency_us as f64 / 1_000.0);
-            }
+            let stats = poll_latest_decoder_frame(&mut decoder, &presenter);
 
             if let Some(uplink) = uplink.as_mut() {
                 for payload in &batch.raw_payloads {
@@ -2186,6 +2239,12 @@ mod worker {
                 snr: quality.snr,
                 link_score: quality.link_score,
                 decoder_drops: stats.waiting_drops + stats.backpressure_drops + stats.output_drops,
+                decoder_waiting_drops: stats.waiting_drops,
+                decoder_backpressure_drops: stats.backpressure_drops,
+                decoder_output_drops: stats.output_drops,
+                decoder_transport_drops: 0,
+                decoder_frames_in_flight: stats.frames_in_flight,
+                decoder_max_latency_ms: stats.max_decode_latency_us as f64 / 1_000.0,
                 decoder_errors: stats.decode_errors,
                 fec: batch.fec_counters,
                 counters: batch.counters,
@@ -2425,16 +2484,18 @@ mod worker {
                         .map_err(|error| format!("mock decode submit failed: {error}"))?;
                 }
             }
-            let stats = decoder.stats();
-            if let Some(decoded) = decoder.latest_frame() {
-                presenter.submit(decoded, stats.last_decode_latency_us as f64 / 1_000.0);
-            }
+            let stats = poll_latest_decoder_frame(&mut decoder, &presenter);
             metrics.decoder_frames = stats.frames_decoded.saturating_sub(last_decoded_frames);
             last_decoded_frames = stats.frames_decoded;
             metrics.pipeline_latency_ms = loop_started.elapsed().as_secs_f64() * 1_000.0;
             metrics.batch_latency_ms = metrics.pipeline_latency_ms;
             metrics.decoder_drops =
                 stats.waiting_drops + stats.backpressure_drops + stats.output_drops;
+            metrics.decoder_waiting_drops = stats.waiting_drops;
+            metrics.decoder_backpressure_drops = stats.backpressure_drops;
+            metrics.decoder_output_drops = stats.output_drops;
+            metrics.decoder_frames_in_flight = stats.frames_in_flight;
+            metrics.decoder_max_latency_ms = stats.max_decode_latency_us as f64 / 1_000.0;
             metrics.decoder_errors = stats.decode_errors;
             metrics.audio = route_processor.audio_stats();
             send(events, context, RuntimeEvent::Batch(Box::new(metrics)));
@@ -2698,5 +2759,28 @@ mod worker {
                 message: message.into(),
             },
         );
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::time::Duration;
+
+        use super::receiver_wait;
+
+        #[test]
+        fn active_decoder_is_polled_independently_of_usb_housekeeping() {
+            assert_eq!(
+                receiver_wait(Duration::from_millis(50), true),
+                Duration::from_millis(2)
+            );
+            assert_eq!(
+                receiver_wait(Duration::from_millis(1), true),
+                Duration::from_millis(1)
+            );
+            assert_eq!(
+                receiver_wait(Duration::from_millis(50), false),
+                Duration::from_millis(50)
+            );
+        }
     }
 }

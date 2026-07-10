@@ -156,7 +156,7 @@ impl AndroidSurfaceDecoder {
         Ok(())
     }
 
-    fn accept_token(&mut self, token: u64) {
+    fn accept_token(&mut self, token: u64, rendered_outputs: usize) {
         let Some(pending) = self.pending.remove(&token) else {
             return;
         };
@@ -179,9 +179,12 @@ impl AndroidSurfaceDecoder {
             timestamp: pending.timestamp,
             duration: None,
         });
+        let rendered_outputs = rendered_outputs.max(1) as u64;
         self.stats.update(|stats| {
-            stats.frames_decoded += 1;
-            stats.output_drops += u64::from(replaced) + superseded.len() as u64;
+            stats.frames_decoded = stats.frames_decoded.saturating_add(rendered_outputs);
+            stats.output_drops = stats
+                .output_drops
+                .saturating_add(u64::from(replaced) + rendered_outputs.saturating_sub(1));
             stats.frames_in_flight = self.pending.len();
             stats.last_decode_latency_us = latency_us;
             stats.max_decode_latency_us = stats.max_decode_latency_us.max(latency_us);
@@ -189,14 +192,14 @@ impl AndroidSurfaceDecoder {
     }
 
     fn poll_output(&mut self) -> Result<(), VideoError> {
-        if let Some(token) = self
+        let completed = self
             .session
             .as_ref()
             .map(SurfaceMediaCodecSession::poll)
             .transpose()?
-            .flatten()
-        {
-            self.accept_token(token);
+            .unwrap_or_default();
+        if let Some(token) = completed.latest_token {
+            self.accept_token(token, completed.rendered_outputs);
         }
         Ok(())
     }
@@ -205,11 +208,10 @@ impl AndroidSurfaceDecoder {
         if !self.backpressure_warning_emitted {
             log::warn!(
                 target: "openipc_video::mediacodec_surface",
-                "decoder backpressure; dropping dependent access units until the next keyframe"
+                "decoder backpressure; dropping the newest access unit to preserve latency"
             );
             self.backpressure_warning_emitted = true;
         }
-        self.waiting_for_keyframe = true;
         let frames_in_flight = self.pending.len();
         self.stats.update(|stats| {
             stats.backpressure_drops += 1;
@@ -309,19 +311,19 @@ impl VideoDecoder for AndroidSurfaceDecoder {
             .expect("configured MediaCodec surface session exists")
             .submit(token, &frame.data, frame.keyframe);
         match result {
-            Ok(SurfaceSessionSubmit::Accepted(ready)) => {
+            Ok(SurfaceSessionSubmit::Accepted(completed)) => {
                 self.stats.update(|stats| {
                     stats.access_units_submitted += 1;
                     stats.frames_in_flight = self.pending.len();
                 });
-                if let Some(token) = ready {
-                    self.accept_token(token);
+                if let Some(token) = completed.latest_token {
+                    self.accept_token(token, completed.rendered_outputs);
                 }
             }
-            Ok(SurfaceSessionSubmit::Backpressure(ready)) => {
+            Ok(SurfaceSessionSubmit::Backpressure(completed)) => {
                 self.pending.remove(&token);
-                if let Some(token) = ready {
-                    self.accept_token(token);
+                if let Some(token) = completed.latest_token {
+                    self.accept_token(token, completed.rendered_outputs);
                 }
                 self.record_backpressure_drop();
                 return Ok(SubmitOutcome::DroppedForBackpressure);

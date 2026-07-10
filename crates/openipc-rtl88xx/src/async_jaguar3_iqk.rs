@@ -1007,7 +1007,7 @@ impl<'a> Jaguar3Cal<'a> {
                 _ => 0,
             }
         };
-        self.iqk.is_5g = channel >= 36;
+        self.iqk.is_5g = channel > 14;
         let mut mac = [0u32; MAC_REG_NUM_8822C];
         let mut bbk = [0u32; BB_REG_NUM_8822C];
         let mut rf = [[0u32; 2]; RF_REG_NUM_8822C];

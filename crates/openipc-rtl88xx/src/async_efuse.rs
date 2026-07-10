@@ -490,6 +490,26 @@ impl RealtekDevice {
         }
     }
 
+    pub(crate) async fn read_physical_efuse_bytes_async(
+        &self,
+        addresses: &[u16],
+    ) -> Result<Vec<u8>, DriverError> {
+        self.efuse_power_switch_async(false, true).await?;
+        let result = async {
+            let mut values = Vec::with_capacity(addresses.len());
+            for address in addresses {
+                values.push(self.read_efuse_byte_async(*address).await?);
+            }
+            Ok::<_, DriverError>(values)
+        }
+        .await;
+        let power_off = self.efuse_power_switch_async(false, false).await;
+        match (result, power_off) {
+            (Ok(values), Ok(())) => Ok(values),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
     async fn read_efuse_byte_async(&self, address: u16) -> Result<u8, DriverError> {
         let _ = self.read_u16_async(REG_EFUSE_TEST).await;
         self.write_u16_async(REG_EFUSE_TEST, 0).await?;
@@ -905,7 +925,11 @@ fn tx_power_index_base_with_policy(
         };
         (TxPowerBand::Ghz2, ch_idx, power)
     } else {
-        let ch_idx = CENTER_CH_5G_ALL.iter().position(|ch| *ch == channel)?;
+        let ch_idx = CENTER_CH_5G_ALL
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, candidate)| candidate.abs_diff(channel))
+            .map(|(index, _)| index)?;
         if rate < 0x0c {
             return None;
         }
@@ -1219,7 +1243,7 @@ fn classify_2g_channel(channel: u8) -> Option<(usize, usize)> {
 
 fn classify_5g_channel(channel: u8) -> Option<usize> {
     Some(match channel {
-        16..=42 => 0,
+        15..=42 => 0,
         44..=48 => 1,
         50..=58 => 2,
         60..=98 => 3,
@@ -1485,6 +1509,7 @@ mod tests {
     #[test]
     fn jaguar1_channel_groups_match_vendor_boundaries() {
         for (channel, expected) in [
+            (15, Some(0)),
             (16, Some(0)),
             (42, Some(0)),
             (60, Some(3)),
@@ -1497,7 +1522,6 @@ mod tests {
         ] {
             assert_eq!(classify_5g_channel(channel), expected, "channel {channel}");
         }
-        assert_eq!(classify_5g_channel(15), None);
         assert_eq!(classify_5g_channel(99), None);
     }
 

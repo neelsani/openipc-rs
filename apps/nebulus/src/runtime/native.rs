@@ -330,8 +330,9 @@ mod worker {
         WfbTxKeypair, WifiFrame,
     };
     use openipc_rtl88xx::{
-        ChannelWidth, ChipFamily, DriverError, DriverOptions, Jaguar3PowerTrackingState,
-        MonitorOptions, RadioConfig, RealtekDevice, RealtekTxDescriptor, RealtekTxOptions,
+        ChannelWidth, ChipFamily, DriverError, DriverOptions, Jaguar2PowerTrackingState,
+        Jaguar3PowerTrackingState, MonitorOptions, RadioConfig, RealtekDevice, RealtekTxDescriptor,
+        RealtekTxOptions,
     };
     use openipc_uplink::{
         TxBatch, TxFailureKind, TxFrame, TxOutcome, UplinkEngine, UplinkEngineMetrics,
@@ -1178,7 +1179,7 @@ mod worker {
     impl RadioWorker {
         const QUEUE_CAPACITY: usize = 64;
         const JAGUAR2_DIG_INTERVAL: Duration = Duration::from_millis(100);
-        const JAGUAR3_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(2);
+        const SLOW_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(2);
 
         fn start(
             device: Arc<RealtekDevice>,
@@ -1187,7 +1188,11 @@ mod worker {
             events: &super::EventQueue,
             context: &eframe::egui::Context,
         ) -> Result<Option<Self>, String> {
-            if !transmit && !chip.is_jaguar2() && !chip.is_jaguar3() {
+            if !transmit
+                && !chip.is_jaguar2()
+                && !chip.is_jaguar3()
+                && !device.cfo_tracking_enabled()
+            {
                 return Ok(None);
             }
             let mut endpoint = transmit
@@ -1206,16 +1211,16 @@ mod worker {
             let worker = std::thread::Builder::new()
                 .name("nebulus-radio-background".to_owned())
                 .spawn(move || {
-                    let mut power_tracking = Jaguar3PowerTrackingState::default();
+                    let mut jaguar2_power_tracking = Jaguar2PowerTrackingState::default();
+                    let mut jaguar3_power_tracking = Jaguar3PowerTrackingState::default();
                     let mut last_maintenance = Instant::now();
+                    let mut last_slow_maintenance = Instant::now();
                     let mut last_tx_error_log = None;
                     loop {
                         let interval = if chip.is_jaguar2() {
                             Self::JAGUAR2_DIG_INTERVAL
-                        } else if chip.is_jaguar3() {
-                            Self::JAGUAR3_MAINTENANCE_INTERVAL
                         } else {
-                            Duration::from_secs(60)
+                            Self::SLOW_MAINTENANCE_INTERVAL
                         };
                         let wait = interval.saturating_sub(last_maintenance.elapsed());
                         match receiver.recv_timeout(wait) {
@@ -1270,9 +1275,18 @@ mod worker {
                             last_maintenance = Instant::now();
                             if chip.is_jaguar2() && device.jaguar2_dig_enabled() {
                                 let _ = device.run_jaguar2_dig_step();
+                            }
+                        }
+                        if last_slow_maintenance.elapsed() >= Self::SLOW_MAINTENANCE_INTERVAL {
+                            last_slow_maintenance = Instant::now();
+                            let _ = device.cfo_tracking_tick();
+                            if chip.is_jaguar2() && device.jaguar2_thermal_tracking_enabled() {
+                                let _ =
+                                    device.tick_jaguar2_power_tracking(&mut jaguar2_power_tracking);
                             } else if chip.is_jaguar3() {
                                 let _ = device.run_jaguar3_coex_keepalive();
-                                let _ = device.tick_jaguar3_power_tracking(&mut power_tracking);
+                                let _ =
+                                    device.tick_jaguar3_power_tracking(&mut jaguar3_power_tracking);
                             }
                         }
                     }

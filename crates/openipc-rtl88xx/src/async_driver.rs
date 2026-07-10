@@ -13,13 +13,14 @@ use nusb::MaybeFuture;
 #[cfg(target_arch = "wasm32")]
 use crate::device::discover_bulk_endpoints_with_override;
 use crate::device::RealtekDevice;
+use crate::phy::RfPath;
 use crate::regs::*;
 use crate::tx::{build_usb_tx_frame, RealtekTxOptions};
 #[cfg(target_arch = "wasm32")]
 use crate::types::is_supported_id;
 use crate::types::{
-    ChipFamily, ChipInfo, DriverError, DriverOptions, InitReport, InitStatus, MonitorOptions,
-    RadioConfig,
+    ChannelWidth, ChipFamily, ChipInfo, DriverError, DriverOptions, InitReport, InitStatus,
+    MonitorOptions, RadioConfig,
 };
 #[cfg(target_arch = "wasm32")]
 use crate::usb_recovery::CONTROL_RETRY_ATTEMPTS;
@@ -32,6 +33,7 @@ use crate::usb_transport::{read_register_with_recovery, write_register_with_reco
 use crate::PowerTrackingState;
 #[cfg(target_arch = "wasm32")]
 use std::sync::atomic::AtomicU8;
+use std::sync::atomic::Ordering;
 #[cfg(target_arch = "wasm32")]
 use std::sync::OnceLock;
 
@@ -97,6 +99,7 @@ impl RealtekDevice {
                 crate::diagnostics::DriverDiagnosticsState::default(),
             ),
             cck_filter_8821c: OnceLock::new(),
+            jaguar2_kfree: OnceLock::new(),
             h2c_box: AtomicU8::new(0),
             cw_tone: std::sync::Mutex::new(crate::async_cw::CwToneState::default()),
             continuous_tx: std::sync::Mutex::new(
@@ -107,6 +110,12 @@ impl RealtekDevice {
             tx_stats: std::sync::Mutex::new(crate::TxStats::default()),
             tx_power_control: std::sync::Mutex::new(crate::tx_control::TxPowerControl::default()),
             rx_quality: crate::RxQualityAccumulator::default(),
+            rx_path_activity: crate::RxPathActivityAccumulator::default(),
+            cfo_tracker: std::sync::Mutex::new(crate::CfoTracker::default()),
+            cfo_tracking_enabled: std::sync::atomic::AtomicBool::new(false),
+            crystal_cap: std::sync::atomic::AtomicU8::new(u8::MAX),
+            crystal_cap_bases: std::sync::Mutex::new(None),
+            beacon_interval_tu: std::sync::atomic::AtomicU16::new(0),
             cca_disabled: std::sync::Mutex::new(false),
             beamforming_peer: std::sync::Mutex::new(None),
             beamforming_report_ready: std::sync::atomic::AtomicBool::new(false),
@@ -118,8 +127,10 @@ impl RealtekDevice {
             ndpa_period: std::sync::atomic::AtomicU32::new(0),
             ndpa_counter: std::sync::atomic::AtomicU64::new(0),
             jaguar3_tx_rf_bw: std::sync::atomic::AtomicU8::new(u8::MAX),
-            jaguar3_nb_dac: std::sync::atomic::AtomicU8::new(u8::MAX),
+            narrowband_adc: std::sync::atomic::AtomicU8::new(u8::MAX),
+            narrowband_dac: std::sync::atomic::AtomicU8::new(u8::MAX),
             jaguar2_dig_enabled: std::sync::atomic::AtomicBool::new(true),
+            jaguar2_thermal_tracking_enabled: std::sync::atomic::AtomicBool::new(true),
             tx_endpoint_prepared: std::sync::atomic::AtomicBool::new(false),
             tx_wedged: std::sync::atomic::AtomicBool::new(false),
             jaguar3_rx_wanted: std::sync::atomic::AtomicBool::new(true),
@@ -134,6 +145,17 @@ impl RealtekDevice {
         let _ = self.detected_family.set(chip.family);
         self.record_probe_diagnostics(sys_cfg, chip_id, chip);
         Ok(chip)
+    }
+
+    /// Probe the adapter and return its static USB/radio capability report.
+    pub async fn adapter_capabilities_async(
+        &self,
+    ) -> Result<crate::AdapterCapabilities, DriverError> {
+        let mut capabilities = crate::AdapterCapabilities::for_chip(self.probe_chip_async().await?);
+        if let Some(efuse) = self.efuse_info.get() {
+            capabilities.crystal_cap_default = efuse.crystal_cap.min(capabilities.crystal_cap_max);
+        }
+        Ok(capabilities)
     }
 
     /// Initialize the adapter for monitor-mode OpenIPC reception.
@@ -187,12 +209,25 @@ impl RealtekDevice {
             options.jaguar3_tx_rf_bw.unwrap_or(u8::MAX),
             std::sync::atomic::Ordering::Release,
         );
-        self.jaguar3_nb_dac.store(
-            options.jaguar3_nb_dac.unwrap_or(u8::MAX),
+        self.narrowband_adc.store(
+            options.narrowband_adc.unwrap_or(u8::MAX),
+            std::sync::atomic::Ordering::Release,
+        );
+        self.narrowband_dac.store(
+            options
+                .narrowband_dac
+                .or(options.jaguar3_nb_dac)
+                .unwrap_or(u8::MAX),
             std::sync::atomic::Ordering::Release,
         );
         self.jaguar2_dig_enabled
             .store(!options.skip_dig, std::sync::atomic::Ordering::Release);
+        self.jaguar2_thermal_tracking_enabled.store(
+            options.thermal_tracking,
+            std::sync::atomic::Ordering::Release,
+        );
+        self.cfo_tracking_enabled
+            .store(options.cfo_tracking, std::sync::atomic::Ordering::Release);
         self.jaguar3_rx_wanted.store(
             options.jaguar3_enable_rx,
             std::sync::atomic::Ordering::Release,
@@ -446,6 +481,15 @@ impl RealtekDevice {
         if options.cw_tone_gain.is_some() {
             return Ok(());
         }
+        if options.disable_cca && !chip.family.is_jaguar1() {
+            self.set_cca_disabled_async(true).await?;
+        }
+        if options.cfo_tracking || options.crystal_cap.is_some() {
+            self.prepare_crystal_cap_async(chip).await?;
+        }
+        if let Some(cap) = options.crystal_cap {
+            self.set_crystal_cap_async(Some(cap)).await?;
+        }
         if options.beamforming_sounder || options.beamforming_sounder_mac.is_some() {
             self.arm_beamforming_sounder_async(options.beamforming_sounder_mac)
                 .await?;
@@ -612,6 +656,215 @@ impl RealtekDevice {
         })
     }
 
+    /// Switch bandwidth at the current channel, using the lean 20/10/5 MHz path.
+    pub async fn fast_set_bandwidth_async(
+        &self,
+        width: ChannelWidth,
+    ) -> Result<crate::types::RetuneReport, DriverError> {
+        let current = self
+            .current_radio_config()?
+            .ok_or(DriverError::RadioNotInitialized)?;
+        let next = RadioConfig {
+            channel_width: width,
+            ..current
+        };
+        if width == current.channel_width {
+            return Ok(crate::types::RetuneReport {
+                radio: current,
+                used_fast_path: true,
+            });
+        }
+        let chip = self.probe_chip_async().await?;
+        if !crate::AdapterCapabilities::for_chip(chip).supports_width(width) {
+            return Err(DriverError::UnsupportedChannelWidth {
+                family: chip.family,
+                width,
+            });
+        }
+        let is_fast_width = |candidate: ChannelWidth| {
+            matches!(
+                candidate,
+                ChannelWidth::Mhz20 | ChannelWidth::Mhz10 | ChannelWidth::Mhz5
+            )
+        };
+        let used_fast_path = if is_fast_width(current.channel_width) && is_fast_width(width) {
+            match chip.family {
+                ChipFamily::Rtl8812 | ChipFamily::Rtl8814 => {
+                    self.fast_set_bandwidth_jaguar1_async(chip, current, width)
+                        .await?
+                }
+                ChipFamily::Rtl8821 => false,
+                ChipFamily::Rtl8822b => {
+                    self.fast_set_bandwidth_jaguar2_async(chip, current, width)
+                        .await?
+                }
+                ChipFamily::Rtl8821c => false,
+                ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
+                    self.set_bandwidth_dividers_8822c_async(chip, width, current.channel)
+                        .await?;
+                    true
+                }
+            }
+        } else {
+            false
+        };
+        if used_fast_path {
+            self.retune_state
+                .lock()
+                .map_err(|_| DriverError::DriverStatePoisoned)?
+                .radio = Some(next);
+        } else {
+            self.retune_async(next).await?;
+        }
+        Ok(crate::types::RetuneReport {
+            radio: next,
+            used_fast_path,
+        })
+    }
+
+    async fn fast_set_bandwidth_jaguar1_async(
+        &self,
+        chip: ChipInfo,
+        current: RadioConfig,
+        width: ChannelWidth,
+    ) -> Result<bool, DriverError> {
+        let mut state = self
+            .retune_state
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)?
+            .jaguar1
+            .clone();
+        if state.bandwidth_20_8ac.is_none() {
+            if current.channel_width != ChannelWidth::Mhz20 {
+                return Ok(false);
+            }
+            state.bandwidth_20_8ac = Some(self.read_u32_async(0x08ac).await?);
+        }
+        let base = state.bandwidth_20_8ac.expect("20 MHz cache was primed");
+        if width == ChannelWidth::Mhz20 {
+            self.write_u32_async(0x08ac, base).await?;
+        } else {
+            let is_5mhz = width == ChannelWidth::Mhz5;
+            let (mask, mut adc, mut dac) = if chip.family == ChipFamily::Rtl8814 {
+                (
+                    0x1031_03c3,
+                    if is_5mhz { 2 } else { 3 },
+                    if is_5mhz { 2 } else { 3 },
+                )
+            } else {
+                (
+                    0x0030_03c3,
+                    if is_5mhz { 0 } else { 1 },
+                    if is_5mhz { 1 } else { 2 },
+                )
+            };
+            let adc_override = self.narrowband_adc.load(Ordering::Acquire);
+            let dac_override = self.narrowband_dac.load(Ordering::Acquire);
+            if adc_override != u8::MAX {
+                adc = u32::from(adc_override & 0x03);
+            }
+            if dac_override != u8::MAX {
+                dac = u32::from(dac_override & 0x03);
+            }
+            let fields = (dac << 20) | (adc << 8) | ((if is_5mhz { 1 } else { 2 }) << 6);
+            self.write_u32_async(0x08ac, (base & !mask) | (fields & mask))
+                .await?;
+        }
+        self.retune_state
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)?
+            .jaguar1 = state;
+        Ok(true)
+    }
+
+    async fn fast_set_bandwidth_jaguar2_async(
+        &self,
+        chip: ChipInfo,
+        current: RadioConfig,
+        width: ChannelWidth,
+    ) -> Result<bool, DriverError> {
+        let mut state = self
+            .retune_state
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)?
+            .jaguar2
+            .clone();
+        if state.bandwidth_20_8ac.is_none() {
+            if current.channel_width != ChannelWidth::Mhz20 {
+                return Ok(false);
+            }
+            state.bandwidth_20_8ac = Some(self.read_u32_async(0x08ac).await?);
+            state.bandwidth_rf18 = Some(self.query_rf_reg_async(chip, RfPath::A, 0x18).await?);
+            state.bandwidth_center = current.channel;
+            state.bandwidth_is_2g = current.channel <= 14;
+            state.bandwidth_two_paths = chip.total_rf_paths() >= 2;
+        }
+        let base = state.bandwidth_20_8ac.expect("20 MHz cache was primed");
+        let rf18 = state.bandwidth_rf18.expect("RF18 cache was primed");
+        if width == ChannelWidth::Mhz20 {
+            self.write_u32_async(0x08ac, base).await?;
+            self.set_bb_reg_async(0x08c4, BIT30, 1).await?;
+            self.set_rf_reg_async(chip, RfPath::A, 0x18, 0x000f_ffff, rf18)
+                .await?;
+            if state.bandwidth_two_paths {
+                self.set_rf_reg_async(chip, RfPath::B, 0x18, 0x000f_ffff, rf18)
+                    .await?;
+            }
+        } else {
+            let is_5mhz = width == ChannelWidth::Mhz5;
+            let mut value = base & if is_5mhz { 0xefee_fe00 } else { 0xeffe_ff00 };
+            value |= if is_5mhz { BIT6 } else { BIT7 };
+            let adc = self.narrowband_adc.load(Ordering::Acquire);
+            if adc != u8::MAX {
+                value &= !((0x03 << 8) | BIT16);
+                value |= u32::from(adc & 0x03) << 8;
+                value |= u32::from(adc & 0x04 != 0) << 16;
+            }
+            let dac = self.narrowband_dac.load(Ordering::Acquire);
+            if dac != u8::MAX {
+                value &= !((0x03 << 20) | BIT28);
+                value |= u32::from(dac & 0x03) << 20;
+                value |= u32::from(dac & 0x04 != 0) << 28;
+            }
+            self.write_u32_async(0x08ac, value).await?;
+            self.set_bb_reg_async(0x08c4, BIT30, 0).await?;
+            self.set_bb_reg_async(0x08c8, BIT31, 1).await?;
+            if state.bandwidth_is_2g {
+                self.set_bb_reg_async(0x0808, BIT28, 1).await?;
+                self.set_bb_reg_async(0x0454, BIT7, 0).await?;
+                self.set_bb_reg_async(0x0a80, BIT18, 0).await?;
+            } else {
+                self.set_bb_reg_async(0x0a80, BIT18, 1).await?;
+                self.set_bb_reg_async(0x0454, BIT7, 1).await?;
+                self.set_bb_reg_async(0x0808, BIT28, 0).await?;
+                self.set_bb_reg_async(0x0814, 0x0000_fc00, 34).await?;
+            }
+            let alternate = (rf18 & !0xff) | if state.bandwidth_center == 1 { 2 } else { 1 };
+            self.set_rf_reg_async(chip, RfPath::A, 0x18, 0x000f_ffff, alternate)
+                .await?;
+            if state.bandwidth_two_paths {
+                self.set_rf_reg_async(chip, RfPath::B, 0x18, 0x000f_ffff, alternate)
+                    .await?;
+            }
+            self.set_rf_reg_async(chip, RfPath::A, 0x18, 0x000f_ffff, rf18)
+                .await?;
+            if state.bandwidth_two_paths {
+                self.set_rf_reg_async(chip, RfPath::B, 0x18, 0x000f_ffff, rf18)
+                    .await?;
+            }
+            self.set_rf_reg_async(chip, RfPath::A, 0xb8, BIT19, 0)
+                .await?;
+            self.set_rf_reg_async(chip, RfPath::A, 0xb8, BIT19, 1)
+                .await?;
+            self.bb_reset_jaguar2_async().await?;
+        }
+        self.retune_state
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)?
+            .jaguar2 = state;
+        Ok(true)
+    }
+
     fn note_full_tune(&self, radio: RadioConfig) -> Result<(), DriverError> {
         self.retune_state
             .lock()
@@ -684,10 +937,10 @@ impl RealtekDevice {
         self.read_u8_async(0x0808).await
     }
 
-    /// Disable or restore Jaguar3's safe MAC EDCCA transmit-deferral gate.
+    /// Disable or restore Jaguar2/3's safe MAC EDCCA transmit-deferral gate.
     pub async fn set_cca_disabled_async(&self, disabled: bool) -> Result<(), DriverError> {
         let chip = self.probe_chip_async().await?;
-        if !chip.family.is_jaguar3() {
+        if chip.family.is_jaguar1() {
             return Err(DriverError::UnsupportedCcaControl(chip.family));
         }
         self.apply_cca_disabled_async(disabled).await?;
@@ -710,6 +963,284 @@ impl RealtekDevice {
         }
         self.write_u32_async(0x0520, reg_520).await?;
         self.write_u32_async(0x0524, reg_524).await
+    }
+
+    /// Read the adapter's free-running 64-bit hardware TSF in microseconds.
+    pub async fn read_hardware_tsf_async(&self) -> Result<u64, DriverError> {
+        let mut high = self.read_u32_async(0x0564).await?;
+        let mut low = self.read_u32_async(0x0560).await?;
+        if self.read_u32_async(0x0564).await? != high {
+            high = self.read_u32_async(0x0564).await?;
+            low = self.read_u32_async(0x0560).await?;
+        }
+        Ok((u64::from(high) << 32) | u64::from(low))
+    }
+
+    /// Set the Jaguar2/3 free-running hardware TSF.
+    pub async fn write_hardware_tsf_async(&self, tsf: u64) -> Result<(), DriverError> {
+        let chip = self.probe_chip_async().await?;
+        if chip.family.is_jaguar1() {
+            return Err(DriverError::UnsupportedTsfWrite(chip.family));
+        }
+        self.write_u32_async(0x0560, tsf as u32).await?;
+        self.write_u32_async(0x0564, (tsf >> 32) as u32).await
+    }
+
+    /// Load and enable a hardware-timed beacon on Jaguar2/3.
+    pub async fn start_beacon_async(
+        &self,
+        beacon: &[u8],
+        interval_tu: u16,
+    ) -> Result<(), DriverError> {
+        let chip = self.probe_chip_async().await?;
+        if chip.family.is_jaguar1() {
+            return Err(DriverError::UnsupportedBeacon(chip.family));
+        }
+        let radiotap_len = if beacon.len() >= 8 && beacon[0] == 0 {
+            usize::from(u16::from_le_bytes([beacon[2], beacon[3]]))
+        } else {
+            0
+        };
+        let radiotap_len = if (8..=beacon.len()).contains(&radiotap_len) {
+            radiotap_len
+        } else {
+            0
+        };
+        let mpdu = &beacon[radiotap_len..];
+        if mpdu.len() < 24 || mpdu[0] != 0x80 {
+            return Err(DriverError::InvalidBeacon);
+        }
+        if chip.family.is_jaguar2() {
+            self.download_beacon_page_jaguar2_async(chip.family, mpdu)
+                .await?;
+        } else {
+            self.download_beacon_page_jaguar3_async(mpdu).await?;
+        }
+
+        let source = &mpdu[10..16];
+        let bssid = &mpdu[16..22];
+        self.write_u32_async(
+            0x0610,
+            u32::from_le_bytes(source[..4].try_into().expect("source slice is four bytes")),
+        )
+        .await?;
+        self.write_u16_async(
+            0x0614,
+            u16::from_le_bytes(source[4..6].try_into().expect("source tail is two bytes")),
+        )
+        .await?;
+        self.write_u32_async(
+            0x0618,
+            u32::from_le_bytes(bssid[..4].try_into().expect("BSSID slice is four bytes")),
+        )
+        .await?;
+        self.write_u16_async(
+            0x061c,
+            u16::from_le_bytes(bssid[4..6].try_into().expect("BSSID tail is two bytes")),
+        )
+        .await?;
+        let network_type = self.read_u8_async(REG_CR + 2).await.unwrap_or(0);
+        self.write_u8_async(REG_CR + 2, (network_type & !0x03) | 0x03)
+            .await?;
+        let interval_tu = interval_tu.max(1);
+        self.write_u16_async(0x0554, interval_tu).await?;
+        self.write_u8_async(0x0550, BIT3 as u8 | BIT4 as u8).await?;
+        let txq = self.read_u32_async(REG_FWHW_TXQ_CTRL).await.unwrap_or(0);
+        self.write_u32_async(REG_FWHW_TXQ_CTRL, txq | BIT22).await?;
+        if chip.family.is_jaguar3() {
+            self.send_h2c_raw_8822c_async(0x690c_0100, 0).await?;
+        }
+        self.beacon_interval_tu
+            .store(interval_tu, Ordering::Release);
+        Ok(())
+    }
+
+    /// Shift a Jaguar3 hardware beacon by a whole-TU one-shot interval change.
+    pub async fn adjust_beacon_timing_async(&self, microseconds: i32) -> Result<i32, DriverError> {
+        let chip = self.probe_chip_async().await?;
+        let nominal = self.beacon_interval_tu.load(Ordering::Acquire);
+        if nominal == 0 || chip.family.is_jaguar2() {
+            return Ok(0);
+        }
+        if chip.family.is_jaguar1() {
+            return Err(DriverError::UnsupportedBeacon(chip.family));
+        }
+        let mut delta_tu = if microseconds >= 0 {
+            (microseconds + 512) / 1024
+        } else {
+            (microseconds - 512) / 1024
+        };
+        if delta_tu == 0 {
+            return Ok(0);
+        }
+        let one_shot = (i32::from(nominal) + delta_tu).max(1);
+        delta_tu = one_shot - i32::from(nominal);
+        self.write_u16_async(0x0554, one_shot as u16).await?;
+        crate::time::sleep_micros(one_shot as u32 * 1024 + 2000).await;
+        self.write_u16_async(0x0554, nominal).await?;
+        Ok(delta_tu * 1024)
+    }
+
+    /// Shift a Jaguar3 hardware beacon at microsecond resolution.
+    pub async fn adjust_beacon_timing_fine_async(
+        &self,
+        microseconds: i32,
+    ) -> Result<i32, DriverError> {
+        let chip = self.probe_chip_async().await?;
+        if self.beacon_interval_tu.load(Ordering::Acquire) == 0 || chip.family.is_jaguar2() {
+            return Ok(0);
+        }
+        if chip.family.is_jaguar1() {
+            return Err(DriverError::UnsupportedBeacon(chip.family));
+        }
+        let tsf = self.read_hardware_tsf_async().await?;
+        let shifted = if microseconds >= 0 {
+            tsf.wrapping_sub(microseconds as u64)
+        } else {
+            tsf.wrapping_add(u64::from(microseconds.unsigned_abs()))
+        };
+        let control = self.read_u8_async(0x0550).await?;
+        self.write_u8_async(0x0550, control & !(BIT3 as u8)).await?;
+        self.write_u32_async(0x0560, shifted as u32).await?;
+        self.write_u32_async(0x0564, (shifted >> 32) as u32).await?;
+        self.write_u8_async(0x0550, control | BIT3 as u8).await?;
+        Ok(microseconds)
+    }
+
+    /// Set both crystal load-capacitance legs to a raw trim code.
+    ///
+    /// `None` restores the EFUSE/default code. Call after hardware bring-up.
+    pub async fn set_crystal_cap_async(&self, cap: Option<u8>) -> Result<u8, DriverError> {
+        let family = match self.detected_family.get().copied() {
+            Some(family) => family,
+            None => self.probe_chip_async().await?.family,
+        };
+        let default = self
+            .efuse_info
+            .get()
+            .map_or(0x20, |efuse| efuse.crystal_cap);
+        let max = if family.is_jaguar3() { 0x7f } else { 0x3f };
+        let cap = cap.unwrap_or(default).min(max);
+        if self
+            .crystal_cap_bases
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)?
+            .is_none()
+        {
+            let chip = self.probe_chip_async().await?;
+            self.prepare_crystal_cap_async(chip).await?;
+        }
+        let bases = self
+            .crystal_cap_bases
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)?
+            .ok_or(DriverError::RadioNotInitialized)?;
+        match family {
+            ChipFamily::Rtl8812 => {
+                let data = u32::from(cap) | (u32::from(cap) << 6);
+                self.write_u32_async(0x002c, bases[0] | (data << 19))
+                    .await?;
+            }
+            ChipFamily::Rtl8814 => {
+                let data = u32::from(cap) | (u32::from(cap) << 6);
+                self.write_u32_async(0x002c, bases[0] | (data << 15))
+                    .await?;
+            }
+            ChipFamily::Rtl8821 => {
+                let data = u32::from(cap) | (u32::from(cap) << 6);
+                self.write_u32_async(0x002c, bases[0] | (data << 12))
+                    .await?;
+            }
+            ChipFamily::Rtl8822b | ChipFamily::Rtl8821c => {
+                self.write_u32_async(0x0024, bases[0] | (u32::from(cap) << 25))
+                    .await?;
+                self.write_u32_async(0x0028, bases[1] | (u32::from(cap) << 1))
+                    .await?;
+            }
+            ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
+                let data = u32::from(cap) | (u32::from(cap) << 7);
+                self.write_u32_async(0x1040, bases[0] | (data << 10))
+                    .await?;
+            }
+        }
+        self.crystal_cap.store(cap, Ordering::Release);
+        Ok(cap)
+    }
+
+    /// Return the last explicitly applied crystal-cap code, when known.
+    pub fn crystal_cap(&self) -> Option<u8> {
+        let cap = self.crystal_cap.load(Ordering::Acquire);
+        (cap != u8::MAX).then_some(cap)
+    }
+
+    /// Enable or disable accumulation for periodic closed-loop CFO tracking.
+    pub fn set_cfo_tracking_enabled(&self, enabled: bool) {
+        self.cfo_tracking_enabled.store(enabled, Ordering::Release);
+    }
+
+    /// Return whether periodic closed-loop CFO correction is enabled.
+    pub fn cfo_tracking_enabled(&self) -> bool {
+        self.cfo_tracking_enabled.load(Ordering::Acquire)
+    }
+
+    /// Return whether periodic Jaguar2 thermal compensation is enabled.
+    pub fn jaguar2_thermal_tracking_enabled(&self) -> bool {
+        self.jaguar2_thermal_tracking_enabled
+            .load(Ordering::Acquire)
+    }
+
+    /// Drain CFO samples and apply at most one crystal-cap correction step.
+    pub async fn cfo_tracking_tick_async(&self) -> Result<Option<crate::CfoStep>, DriverError> {
+        if !self.cfo_tracking_enabled.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        let family = match self.detected_family.get().copied() {
+            Some(family) => family,
+            None => self.probe_chip_async().await?.family,
+        };
+        let cap_max = if family.is_jaguar3() { 0x7f } else { 0x3f };
+        let current = self
+            .crystal_cap()
+            .or_else(|| self.efuse_info.get().map(|efuse| efuse.crystal_cap))
+            .unwrap_or(0x20)
+            .min(cap_max);
+        let step = self
+            .cfo_tracker
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)?
+            .step(current, cap_max);
+        if let Some(next) = step.and_then(|result| result.crystal_cap) {
+            self.set_crystal_cap_async(Some(next)).await?;
+        }
+        Ok(step)
+    }
+
+    async fn prepare_crystal_cap_async(&self, chip: ChipInfo) -> Result<(), DriverError> {
+        if self
+            .crystal_cap_bases
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let bases = match chip.family {
+            ChipFamily::Rtl8812 => [self.read_u32_async(0x002c).await? & !0x7ff8_0000, 0],
+            ChipFamily::Rtl8814 => [self.read_u32_async(0x002c).await? & !0x07ff_8000, 0],
+            ChipFamily::Rtl8821 => [self.read_u32_async(0x002c).await? & !0x00ff_f000, 0],
+            ChipFamily::Rtl8822b | ChipFamily::Rtl8821c => [
+                self.read_u32_async(0x0024).await? & !0x7e00_0000,
+                self.read_u32_async(0x0028).await? & !0x0000_007e,
+            ],
+            ChipFamily::Rtl8822c | ChipFamily::Rtl8822e => {
+                [self.read_u32_async(0x1040).await? & !0x00ff_fc00, 0]
+            }
+        };
+        *self
+            .crystal_cap_bases
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)? = Some(bases);
+        Ok(())
     }
 
     async fn set_rx_path_mask_for_chip_async(

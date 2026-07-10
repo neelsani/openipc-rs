@@ -1881,7 +1881,10 @@ impl NebulusApp {
         self.metrics.decoder_max_latency_ms = batch.decoder_max_latency_ms;
         self.metrics.decoder_errors = batch.decoder_errors;
         self.metrics.usb_latency_ms = batch.usb_latency_ms;
+        self.metrics.parse_latency_ms = batch.parse_latency_ms;
         self.metrics.pipeline_latency_ms = batch.pipeline_latency_ms;
+        self.metrics.route_latency_ms = batch.route_latency_ms;
+        self.metrics.decode_submit_latency_ms = batch.decode_submit_latency_ms;
         self.metrics.batch_latency_ms = batch.batch_latency_ms;
         self.metrics.video_submit_path_ms = batch.video_submit_path_ms;
         self.metrics.local_processing_latency_ms = batch.video_submit_path_ms

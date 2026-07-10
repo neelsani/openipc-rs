@@ -8,7 +8,10 @@ use openipc_core::{
     try_parse_tx_mode_str, wfb::WFB_PACKET_FEC_ONLY, ChannelId, TxMode, TxRadioParams,
     WfbTransmitter, WfbTxKeypair, FRAME_TYPE_DATA,
 };
-use openipc_rtl88xx::{ChipFamily, Jaguar3PowerTrackingState, RealtekDevice, RealtekTxOptions};
+use openipc_rtl88xx::{
+    ChipFamily, Jaguar2PowerTrackingState, Jaguar3PowerTrackingState, RealtekDevice,
+    RealtekTxOptions,
+};
 
 #[path = "../common.rs"]
 mod common;
@@ -393,8 +396,9 @@ struct UsbOutput {
     ep_in: Option<nusb::Endpoint<Bulk, In>>,
     ep_out: nusb::Endpoint<Bulk, Out>,
     tx_options: RealtekTxOptions,
-    last_jaguar3_tick: Instant,
+    last_driver_tick: Instant,
     last_thermal_poll: Instant,
+    jaguar2_power_tracking: Jaguar2PowerTrackingState,
     jaguar3_power_tracking: Jaguar3PowerTrackingState,
 }
 
@@ -427,18 +431,29 @@ impl TxOutput {
                     ep_in.submit(completion.buffer);
                 }
             }
-            if output.chip_family.is_jaguar3()
-                && output.last_jaguar3_tick.elapsed() >= Duration::from_secs(2)
+            if (output.chip_family.is_jaguar2() || output.chip_family.is_jaguar3())
+                && output.last_driver_tick.elapsed() >= Duration::from_secs(2)
             {
-                output.last_jaguar3_tick = Instant::now();
-                if let Err(error) = output.device.run_jaguar3_coex_keepalive() {
-                    eprintln!("Jaguar3 coex keepalive failed: {error}");
-                }
-                if let Err(error) = output
-                    .device
-                    .tick_jaguar3_power_tracking(&mut output.jaguar3_power_tracking)
+                output.last_driver_tick = Instant::now();
+                if output.chip_family.is_jaguar2()
+                    && output.device.jaguar2_thermal_tracking_enabled()
                 {
-                    eprintln!("Jaguar3 thermal tracking failed: {error}");
+                    if let Err(error) = output
+                        .device
+                        .tick_jaguar2_power_tracking(&mut output.jaguar2_power_tracking)
+                    {
+                        eprintln!("Jaguar2 thermal tracking failed: {error}");
+                    }
+                } else if output.chip_family.is_jaguar3() {
+                    if let Err(error) = output.device.run_jaguar3_coex_keepalive() {
+                        eprintln!("Jaguar3 coex keepalive failed: {error}");
+                    }
+                    if let Err(error) = output
+                        .device
+                        .tick_jaguar3_power_tracking(&mut output.jaguar3_power_tracking)
+                    {
+                        eprintln!("Jaguar3 thermal tracking failed: {error}");
+                    }
                 }
             }
             if let Some(interval) = thermal_poll_interval {
@@ -531,8 +546,9 @@ fn open_tx_output(config: &TxConfig) -> CliResult<TxOutput> {
             ep_in,
             ep_out,
             tx_options,
-            last_jaguar3_tick: Instant::now(),
+            last_driver_tick: Instant::now(),
             last_thermal_poll: Instant::now(),
+            jaguar2_power_tracking: Jaguar2PowerTrackingState::default(),
             jaguar3_power_tracking: Jaguar3PowerTrackingState::default(),
         });
     }

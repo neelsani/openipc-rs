@@ -362,6 +362,44 @@ pub(crate) fn build_firmware_page_8822b(chunk: &[u8]) -> (Vec<u8>, usize) {
     (out, packet_offset)
 }
 
+pub(crate) fn build_h2c_packet_8822b(payload: &[u8; 32]) -> Vec<u8> {
+    let mut out = vec![0; TX_DESC_SIZE_8822C + payload.len()];
+    set_bits_le32(&mut out, 0, 0, 16, payload.len() as u32);
+    set_bits_le32(&mut out, 4, 8, 5, 0x13);
+    tx_desc_checksum_8822b(&mut out[..TX_DESC_SIZE_8822C]);
+    out[TX_DESC_SIZE_8822C..].copy_from_slice(payload);
+    out
+}
+
+pub(crate) fn build_beacon_page_halmac(payload: &[u8], descriptor: RealtekTxDescriptor) -> Vec<u8> {
+    debug_assert!(matches!(
+        descriptor,
+        RealtekTxDescriptor::Jaguar2 | RealtekTxDescriptor::Jaguar3
+    ));
+    let mut out = vec![0; TX_DESC_SIZE_8822C + payload.len()];
+    set_bits_le32(&mut out, 0, 0, 16, payload.len() as u32);
+    set_bits_le32(&mut out, 0, 16, 8, TX_DESC_SIZE_8822C as u32);
+    set_bits_le32(&mut out, 0, 24, 1, 1);
+    set_bits_le32(&mut out, 0, 31, 1, 1);
+    set_bits_le32(&mut out, 4, 8, 5, 0x10);
+    set_bits_le32(&mut out, 32, 15, 1, 1);
+    match descriptor {
+        RealtekTxDescriptor::Jaguar2 => {
+            tx_desc_checksum_8822b(&mut out[..TX_DESC_SIZE_8822C]);
+        }
+        RealtekTxDescriptor::Jaguar3 => {
+            set_bits_le32(&mut out, 0, 26, 1, 1);
+            set_bits_le32(&mut out, 12, 10, 1, 1);
+            tx_desc_checksum_8822c(&mut out[..TX_DESC_SIZE_8822C]);
+        }
+        RealtekTxDescriptor::Jaguar1 | RealtekTxDescriptor::Rtl8814 => {
+            unreachable!("reserved-page beacon requires a HalMAC descriptor")
+        }
+    }
+    out[TX_DESC_SIZE_8822C..].copy_from_slice(payload);
+    out
+}
+
 fn apply_ndpa_descriptor_fields(desc: &mut [u8]) {
     set_bits_le32(desc, 12, 22, 2, 1);
     set_bits_le32(desc, 32, 15, 1, 0);
@@ -974,6 +1012,34 @@ mod tests {
         assert_eq!(
             test_bits(read_le32(&page, 28), 0, 16) as u16,
             checksum_8822b_descriptor(&page[..TX_DESC_SIZE_8822C])
+        );
+    }
+
+    #[test]
+    fn halmac_beacon_pages_match_generation_specific_descriptor_fields() {
+        let payload = [0x80; 24];
+        let jaguar2 = build_beacon_page_halmac(&payload, RealtekTxDescriptor::Jaguar2);
+        let jaguar3 = build_beacon_page_halmac(&payload, RealtekTxDescriptor::Jaguar3);
+        for page in [&jaguar2, &jaguar3] {
+            assert_eq!(test_bits(read_le32(page, 0), 0, 16), 24);
+            assert_eq!(test_bits(read_le32(page, 0), 16, 8), 48);
+            assert_eq!(test_bits(read_le32(page, 0), 24, 1), 1);
+            assert_eq!(test_bits(read_le32(page, 0), 31, 1), 1);
+            assert_eq!(test_bits(read_le32(page, 4), 8, 5), 0x10);
+            assert_eq!(test_bits(read_le32(page, 32), 15, 1), 1);
+            assert_eq!(&page[TX_DESC_SIZE_8822C..], payload.as_slice());
+        }
+        assert_eq!(test_bits(read_le32(&jaguar2, 0), 26, 1), 0);
+        assert_eq!(test_bits(read_le32(&jaguar2, 12), 10, 1), 0);
+        assert_eq!(test_bits(read_le32(&jaguar3, 0), 26, 1), 1);
+        assert_eq!(test_bits(read_le32(&jaguar3, 12), 10, 1), 1);
+        assert_eq!(
+            test_bits(read_le32(&jaguar2, 28), 0, 16) as u16,
+            checksum_8822b_descriptor(&jaguar2[..TX_DESC_SIZE_8822C])
+        );
+        assert_eq!(
+            test_bits(read_le32(&jaguar3, 28), 0, 16) as u16,
+            checksum_8822c_descriptor(&jaguar3[..TX_DESC_SIZE_8822C])
         );
     }
 }

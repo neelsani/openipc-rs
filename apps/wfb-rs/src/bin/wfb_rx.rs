@@ -6,7 +6,7 @@ use openipc_core::realtek::{RxPacketType, DEFAULT_RX_TRANSFER_SIZE};
 use openipc_core::{
     parse_rx_aggregate_with_kind, PayloadPipeline, PayloadPipelineEvent, RxDescriptorKind,
 };
-use openipc_rtl88xx::ChipFamily;
+use openipc_rtl88xx::{ChipFamily, Jaguar2PowerTrackingState};
 
 #[path = "../common.rs"]
 mod common;
@@ -156,6 +156,8 @@ fn run_rx(config: RxConfig) -> CliResult<()> {
     }
     let jaguar2_dig = opened.chip_family.is_jaguar2() && opened.device.jaguar2_dig_enabled();
     let mut last_dig = Instant::now();
+    let mut last_slow_maintenance = Instant::now();
+    let mut jaguar2_power_tracking = Jaguar2PowerTrackingState::default();
 
     loop {
         if let Some(max) = config.max_transfers {
@@ -175,6 +177,20 @@ fn run_rx(config: RxConfig) -> CliResult<()> {
                 eprintln!("Jaguar2 DIG step failed: {err}");
             }
             last_dig = Instant::now();
+        }
+        if last_slow_maintenance.elapsed() >= Duration::from_secs(2) {
+            last_slow_maintenance = Instant::now();
+            if let Err(err) = opened.device.cfo_tracking_tick() {
+                eprintln!("CFO tracking tick failed: {err}");
+            }
+            if opened.chip_family.is_jaguar2() && opened.device.jaguar2_thermal_tracking_enabled() {
+                if let Err(err) = opened
+                    .device
+                    .tick_jaguar2_power_tracking(&mut jaguar2_power_tracking)
+                {
+                    eprintln!("Jaguar2 thermal tracking failed: {err}");
+                }
+            }
         }
         let Some(completion) = completion else {
             if !jaguar2_dig {

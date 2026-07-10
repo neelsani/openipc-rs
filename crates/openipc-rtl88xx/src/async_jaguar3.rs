@@ -5,7 +5,7 @@ use crate::device::RealtekDevice;
 use crate::regs::*;
 use crate::rtl_data;
 use crate::time::{sleep_micros, sleep_ms};
-use crate::tx::TX_DESC_SIZE_8822C;
+use crate::tx::{build_beacon_page_halmac, RealtekTxDescriptor, TX_DESC_SIZE_8822C};
 use crate::types::{
     ChannelWidth, ChipFamily, ChipInfo, DriverError, InitReport, InitStatus, MonitorOptions,
     RadioConfig,
@@ -1250,7 +1250,7 @@ impl RealtekDevice {
         self.write_u8_async(0x0483, data_sc).await
     }
 
-    async fn set_bandwidth_dividers_8822c_async(
+    pub(crate) async fn set_bandwidth_dividers_8822c_async(
         &self,
         chip: ChipInfo,
         width: ChannelWidth,
@@ -1262,7 +1262,7 @@ impl RealtekDevice {
             ChannelWidth::Mhz5 => (0x1, 0x4, 0x4, 0x2ab),
             _ => (0x0, 0x7, 0x6, 0x19b),
         };
-        let dac_override = self.jaguar3_nb_dac.load(Ordering::Acquire);
+        let dac_override = self.narrowband_dac.load(Ordering::Acquire);
         if dac_override != u8::MAX {
             dac = u32::from(dac_override & 0x07);
         }
@@ -1689,7 +1689,11 @@ impl RealtekDevice {
         self.send_h2c_raw_8822c_async(0x60, 0).await
     }
 
-    async fn send_h2c_raw_8822c_async(&self, msg: u32, msg_ext: u32) -> Result<(), DriverError> {
+    pub(crate) async fn send_h2c_raw_8822c_async(
+        &self,
+        msg: u32,
+        msg_ext: u32,
+    ) -> Result<(), DriverError> {
         let box_index = self.h2c_box.fetch_add(1, Ordering::Relaxed) & 0x03;
         let box_reg = 0x01d0 + u16::from(box_index) * 4;
         let box_ex_reg = 0x01f0 + u16::from(box_index) * 4;
@@ -1902,6 +1906,44 @@ impl RealtekDevice {
         }
         Err(DriverError::Nusb(
             "RTL8822C firmware reserved-page download did not become valid".to_owned(),
+        ))
+    }
+
+    pub(crate) async fn download_beacon_page_jaguar3_async(
+        &self,
+        beacon: &[u8],
+    ) -> Result<(), DriverError> {
+        self.write_u16_async(REG_FIFOPAGE_CTRL_2, RSV_PG_BOUNDARY_8822C | BIT15 as u16)
+            .await?;
+        let cr1 = self.read_u8_async(REG_CR + 1).await.unwrap_or(0);
+        self.write_u8_async(REG_CR + 1, cr1 | BIT0 as u8).await?;
+        let frame = build_beacon_page_halmac(beacon, RealtekTxDescriptor::Jaguar3);
+        let sent = self.write_tx_transfer_raw_async(&frame).await?;
+        if sent != frame.len() {
+            self.write_u8_async(REG_CR + 1, cr1).await?;
+            return Err(DriverError::BulkOutShort {
+                expected: frame.len(),
+                actual: sent,
+            });
+        }
+        for _ in 0..1000 {
+            if self
+                .read_u8_async(REG_FIFOPAGE_CTRL_2 + 1)
+                .await
+                .unwrap_or(0)
+                & BIT7 as u8
+                != 0
+            {
+                self.write_u16_async(REG_FIFOPAGE_CTRL_2, RSV_PG_BOUNDARY_8822C | BIT15 as u16)
+                    .await?;
+                self.write_u8_async(REG_CR + 1, cr1).await?;
+                return Ok(());
+            }
+            sleep_micros(10).await;
+        }
+        self.write_u8_async(REG_CR + 1, cr1).await?;
+        Err(DriverError::Nusb(
+            "Jaguar3 beacon reserved-page download did not become valid".to_owned(),
         ))
     }
 
@@ -2256,15 +2298,16 @@ fn jaguar3_channel_plan(
 
 fn sco_value_8822c(channel: u8) -> u32 {
     match channel {
-        36..=51 => 0x494,
+        1..=10 => 0x9aa,
+        11 | 12 => 0x96a,
+        13 | 14 => 0x969,
+        15..=51 => 0x494,
         52..=55 => 0x493,
         56..=111 => 0x453,
         112..=119 => 0x452,
         120..=172 => 0x412,
         173..=u8::MAX => 0x411,
-        1..=10 => 0x9aa,
-        11 | 12 => 0x96a,
-        _ => 0x969,
+        _ => unreachable!("channel zero is rejected by the public radio configuration"),
     }
 }
 

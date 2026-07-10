@@ -169,8 +169,13 @@ impl RealtekDevice {
         self.switch_wireless_band_async(chip, radio.channel, radio.channel_width, efuse)
             .await?;
         self.set_channel_number_async(chip, center_channel).await?;
-        self.set_bandwidth_async(chip, radio.channel_width, radio.channel_offset)
-            .await?;
+        self.set_bandwidth_async(
+            chip,
+            radio.channel,
+            radio.channel_width,
+            radio.channel_offset,
+        )
+        .await?;
         if skip_tx_power {
             return Ok(());
         }
@@ -623,7 +628,7 @@ impl RealtekDevice {
         channel: u8,
     ) -> Result<(), DriverError> {
         let fc_area = if chip.family == ChipFamily::Rtl8814 {
-            if (36..=48).contains(&channel) {
+            if (15..=48).contains(&channel) {
                 0x494
             } else if (50..=64).contains(&channel) {
                 0x453
@@ -650,7 +655,7 @@ impl RealtekDevice {
 
         for path in RfPath::iter(chip.total_rf_paths()) {
             let rf_val = if chip.family == ChipFamily::Rtl8814 {
-                if (36..=64).contains(&channel) {
+                if (15..=64).contains(&channel) {
                     0x101
                 } else if (100..=140).contains(&channel) {
                     0x301
@@ -693,7 +698,7 @@ impl RealtekDevice {
         }
 
         if chip.family == ChipFamily::Rtl8814 {
-            if (36..=64).contains(&channel) {
+            if (15..=64).contains(&channel) {
                 self.set_bb_reg_async(0x0958, 0x1f, 1).await?;
             } else if (100..=144).contains(&channel) {
                 self.set_bb_reg_async(0x0958, 0x1f, 2).await?;
@@ -730,6 +735,7 @@ impl RealtekDevice {
     async fn set_bandwidth_async(
         &self,
         chip: ChipInfo,
+        channel: u8,
         width: ChannelWidth,
         channel_offset: u8,
     ) -> Result<(), DriverError> {
@@ -746,9 +752,64 @@ impl RealtekDevice {
 
         match width {
             ChannelWidth::Mhz5 | ChannelWidth::Mhz10 => {
-                if chip.family != ChipFamily::Rtl8814 {
-                    self.set_bb_reg_async(R_RFMOD_JAGUAR, 0x003003c3, 0x00300200)
+                let is_5mhz = width == ChannelWidth::Mhz5;
+                match chip.family {
+                    ChipFamily::Rtl8812 => {
+                        let mut adc = if is_5mhz { 0 } else { 1 };
+                        let mut dac = if is_5mhz { 1 } else { 2 };
+                        let adc_override = self
+                            .narrowband_adc
+                            .load(std::sync::atomic::Ordering::Acquire);
+                        let dac_override = self
+                            .narrowband_dac
+                            .load(std::sync::atomic::Ordering::Acquire);
+                        if adc_override != u8::MAX {
+                            adc = u32::from(adc_override & 0x03);
+                        }
+                        if dac_override != u8::MAX {
+                            dac = u32::from(dac_override & 0x03);
+                        }
+                        let small_bw = if is_5mhz { 1 } else { 2 };
+                        let value = (dac << 20) | (adc << 8) | (small_bw << 6);
+                        self.set_bb_reg_async(R_RFMOD_JAGUAR, 0x0030_03c3, value)
+                            .await?;
+                        self.set_bb_reg_async(0x08c4, BIT30, 0).await?;
+                        self.set_bb_reg_async(
+                            0x0848,
+                            0x03c0_0000,
+                            if chip.total_rf_paths() >= 2 { 7 } else { 8 },
+                        )
                         .await?;
+                    }
+                    ChipFamily::Rtl8814 => {
+                        let mut adc = if is_5mhz { 2 } else { 3 };
+                        let mut dac = if is_5mhz { 2 } else { 3 };
+                        let adc_override = self
+                            .narrowband_adc
+                            .load(std::sync::atomic::Ordering::Acquire);
+                        let dac_override = self
+                            .narrowband_dac
+                            .load(std::sync::atomic::Ordering::Acquire);
+                        if adc_override != u8::MAX {
+                            adc = u32::from(adc_override & 0x03);
+                        }
+                        if dac_override != u8::MAX {
+                            dac = u32::from(dac_override & 0x03);
+                        }
+                        let small_bw = if is_5mhz { 1 } else { 2 };
+                        self.set_bb_reg_async(
+                            R_RFMOD_JAGUAR,
+                            0x1031_03c3,
+                            (dac << 20) | (adc << 8) | (small_bw << 6),
+                        )
+                        .await?;
+                    }
+                    ChipFamily::Rtl8821 => {
+                        // Dividing RTL8821A's coupled DAC clock starves USB TX.
+                        self.set_bb_reg_async(R_RFMOD_JAGUAR, 0x0030_03c3, 0x0030_0200)
+                            .await?;
+                    }
+                    _ => unreachable!("Jaguar1 bandwidth handler received a newer family"),
                 }
             }
             ChannelWidth::Mhz20 => {
@@ -784,6 +845,42 @@ impl RealtekDevice {
                 width.rf_bw_bits(),
             )
             .await?;
+        }
+        self.fix_spur_8812_async(chip, channel, width).await?;
+        Ok(())
+    }
+
+    async fn fix_spur_8812_async(
+        &self,
+        chip: ChipInfo,
+        channel: u8,
+        width: ChannelWidth,
+    ) -> Result<(), DriverError> {
+        if chip.family != ChipFamily::Rtl8812
+            || matches!(width, ChannelWidth::Mhz5 | ChannelWidth::Mhz10)
+        {
+            return Ok(());
+        }
+        if chip.cut_version == 2 {
+            self.set_bb_reg_async(
+                R_RFMOD_JAGUAR,
+                0x0c00,
+                u32::from(width == ChannelWidth::Mhz40 && channel == 11) + 2,
+            )
+            .await?;
+            if width == ChannelWidth::Mhz20 && matches!(channel, 13 | 14) {
+                self.set_bb_reg_async(R_RFMOD_JAGUAR, 0x0300, 3).await?;
+                self.set_bb_reg_async(0x08c4, BIT30, 1).await?;
+            } else if width == ChannelWidth::Mhz40 && channel == 11 {
+                self.set_bb_reg_async(0x08c4, BIT30, 1).await?;
+            } else if width != ChannelWidth::Mhz80 {
+                self.set_bb_reg_async(R_RFMOD_JAGUAR, 0x0300, 2).await?;
+                self.set_bb_reg_async(0x08c4, BIT30, 0).await?;
+            }
+        } else if width == ChannelWidth::Mhz20 && matches!(channel, 13 | 14) {
+            self.set_bb_reg_async(R_RFMOD_JAGUAR, 0x0300, 3).await?;
+        } else if channel <= 14 {
+            self.set_bb_reg_async(R_RFMOD_JAGUAR, 0x0300, 2).await?;
         }
         Ok(())
     }

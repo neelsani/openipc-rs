@@ -506,6 +506,13 @@ packets repaired by FEC, encoded video bitrate, delivered video FPS, and local
 receive-through-decode processing latency. Loss and FEC percentages use deltas
 from each sampling interval rather than lifetime counters. RSSI/SNR remain in
 the video OSD and audio queue/counter details remain with route diagnostics.
+Above the time-series plots, a live composition bar divides measured local
+latency into non-overlapping parse, WFB/RTP, unassigned pre-decode, decoder
+submission, hardware decode, and presentation segments. UDP mode substitutes
+its RTP and route stages. Segment widths animate with their contribution and
+retain exact values in the legend and pointer details. Aggregate values such as
+USB wait and receive-batch duration are intentionally excluded because stacking
+them would double-count their component work.
 Plots disable dragging, zooming, wheel navigation, and double-click reset; their
 bounds follow the newest retained samples.
 Diagnostics is divided into four views:

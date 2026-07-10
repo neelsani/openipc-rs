@@ -6,6 +6,7 @@ pub(crate) struct Jaguar1RetuneState {
     pub last_fc: Option<u32>,
     pub last_spur_class: Option<u8>,
     pub last_subchannel: Option<u8>,
+    pub bandwidth_20_8ac: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -20,6 +21,11 @@ pub(crate) struct Jaguar2RetuneState {
     pub last_rf_be: Option<u8>,
     pub last_df18: Option<bool>,
     pub last_cck_key: Option<bool>,
+    pub bandwidth_20_8ac: Option<u32>,
+    pub bandwidth_rf18: Option<u32>,
+    pub bandwidth_center: u8,
+    pub bandwidth_is_2g: bool,
+    pub bandwidth_two_paths: bool,
 }
 
 #[derive(Debug, Clone, Default)]

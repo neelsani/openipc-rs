@@ -73,6 +73,11 @@ pub struct RxPacketAttrib {
     pub sgi: u8,
     /// Scrambler seed from PHY status.
     pub scrambler: u8,
+    /// Path-A carrier-frequency-offset tail from OFDM PHY status.
+    ///
+    /// Realtek reports this as a signed hardware code. The vendor conversion
+    /// is approximately `raw * 2.5 kHz` at the ordinary 20 MHz clock rate.
+    pub cfo_tail: i8,
     /// Per-path raw RSSI readings when available.
     pub rssi: [u8; 4],
     /// Per-path raw SNR readings when available.
@@ -107,6 +112,7 @@ impl Default for RxPacketAttrib {
             ldpc: 0,
             sgi: 0,
             scrambler: 0,
+            cfo_tail: 0,
             rssi: [0; 4],
             snr: [0; 4],
             evm: [0; 4],
@@ -122,6 +128,25 @@ pub struct RealtekRxPacket<'a> {
     pub attrib: RxPacketAttrib,
     /// Borrowed packet bytes after descriptor, PHY status, and alignment shift.
     pub data: &'a [u8],
+}
+
+impl RealtekRxPacket<'_> {
+    /// Return a beacon/probe-response transmitter TSF stamped by the remote MAC.
+    ///
+    /// The 64-bit little-endian value at MPDU bytes 24 through 31 is inserted
+    /// at TX egress by the remote hardware. Pair it with [`RxPacketAttrib::tsfl`]
+    /// for one-way hardware clock synchronization.
+    pub fn tx_egress_tsf(&self) -> Option<u64> {
+        tx_egress_tsf(self.data)
+    }
+}
+
+/// Parse the hardware TX-egress TSF from an 802.11 beacon or probe response.
+pub fn tx_egress_tsf(frame: &[u8]) -> Option<u64> {
+    if frame.len() < 32 || !matches!(frame[0], 0x80 | 0x50) {
+        return None;
+    }
+    Some(u64::from_le_bytes(frame[24..32].try_into().ok()?))
 }
 
 /// Parsed command-to-host report carried in an RX aggregate.
@@ -247,6 +272,9 @@ pub fn parse_rx_descriptor_with_kind(
         ..Default::default()
     };
 
+    // DW5 carries TSF-low on all three USB descriptor generations.
+    attrib.tsfl = d5;
+
     if kind == RxDescriptorKind::Jaguar1 {
         attrib.encrypt = bits(d0, 20, 3) as u8;
         attrib.qos = bits(d0, 23, 1) != 0;
@@ -261,7 +289,6 @@ pub fn parse_rx_descriptor_with_kind(
         attrib.stbc = bits(d4, 2, 1) as u8;
         attrib.bw = bits(d4, 4, 2) as u8;
         attrib.scrambler = bits(d4, 9, 7) as u8;
-        attrib.tsfl = d5;
     }
 
     Ok(attrib)
@@ -417,6 +444,10 @@ fn parse_phy_status(attrib: &mut RxPacketAttrib, phy: &[u8], kind: RxDescriptorK
     attrib.rssi[0] = phy[0];
     attrib.rssi[1] = phy[1];
 
+    if phy.len() > 9 {
+        attrib.cfo_tail = phy[9] as i8;
+    }
+
     if phy.len() < 28 {
         return;
     }
@@ -466,6 +497,7 @@ fn parse_phy_status_jaguar23(attrib: &mut RxPacketAttrib, phy: &[u8], kind: RxDe
 
     // Jaguar3 pages other than type 1 reuse these bytes for unrelated data.
     if kind == RxDescriptorKind::Jaguar2 || phy[0] & 0x0f == 1 {
+        attrib.cfo_tail = phy[20] as i8;
         for path in 0..4 {
             attrib.evm[path] = phy[16 + path] as i8;
             attrib.snr[path] = phy[24 + path] as i8;
@@ -741,6 +773,7 @@ mod tests {
         phy[5] = 13 << 4;
         phy[7] = (1 << 5) | (1 << 6);
         phy[16..20].copy_from_slice(&[0xd5, 0x80, 0, 0]);
+        phy[20] = 0xf4;
         phy[24..28].copy_from_slice(&[43, 25, 0, 0]);
         let mut aggregate = Vec::new();
         aggregate.extend_from_slice(&jaguar3_descriptor(3, 4, 0, 13, false));
@@ -752,9 +785,33 @@ mod tests {
             .remove(0);
         assert_eq!(packet.attrib.rssi, [71, 57, 0, 0]);
         assert_eq!(packet.attrib.evm[0], -43);
+        assert_eq!(packet.attrib.cfo_tail, -12);
         assert_eq!(packet.attrib.snr[..2], [43, 25]);
         assert_eq!(packet.attrib.bw, 2);
         assert_eq!((packet.attrib.ldpc, packet.attrib.stbc), (1, 1));
+    }
+
+    #[test]
+    fn all_generations_surface_descriptor_tsf_low() {
+        let mut desc = jaguar3_descriptor(4, 0, 0, 0x2c, false);
+        desc[20..24].copy_from_slice(&0x89ab_cdefu32.to_le_bytes());
+        for kind in [RxDescriptorKind::Jaguar2, RxDescriptorKind::Jaguar3] {
+            let parsed = parse_rx_descriptor_with_kind(&desc, kind).unwrap();
+            assert_eq!(parsed.tsfl, 0x89ab_cdef);
+        }
+    }
+
+    #[test]
+    fn parses_beacon_and_probe_response_egress_tsf() {
+        let tsf = 0x1122_3344_5566_7788u64;
+        for fc0 in [0x80, 0x50] {
+            let mut frame = [0u8; 32];
+            frame[0] = fc0;
+            frame[24..32].copy_from_slice(&tsf.to_le_bytes());
+            assert_eq!(tx_egress_tsf(&frame), Some(tsf));
+        }
+        assert_eq!(tx_egress_tsf(&[0x08; 32]), None);
+        assert_eq!(tx_egress_tsf(&[0x80; 31]), None);
     }
 
     #[test]

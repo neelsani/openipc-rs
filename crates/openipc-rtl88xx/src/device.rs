@@ -8,12 +8,13 @@ use nusb::transfer::{Bulk, In, Out};
 #[cfg(not(target_arch = "wasm32"))]
 use nusb::MaybeFuture;
 use openipc_core::realtek::{parse_rx_aggregate_with_kind, RealtekRxPacket, RxDescriptorKind};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use crate::async_continuous_tx::ContinuousTxState;
 use crate::async_cw::CwToneState;
 use crate::async_efuse::EfuseInfo;
+use crate::async_jaguar2_kfree::Jaguar2KfreeState;
 use crate::diagnostics::DriverDiagnosticsState;
 use crate::retune_state::FastRetuneState;
 
@@ -34,9 +35,9 @@ use crate::usb_recovery::{
 use crate::usb_transport::{read_register_with_recovery, write_register_with_recovery};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::{
-    BbDbgportRead, FalseAlarmCounters, IqkReport, Jaguar3PowerTrackingReport,
-    Jaguar3PowerTrackingState, PhydmDigState, PhydmWatchdogReport, PowerTrackingReport,
-    PowerTrackingState, ThermalStatus,
+    BbDbgportRead, FalseAlarmCounters, IqkReport, Jaguar2PowerTrackingReport,
+    Jaguar2PowerTrackingState, Jaguar3PowerTrackingReport, Jaguar3PowerTrackingState,
+    PhydmDigState, PhydmWatchdogReport, PowerTrackingReport, PowerTrackingState, ThermalStatus,
 };
 
 /// Claimed Realtek rtl88xx USB adapter.
@@ -59,6 +60,7 @@ pub struct RealtekDevice {
     pub(crate) efuse_info: OnceLock<EfuseInfo>,
     pub(crate) diagnostics: Mutex<DriverDiagnosticsState>,
     pub(crate) cck_filter_8821c: OnceLock<[u32; 3]>,
+    pub(crate) jaguar2_kfree: OnceLock<Jaguar2KfreeState>,
     pub(crate) h2c_box: AtomicU8,
     pub(crate) cw_tone: Mutex<CwToneState>,
     pub(crate) continuous_tx: Mutex<ContinuousTxState>,
@@ -67,6 +69,12 @@ pub struct RealtekDevice {
     pub(crate) tx_stats: Mutex<crate::TxStats>,
     pub(crate) tx_power_control: Mutex<crate::tx_control::TxPowerControl>,
     pub(crate) rx_quality: crate::RxQualityAccumulator,
+    pub(crate) rx_path_activity: crate::RxPathActivityAccumulator,
+    pub(crate) cfo_tracker: Mutex<crate::CfoTracker>,
+    pub(crate) cfo_tracking_enabled: AtomicBool,
+    pub(crate) crystal_cap: AtomicU8,
+    pub(crate) crystal_cap_bases: Mutex<Option<[u32; 2]>>,
+    pub(crate) beacon_interval_tu: AtomicU16,
     pub(crate) cca_disabled: Mutex<bool>,
     pub(crate) beamforming_peer: Mutex<Option<[u8; 6]>>,
     pub(crate) beamforming_report_ready: AtomicBool,
@@ -78,8 +86,10 @@ pub struct RealtekDevice {
     pub(crate) ndpa_period: AtomicU32,
     pub(crate) ndpa_counter: AtomicU64,
     pub(crate) jaguar3_tx_rf_bw: AtomicU8,
-    pub(crate) jaguar3_nb_dac: AtomicU8,
+    pub(crate) narrowband_adc: AtomicU8,
+    pub(crate) narrowband_dac: AtomicU8,
     pub(crate) jaguar2_dig_enabled: AtomicBool,
+    pub(crate) jaguar2_thermal_tracking_enabled: AtomicBool,
     pub(crate) tx_endpoint_prepared: AtomicBool,
     pub(crate) tx_wedged: AtomicBool,
     pub(crate) jaguar3_rx_wanted: AtomicBool,
@@ -344,6 +354,7 @@ impl RealtekDevice {
             efuse_info: OnceLock::new(),
             diagnostics: Mutex::new(DriverDiagnosticsState::default()),
             cck_filter_8821c: OnceLock::new(),
+            jaguar2_kfree: OnceLock::new(),
             h2c_box: AtomicU8::new(0),
             cw_tone: Mutex::new(CwToneState::default()),
             continuous_tx: Mutex::new(ContinuousTxState::default()),
@@ -352,6 +363,12 @@ impl RealtekDevice {
             tx_stats: Mutex::new(crate::TxStats::default()),
             tx_power_control: Mutex::new(crate::tx_control::TxPowerControl::default()),
             rx_quality: crate::RxQualityAccumulator::default(),
+            rx_path_activity: crate::RxPathActivityAccumulator::default(),
+            cfo_tracker: Mutex::new(crate::CfoTracker::default()),
+            cfo_tracking_enabled: AtomicBool::new(false),
+            crystal_cap: AtomicU8::new(u8::MAX),
+            crystal_cap_bases: Mutex::new(None),
+            beacon_interval_tu: AtomicU16::new(0),
             cca_disabled: Mutex::new(false),
             beamforming_peer: Mutex::new(None),
             beamforming_report_ready: AtomicBool::new(false),
@@ -363,8 +380,10 @@ impl RealtekDevice {
             ndpa_period: AtomicU32::new(0),
             ndpa_counter: AtomicU64::new(0),
             jaguar3_tx_rf_bw: AtomicU8::new(u8::MAX),
-            jaguar3_nb_dac: AtomicU8::new(u8::MAX),
+            narrowband_adc: AtomicU8::new(u8::MAX),
+            narrowband_dac: AtomicU8::new(u8::MAX),
             jaguar2_dig_enabled: AtomicBool::new(true),
+            jaguar2_thermal_tracking_enabled: AtomicBool::new(true),
             tx_endpoint_prepared: AtomicBool::new(false),
             tx_wedged: AtomicBool::new(false),
             jaguar3_rx_wanted: AtomicBool::new(true),
@@ -386,6 +405,12 @@ impl RealtekDevice {
         let chip = ChipInfo::from_probe(self.vendor_id, self.product_id, sys_cfg, chip_id);
         let _ = self.detected_family.set(chip.family);
         Ok(chip)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Probe the adapter and return its static USB/radio capability report.
+    pub fn adapter_capabilities(&self) -> Result<crate::AdapterCapabilities, DriverError> {
+        block_on_ready(self.adapter_capabilities_async())
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -452,6 +477,15 @@ impl RealtekDevice {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Switch bandwidth at the current channel using the lean narrowband path.
+    pub fn fast_set_bandwidth(
+        &self,
+        width: crate::ChannelWidth,
+    ) -> Result<crate::RetuneReport, DriverError> {
+        block_on_ready(self.fast_set_bandwidth_async(width))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     /// Select the active Jaguar1 receive chains for diversity diagnostics.
     pub fn set_rx_path_mask(&self, mask: u8) -> Result<(), DriverError> {
         block_on_ready(self.set_rx_path_mask_async(mask))
@@ -464,9 +498,51 @@ impl RealtekDevice {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    /// Disable or restore Jaguar3's MAC EDCCA transmit-deferral gate.
+    /// Disable or restore Jaguar2/3's MAC EDCCA transmit-deferral gate.
     pub fn set_cca_disabled(&self, disabled: bool) -> Result<(), DriverError> {
         block_on_ready(self.set_cca_disabled_async(disabled))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Read the adapter's free-running 64-bit hardware TSF in microseconds.
+    pub fn read_hardware_tsf(&self) -> Result<u64, DriverError> {
+        block_on_ready(self.read_hardware_tsf_async())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Set the Jaguar2/3 hardware TSF.
+    pub fn write_hardware_tsf(&self, tsf: u64) -> Result<(), DriverError> {
+        block_on_ready(self.write_hardware_tsf_async(tsf))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Load and enable a hardware-timed beacon on Jaguar2/3.
+    pub fn start_beacon(&self, beacon: &[u8], interval_tu: u16) -> Result<(), DriverError> {
+        block_on_ready(self.start_beacon_async(beacon, interval_tu))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Apply a whole-TU hardware-beacon timing shift.
+    pub fn adjust_beacon_timing(&self, microseconds: i32) -> Result<i32, DriverError> {
+        block_on_ready(self.adjust_beacon_timing_async(microseconds))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Apply a microsecond-resolution hardware-beacon timing shift.
+    pub fn adjust_beacon_timing_fine(&self, microseconds: i32) -> Result<i32, DriverError> {
+        block_on_ready(self.adjust_beacon_timing_fine_async(microseconds))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Apply a raw crystal-cap trim, or restore the EFUSE/default with `None`.
+    pub fn set_crystal_cap(&self, cap: Option<u8>) -> Result<u8, DriverError> {
+        block_on_ready(self.set_crystal_cap_async(cap))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Run one periodic closed-loop CFO correction tick.
+    pub fn cfo_tracking_tick(&self) -> Result<Option<crate::CfoStep>, DriverError> {
+        block_on_ready(self.cfo_tracking_tick_async())
     }
 
     /// Set the device-wide fallback used when radiotap carries no TX rate.
@@ -717,6 +793,15 @@ impl RealtekDevice {
         width: crate::types::ChannelWidth,
     ) -> Result<PowerTrackingReport, DriverError> {
         block_on_ready(self.tick_power_tracking_8812_async(state, channel, width))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Run one Jaguar2 thermal power tracking update tick.
+    pub fn tick_jaguar2_power_tracking(
+        &self,
+        state: &mut Jaguar2PowerTrackingState,
+    ) -> Result<Jaguar2PowerTrackingReport, DriverError> {
+        block_on_ready(self.tick_jaguar2_power_tracking_async(state))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -980,10 +1065,33 @@ impl RealtekDevice {
         for packet in &packets {
             if packet.attrib.pkt_rpt_type == openipc_core::realtek::RxPacketType::NormalRx {
                 self.rx_quality.observe(&packet.attrib);
+                let chain_count = self
+                    .detected_family
+                    .get()
+                    .copied()
+                    .or_else(|| supported_family_hint(self.vendor_id, self.product_id))
+                    .map_or(2, |family| match family {
+                        ChipFamily::Rtl8814 => 4,
+                        ChipFamily::Rtl8821 | ChipFamily::Rtl8821c => 1,
+                        _ => 2,
+                    });
+                self.rx_path_activity
+                    .observe(packet.attrib.rssi, chain_count);
+                if self.cfo_tracking_enabled.load(Ordering::Acquire) && packet.attrib.cfo_tail != 0
+                {
+                    if let Ok(mut tracker) = self.cfo_tracker.lock() {
+                        tracker.add(packet.attrib.cfo_tail);
+                    }
+                }
                 self.observe_beamforming_report(packet.data);
             }
         }
         Ok(packets)
+    }
+
+    /// Drain and classify receive chains active within `margin_db` of the strongest.
+    pub fn active_rx_paths(&self, margin_db: i16) -> crate::ActiveRxPaths {
+        self.rx_path_activity.snapshot(margin_db)
     }
 
     /// Drain the rolling RX quality window and combine it with frame-free energy.

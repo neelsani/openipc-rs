@@ -29,6 +29,12 @@ lists.
 - Jaguar2 performs Devourer's two-attempt CPU-reset firmware retry inside a
   four-attempt complete pre-init, card OFF/ON, and system-configuration retry,
   matching its warm-chip recovery boundary.
+- Jaguar2 5/10 MHz re-clocking for RTL8821C and RTL8822B, including ADC/DAC
+  divider programming, the RTL8822B RF18 re-latch edge, MAC-clock/TSF timing,
+  SoML/RxHP state, KFree/PA-bias EFUSE trims, and the vendor spur/NBI tail.
+- Jaguar2 thermal TX-power tracking and receive-side CFO tracking are explicit
+  app-scheduled ticks, using the same calibration tables and crystal-trim
+  controller as Devourer.
 - RTL8821C-specific firmware, one-path PHY/RF tables, power/FIFO/channel
   sequences, WLAN/BT antenna grant, LOK/TXK/RXK IQK, calibrated per-rate TXAGC,
   and CW carrier.
@@ -43,6 +49,12 @@ lists.
 - RFE-aware MAC/BB/RF table loading, including conditional RF table entries.
 - Channel, channel-width, band-switch, RFE pinmux, and TX BB swing
   configuration.
+- 5/10 MHz narrowband and fast width-only switching across the supported
+  RTL8812A/RTL8814A, Jaguar2, and Jaguar3 paths, with generation-specific
+  register ordering and narrowband spur correction.
+- Static adapter capabilities, live active-RX-chain classification, hardware
+  receive TSF timestamps, TSF read/write, Jaguar2/3 beacon TX with egress TSF
+  insertion, and coarse/fine beacon timing adjustment.
 - Hardware-validated RTL8822C channel switching, including the 3-wire RF reset,
   gated RXBB write, per-band AGC selection, CCK RX-IQ setup, and force-anapar
   update needed for 2.4 GHz receive.
@@ -232,14 +244,18 @@ DEVOURER_SKIP_COEX                skip Jaguar2 WLAN coexistence grant
 DEVOURER_SKIP_DIG                 disable Jaguar2 100 ms DIG maintenance
 DEVOURER_8821C_NO_PHYST           disable RTL8821C RX PHY-status blocks
 DEVOURER_IGI=<n>                  override Jaguar2's initial gain index
-DEVOURER_DIS_CCA                  disable only Jaguar3's safe MAC EDCCA gate
+DEVOURER_DIS_CCA                  disable the safe Jaguar2/3 MAC EDCCA gate
 DEVOURER_8814_FWDL=kernel|rtw88   select RTL8814 firmware download path
 DEVOURER_8814_FWDL_CHUNK=<n>      override RTL8814 kernel-path chunk size
 DEVOURER_RX_PATHS=<mask>          select Jaguar1 RX chains, for example 0x11 or 0xff
 DEVOURER_RFE=<n>                  override the EFUSE-selected RFE type
 DEVOURER_TX_PWR=<n>               force a flat Jaguar2 TXAGC index
 DEVOURER_TX_RF_BW=<n>             override Jaguar3's 40 MHz TX RF-BW field
-DEVOURER_NB_DAC=<n>               override Jaguar3's narrowband DAC divider
+DEVOURER_NB_ADC=<n>               override Jaguar2's narrowband ADC divider
+DEVOURER_NB_DAC=<n>               override the generation-specific narrowband DAC divider
+DEVOURER_XTAL_CAP=<n>             set the post-bring-up crystal-cap trim
+DEVOURER_CFO_TRACK                run closed-loop receive CFO correction
+DEVOURER_THERMAL_TRACK=0|1        disable or enable Jaguar2 thermal tracking
 DEVOURER_RX_CSI_MASK=<range>[/w]  mask an MHz range, for example 5230-5250/7
 DEVOURER_RX_NBI=<mhz>             place one RX narrow-band interference notch
 DEVOURER_TX_TIMEOUT_MS=<n>        set the native bulk-OUT timeout
@@ -389,23 +405,29 @@ using devourer, aviateur, and openipc-zig as references. The cold-start path now
 includes EFUSE-backed RFE selection and devourer-style band switching for
 RTL8812/RTL8821/RTL8814, plus the newer devourer TX power, PHYDM, power
 tracking, IQK, C2H, TX-status, RTL8814 firmware controls, and the complete
-`rtl8822e` Jaguar3 path through devourer `40e3a2a`. This audit also includes
+`rtl8822e` Jaguar3 path through devourer `11dff09`. This audit also includes
 RTL8822B Jaguar2, Jaguar3 40/80 MHz and 40-in-80, RX CSI/NBI masking,
 beamforming self-sounding, concurrent TX/RX behavior, Jaguar1's unified
 in-flight USB RX queue, all-generation CW control, EFUSE/calibration retries,
 infinite RX submissions, exclusive claim-before-reset ownership, all-generation
-fast retuning, radiotap-driven per-packet hopping, runtime power/thermal controls,
-RX/TX health feeds, adapter-health probes, Jaguar2 per-packet power, STBC guards,
-and self-gated Jaguar3 TX beamforming. Hardware bring-up still
+fast retuning and fast bandwidth changes, 5/10 MHz RTL8812/RTL8814/Jaguar2/3
+re-clocking, extended 5 GHz tuning, crystal/CFO control, J2 thermal/KFree/spur
+handling, hardware TSF/beacons, radiotap-driven per-packet hopping, runtime
+power/thermal controls, RX/TX health feeds, adapter-health probes, Jaguar2
+per-packet power, STBC guards, and self-gated Jaguar3 TX beamforming. Hardware bring-up still
 needs live adapter testing and register-trace comparison per chip family before
 the support matrix should be treated as final.
 
-Devourer's `40e3a2a` also added a Linux-only VFIO PCIe transport for RTL8821CE.
-That transport is intentionally outside this USB crate: `openipc-rtl88xx`
+Devourer's newer PCIe/VFIO timing and reference tools are intentionally outside
+this USB crate: `openipc-rtl88xx`
 keeps `nusb` as its native/WebUSB transport and supports the USB rtl88xx
 families used by OpenIPC ground stations. The portable driver behavior above is
 shared across native and WASM; adding PCIe later should be a separate transport
 crate rather than introducing VFIO assumptions into browser and mobile builds.
+
+`DEVOURER_REPLAY_WSEQ` is also not exposed. It replays a developer-supplied
+Jaguar2 register trace for delta-debugging a vendor initialization sequence; it
+is not part of monitor-mode operation or the public hardware behavior.
 
 Set `DEVOURER_HOP_PROF=1` or `OPENIPC_HOP_PROF=1` on native builds to emit one
 machine-readable `openipc_rtl88xx::hop_prof` log record per fast hop. Trace

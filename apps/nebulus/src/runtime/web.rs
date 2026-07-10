@@ -495,8 +495,6 @@ fn js_error(error: JsValue) -> String {
 }
 
 mod worker {
-    #[cfg(debug_assertions)]
-    use std::time::Duration;
     use std::{
         cell::{Cell, RefCell},
         collections::{HashMap, VecDeque},
@@ -519,8 +517,9 @@ mod worker {
         FecCounters, FrameLayout, PayloadRouteId, ReceiverRuntime, WfbKeypair, WfbTxKeypair,
     };
     use openipc_rtl88xx::{
-        build_usb_tx_frame, ChannelWidth, ChipFamily, DriverOptions, Jaguar3PowerTrackingState,
-        RadioConfig, RealtekDevice, RealtekTxDescriptor, RealtekTxOptions,
+        build_usb_tx_frame, ChannelWidth, ChipFamily, DriverOptions, Jaguar2PowerTrackingState,
+        Jaguar3PowerTrackingState, RadioConfig, RealtekDevice, RealtekTxDescriptor,
+        RealtekTxOptions,
     };
     use openipc_uplink::{
         TxBatch, TxFailureKind, TxOutcome, UplinkEngine, UplinkEngineMetrics, UserspaceNetwork,
@@ -528,7 +527,7 @@ mod worker {
     };
     use wasm_bindgen::JsValue;
     use wasm_bindgen_futures::{spawn_local, JsFuture};
-    use web_time::Instant;
+    use web_time::{Duration, Instant};
 
     use crate::{
         model::LogLevel,
@@ -1167,14 +1166,16 @@ mod worker {
 
     impl WebMaintenance {
         fn start(device: Rc<RealtekDevice>, chip: ChipFamily) -> Option<Self> {
-            if !chip.is_jaguar2() && !chip.is_jaguar3() {
+            if !chip.is_jaguar2() && !chip.is_jaguar3() && !device.cfo_tracking_enabled() {
                 return None;
             }
             let (stop, stop_receiver) = oneshot::channel();
             let (done_sender, done) = oneshot::channel();
             spawn_local(async move {
                 let mut stop_receiver = Box::pin(stop_receiver);
-                let mut power_tracking = Jaguar3PowerTrackingState::default();
+                let mut jaguar2_power_tracking = Jaguar2PowerTrackingState::default();
+                let mut jaguar3_power_tracking = Jaguar3PowerTrackingState::default();
+                let mut last_slow_maintenance = Instant::now();
                 loop {
                     let timer = Box::pin(sleep_ms(if chip.is_jaguar2() { 100 } else { 2_000 }));
                     match select(timer, stop_receiver).await {
@@ -1182,11 +1183,24 @@ mod worker {
                             stop_receiver = remaining_stop;
                             if chip.is_jaguar2() && device.jaguar2_dig_enabled() {
                                 let _ = device.run_jaguar2_dig_step_async().await;
-                            } else if chip.is_jaguar3() {
-                                let _ = device.run_jaguar3_coex_keepalive_async().await;
-                                let _ = device
-                                    .tick_jaguar3_power_tracking_async(&mut power_tracking)
-                                    .await;
+                            }
+                            if last_slow_maintenance.elapsed() >= Duration::from_secs(2) {
+                                last_slow_maintenance = Instant::now();
+                                let _ = device.cfo_tracking_tick_async().await;
+                                if chip.is_jaguar2() && device.jaguar2_thermal_tracking_enabled() {
+                                    let _ = device
+                                        .tick_jaguar2_power_tracking_async(
+                                            &mut jaguar2_power_tracking,
+                                        )
+                                        .await;
+                                } else if chip.is_jaguar3() {
+                                    let _ = device.run_jaguar3_coex_keepalive_async().await;
+                                    let _ = device
+                                        .tick_jaguar3_power_tracking_async(
+                                            &mut jaguar3_power_tracking,
+                                        )
+                                        .await;
+                                }
                             }
                         }
                         Either::Right((_stop, _timer)) => break,

@@ -51,6 +51,14 @@ OpenIPC/devourer d7addaa Self-gated Jaguar3 TX beamforming apply
 OpenIPC/devourer 645eed0 Typed construction-time device configuration
 OpenIPC/devourer a84a6f0 Adapter-health/EFUSE stability diagnostics
 OpenIPC/devourer 40e3a2a Bus-neutral refactor and Linux VFIO PCIe transport
+OpenIPC/devourer 21994e1 Adapter capabilities and extended 5 GHz tuning
+OpenIPC/devourer e1896ab/d396f58/a86a16f Jaguar2 narrowband, thermal, KFree, spur, and MAC parity
+OpenIPC/devourer eb207c2/aef9b69 RTL8812/RTL8814 5/10 MHz narrowband
+OpenIPC/devourer 67a2ddb Crystal-cap control and closed-loop CFO tracking
+OpenIPC/devourer 9e91f6e Fast bandwidth-only switching on all generations
+OpenIPC/devourer c37ea5f Hardware TSF and receive timestamps
+OpenIPC/devourer dad6d6d/c991805 Hardware beacons, TX-egress TSF, and TsfSync
+OpenIPC/devourer 11dff09 Latest audited baseline; PCIe reference tooling excluded
 ```
 
 ## Audit Plan
@@ -265,7 +273,7 @@ limited to demo environment variables:
   markers, matching the useful behavior of devourer's MCS-headroom probe while
   retaining the Rust per-packet radiotap TX path.
 - `fast_retune[_async]` mirrors Devourer's generation-specific lean hop path
-  through `40e3a2a`.
+  through `11dff09`.
   Jaguar1 caches per-path RF18 and channel buckets; Jaguar2 also applies its
   RF-BE/DF channel constants while omitting the hardware-validated unnecessary
   per-hop RX/IGI kick; Jaguar3 preserves the RF18/RXBB ordering,
@@ -289,7 +297,7 @@ limited to demo environment variables:
 
 ### Runtime Link And Adapter Health
 
-The `3ec1ab1..40e3a2a` runtime APIs are represented directly in Rust:
+The `3ec1ab1..11dff09` portable runtime APIs are represented directly in Rust:
 
 - `TxPowerCaps`, `set_tx_power_offset_qdb[_async]`,
   `set_tx_power_index_override[_async]`, and `TxPowerState` implement the
@@ -314,6 +322,15 @@ The `3ec1ab1..40e3a2a` runtime APIs are represented directly in Rust:
 - `set_cca_disabled[_async]` contains only Devourer's safe MAC EDCCA writes.
   The vendor BB recipe is intentionally absent because it was measured to make
   monitor RX deaf to OFDM.
+- `AdapterCapabilities`, `ActiveRxPaths`, `set_crystal_cap[_async]`, and
+  `CfoTracker` expose static radio identity, live chain health, and narrowband
+  oscillator correction without application-side chip tables.
+- `fast_set_bandwidth[_async]` applies the generation-specific width-only
+  recipe. Full monitor initialization and normal retunes include the exact
+  RTL8812/RTL8814/Jaguar2/Jaguar3 5/10 MHz re-clocking and spur tails.
+- `read_hardware_tsf[_async]`, `write_hardware_tsf[_async]`, beacon start,
+  coarse/fine timing adjustment, per-frame `tsfl`, TX-egress TSF parsing, and
+  `openipc_core::TsfSync` provide the portable hardware-time primitives.
 
 These are explicit calls and state objects. The crate does not start thermal,
 quality, health, or control threads. Native apps normally schedule them on the
@@ -334,11 +351,13 @@ different by design:
   Jaguar2 DIG every 100 ms. Web apps schedule the same async operation from the
   browser event loop.
 
-PCIe/VFIO is outside this USB/WebUSB crate. Debug-only dump formatting and
-Devourer's experimental executables are not part of the on-air parity contract.
+PCIe/VFIO is outside this USB/WebUSB crate. Debug-only dump formatting,
+`DEVOURER_REPLAY_WSEQ`, kernel timestamp prototypes, and Devourer's experimental
+executables/reference transport tools are not part of the on-air parity
+contract.
 
-The final upstream commit also introduces a VFIO PCIe transport for RTL8821CE.
-That is not copied into `openipc-rtl88xx`: this crate is the cross-platform
+The newer upstream commits extend the VFIO transport and add PCIe timing tools.
+Those are not copied into `openipc-rtl88xx`: this crate is the cross-platform
 `nusb`/WebUSB driver for USB ground-station adapters. A future PCIe backend
 belongs behind a separate Linux-only transport crate so VFIO does not leak into
 Windows, macOS, Android, or browser builds.
@@ -380,7 +399,9 @@ For Jaguar3, devourer's coex thread does two jobs:
 Nebulus keeps bulk-IN transfers posted in its RX loop and calls
 `run_jaguar3_coex_keepalive` plus `tick_jaguar3_power_tracking` on a two-second
 cadence. The latter dispatches the correct RTL8822C or RTL8822E thermal
-algorithm. The driver exposes the hooks; the app owns scheduling.
+algorithm. Jaguar2 similarly runs DIG every 100 ms and thermal/CFO maintenance
+every two seconds. `wfb-rs` follows the same cadence. The driver exposes the
+hooks; the app owns scheduling.
 
 ## Test Strategy
 

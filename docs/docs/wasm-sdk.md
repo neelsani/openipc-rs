@@ -219,6 +219,11 @@ console.log(powerReport.applied, powerReport.thermalAverage);
 const jaguar3Power = new WebUsbJaguar3PowerTracking();
 const jaguar3Report = await jaguar3Power.tick(radio);
 console.log(jaguar3Report.thermalA, jaguar3Report.compensationA);
+
+const jaguar2Power = new WebUsbJaguar2PowerTracking();
+await jaguar2Power.init(radio);
+const jaguar2Report = await jaguar2Power.tick(radio);
+console.log(jaguar2Report.applied, jaguar2Report.thermalAverage);
 ```
 
 `supportedUsbFilters()` still returns a JSON string because the immediate
@@ -234,6 +239,25 @@ await radio.sendPacketForRadio(radiotapFrame, 149, 80, false);
 // Lean same-band hop; band changes automatically run the full retune path.
 const hop = await radio.fastRetune(161, true);
 console.log(hop.usedFastPath);
+
+// Static hardware identity and live receive-chain activity.
+const caps = await radio.adapterCapabilities();
+console.log(caps.chipName, caps.bandwidthMask, caps.tune5gMaxMhz);
+console.log(radio.activeRxPaths(20).activeMask);
+
+// Change only the channel width without repeating a full channel retune.
+await radio.fastSetBandwidth(10);
+
+// Hardware time distribution on Jaguar2/3 beacon-capable adapters.
+const localTsf = await radio.readHardwareTsf();
+await radio.writeHardwareTsf(localTsf);
+await radio.startBeacon(beaconBytes, 100);
+await radio.adjustBeaconTimingFine(-2);
+
+// Optional receive CFO correction for narrowband links.
+await radio.setCrystalCap(0x20);
+radio.setCfoTrackingEnabled(true);
+console.log(await radio.cfoTrackingTick());
 
 // Receive-side suppression for a dirty upper slice or one narrow interferer.
 await radio.applyCsiMask(149, 80, 0, 5795, 5815, 7);

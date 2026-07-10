@@ -341,9 +341,9 @@ impl ChipInfo {
 /// Configured WiFi channel width for monitor mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelWidth {
-    /// 5 MHz narrowband mode on Jaguar3 devices.
+    /// 5 MHz narrowband mode on RTL8812A/RTL8814A and Jaguar2/3 devices.
     Mhz5,
-    /// 10 MHz narrowband mode on Jaguar3 devices.
+    /// 10 MHz narrowband mode on RTL8812A/RTL8814A and Jaguar2/3 devices.
     Mhz10,
     /// 20 MHz channel.
     Mhz20,
@@ -520,7 +520,20 @@ pub struct MonitorOptions {
     /// Optional Jaguar3 40 MHz TX RF-bandwidth field override (`0..=3`).
     pub jaguar3_tx_rf_bw: Option<u8>,
     /// Optional Jaguar3 narrowband DAC-divider override (`0..=7`).
+    ///
+    /// Retained for source compatibility; [`Self::narrowband_dac`] is the
+    /// generation-neutral form preferred by new callers.
     pub jaguar3_nb_dac: Option<u8>,
+    /// Optional 5/10 MHz ADC-divider override (`0..=7`).
+    pub narrowband_adc: Option<u8>,
+    /// Optional 5/10 MHz DAC-divider override (`0..=7`).
+    pub narrowband_dac: Option<u8>,
+    /// Optional crystal load-capacitance trim applied after bring-up.
+    pub crystal_cap: Option<u8>,
+    /// Enable closed-loop crystal-cap correction from per-frame CFO samples.
+    pub cfo_tracking: bool,
+    /// Enable Jaguar2 thermal TX-power tracking (Devourer defaults this on).
+    pub thermal_tracking: bool,
     /// Optional flat TXAGC index applied during bring-up.
     pub tx_power_index: Option<u8>,
     /// Arm the hardware sounding engine after bring-up.
@@ -568,6 +581,11 @@ impl Default for MonitorOptions {
             jaguar3_enable_rx: true,
             jaguar3_tx_rf_bw: None,
             jaguar3_nb_dac: None,
+            narrowband_adc: None,
+            narrowband_dac: None,
+            crystal_cap: None,
+            cfo_tracking: false,
+            thermal_tracking: true,
             tx_power_index: None,
             beamforming_sounder: false,
             beamforming_sounder_mac: None,
@@ -616,6 +634,12 @@ impl MonitorOptions {
                 jaguar3_enable_rx: true,
                 jaguar3_tx_rf_bw: read_env_u8("DEVOURER_TX_RF_BW").map(|value| value & 0x03),
                 jaguar3_nb_dac: read_env_u8("DEVOURER_NB_DAC").map(|value| value & 0x07),
+                narrowband_adc: read_env_u8("DEVOURER_NB_ADC").map(|value| value & 0x07),
+                narrowband_dac: read_env_u8("DEVOURER_NB_DAC").map(|value| value & 0x07),
+                crystal_cap: read_env_u8("DEVOURER_XTAL_CAP"),
+                cfo_tracking: read_env_flag("DEVOURER_CFO_TRACK"),
+                thermal_tracking: std::env::var_os("DEVOURER_THERMAL_TRACK")
+                    .is_none_or(|value| value != "0"),
                 tx_power_index: read_env_u8("DEVOURER_TX_PWR").map(|value| value & 0x3f),
                 beamforming_sounder: std::env::var_os("DEVOURER_BF_ARM_SOUNDER").is_some(),
                 beamforming_sounder_mac: std::env::var("DEVOURER_BF_ARM_SOUNDER")
@@ -716,6 +740,13 @@ pub enum DriverError {
     /// A retune was requested before monitor-mode initialization established
     /// the active channel width and primary-channel offset.
     RadioNotInitialized,
+    /// Requested channel width is unsupported by the detected silicon.
+    UnsupportedChannelWidth {
+        /// Detected chip family.
+        family: ChipFamily,
+        /// Requested width.
+        width: ChannelWidth,
+    },
     /// No matching supported adapter was found.
     DeviceNotFound,
     /// Another process owns the selected physical adapter.
@@ -750,8 +781,14 @@ pub enum DriverError {
     UnsupportedIqkPath(ChipFamily),
     /// RX-chain masking is only supported by the Jaguar1 register layout.
     UnsupportedRxPathMask(ChipFamily),
-    /// EDCCA control is only available on Jaguar3.
+    /// EDCCA control is only available on Jaguar2/3.
     UnsupportedCcaControl(ChipFamily),
+    /// Hardware TSF writes are unavailable on Jaguar1.
+    UnsupportedTsfWrite(ChipFamily),
+    /// Hardware reserved-page beaconing is unavailable on this generation.
+    UnsupportedBeacon(ChipFamily),
+    /// Beacon bytes were not a complete raw 802.11 beacon MPDU.
+    InvalidBeacon,
     /// Requested beamforming feedback mode is unsupported on this generation.
     UnsupportedBeamformingMode(ChipFamily),
     /// TX power override was outside the Realtek TXAGC range.
@@ -769,6 +806,9 @@ impl fmt::Display for DriverError {
             Self::DriverStatePoisoned => write!(f, "Realtek driver state lock was poisoned"),
             Self::RadioNotInitialized => {
                 write!(f, "Realtek radio has not been initialized")
+            }
+            Self::UnsupportedChannelWidth { family, width } => {
+                write!(f, "{} does not support {width:?}", family.name())
             }
             Self::DeviceNotFound => write!(f, "no supported Realtek rtl88xx adapter found"),
             Self::DeviceBusy(device) => write!(f, "USB adapter {device} is already in use"),
@@ -810,8 +850,19 @@ impl fmt::Display for DriverError {
                 write!(f, "{} does not use the Jaguar1 RX-path mask", chip.name())
             }
             Self::UnsupportedCcaControl(chip) => {
-                write!(f, "{} does not support Jaguar3 EDCCA control", chip.name())
+                write!(
+                    f,
+                    "{} does not support Jaguar2/3 EDCCA control",
+                    chip.name()
+                )
             }
+            Self::UnsupportedTsfWrite(chip) => {
+                write!(f, "{} does not support hardware TSF writes", chip.name())
+            }
+            Self::UnsupportedBeacon(chip) => {
+                write!(f, "{} does not support hardware beaconing", chip.name())
+            }
+            Self::InvalidBeacon => write!(f, "invalid 802.11 beacon MPDU"),
             Self::UnsupportedBeamformingMode(chip) => {
                 write!(
                     f,

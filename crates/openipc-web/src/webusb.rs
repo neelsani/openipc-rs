@@ -1,5 +1,5 @@
 #[cfg(target_arch = "wasm32")]
-use js_sys::{Array, Int8Array, Object, Reflect, Uint32Array, Uint8Array};
+use js_sys::{Array, Int16Array, Int8Array, Object, Reflect, Uint32Array, Uint8Array};
 #[cfg(target_arch = "wasm32")]
 use openipc_core::try_parse_tx_mode_str;
 #[cfg(target_arch = "wasm32")]
@@ -7,8 +7,9 @@ use openipc_rtl88xx::is_supported_id;
 use openipc_rtl88xx::SUPPORTED_DEVICES;
 #[cfg(target_arch = "wasm32")]
 use openipc_rtl88xx::{
-    BbDbgportRead, BeamformingFeedback, ChannelWidth, CsiMaskSpec, DriverOptions,
-    FalseAlarmCounters, Firmware8814Mode, InitReport, InitStatus, IqkReport,
+    ActiveRxPaths, AdapterCapabilities, BbDbgportRead, BeamformingFeedback, CfoStep, ChannelWidth,
+    ChipGeneration, CsiMaskSpec, DriverOptions, FalseAlarmCounters, Firmware8814Mode, InitReport,
+    InitStatus, IqkReport, Jaguar2PowerTrackingReport, Jaguar2PowerTrackingState,
     Jaguar3PowerTrackingReport, Jaguar3PowerTrackingState, MonitorOptions, PhydmDigState,
     PhydmWatchdogReport, PowerTrackingReport, PowerTrackingState, RadioConfig, RealtekDevice,
     RealtekTxDescriptor, RealtekTxOptions, RetuneReport, RxEnergy, ThermalBucket, ThermalStatus,
@@ -20,6 +21,271 @@ use wasm_bindgen::prelude::*;
 /// WebUSB-backed Realtek rtl88xx device.
 pub struct WebUsbRealtekDevice {
     pub(crate) driver: RealtekDevice,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Static adapter capabilities returned to JavaScript.
+pub struct WebAdapterCapabilities {
+    capabilities: AdapterCapabilities,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+impl WebAdapterCapabilities {
+    #[wasm_bindgen(getter)]
+    pub fn supported(&self) -> bool {
+        self.capabilities.supported
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn family(&self) -> String {
+        self.capabilities.family.name().to_owned()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn generation(&self) -> String {
+        match self.capabilities.generation {
+            ChipGeneration::Jaguar1 => "jaguar1",
+            ChipGeneration::Jaguar2 => "jaguar2",
+            ChipGeneration::Jaguar3 => "jaguar3",
+        }
+        .to_owned()
+    }
+
+    #[wasm_bindgen(getter, js_name = chipName)]
+    pub fn chip_name(&self) -> String {
+        self.capabilities.chip_name.to_owned()
+    }
+
+    #[wasm_bindgen(getter, js_name = marketingNames)]
+    pub fn marketing_names(&self) -> String {
+        self.capabilities.marketing_names.to_owned()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn variant(&self) -> String {
+        self.capabilities.variant.to_owned()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn transport(&self) -> String {
+        self.capabilities.transport.to_owned()
+    }
+
+    #[wasm_bindgen(getter, js_name = chipId)]
+    pub fn chip_id(&self) -> u8 {
+        self.capabilities.chip_id
+    }
+
+    #[wasm_bindgen(getter, js_name = txChains)]
+    pub fn tx_chains(&self) -> u8 {
+        self.capabilities.tx_chains
+    }
+
+    #[wasm_bindgen(getter, js_name = rxChains)]
+    pub fn rx_chains(&self) -> u8 {
+        self.capabilities.rx_chains
+    }
+
+    #[wasm_bindgen(getter, js_name = bandwidthMask)]
+    pub fn bandwidth_mask(&self) -> u8 {
+        self.capabilities.bandwidth_mask
+    }
+
+    #[wasm_bindgen(getter, js_name = tune2g4MinMhz)]
+    pub fn tune_2g4_min_mhz(&self) -> u16 {
+        self.capabilities.tune_2g4.min_mhz
+    }
+
+    #[wasm_bindgen(getter, js_name = tune2g4MaxMhz)]
+    pub fn tune_2g4_max_mhz(&self) -> u16 {
+        self.capabilities.tune_2g4.max_mhz
+    }
+
+    #[wasm_bindgen(getter, js_name = tune5gMinMhz)]
+    pub fn tune_5g_min_mhz(&self) -> u16 {
+        self.capabilities.tune_5g.min_mhz
+    }
+
+    #[wasm_bindgen(getter, js_name = tune5gMaxMhz)]
+    pub fn tune_5g_max_mhz(&self) -> u16 {
+        self.capabilities.tune_5g.max_mhz
+    }
+
+    #[wasm_bindgen(getter, js_name = characterized2g4MinMhz)]
+    pub fn characterized_2g4_min_mhz(&self) -> u16 {
+        self.capabilities.characterized_2g4.min_mhz
+    }
+
+    #[wasm_bindgen(getter, js_name = characterized2g4MaxMhz)]
+    pub fn characterized_2g4_max_mhz(&self) -> u16 {
+        self.capabilities.characterized_2g4.max_mhz
+    }
+
+    #[wasm_bindgen(getter, js_name = characterized5gMinMhz)]
+    pub fn characterized_5g_min_mhz(&self) -> u16 {
+        self.capabilities.characterized_5g.min_mhz
+    }
+
+    #[wasm_bindgen(getter, js_name = characterized5gMaxMhz)]
+    pub fn characterized_5g_max_mhz(&self) -> u16 {
+        self.capabilities.characterized_5g.max_mhz
+    }
+
+    #[wasm_bindgen(getter, js_name = spatialStreams)]
+    pub fn spatial_streams(&self) -> u8 {
+        self.capabilities.tx.spatial_streams
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn stbc(&self) -> bool {
+        self.capabilities.tx.stbc
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn ldpc(&self) -> bool {
+        self.capabilities.tx.ldpc
+    }
+
+    #[wasm_bindgen(getter, js_name = shortGi)]
+    pub fn short_gi(&self) -> bool {
+        self.capabilities.tx.short_gi
+    }
+
+    #[wasm_bindgen(getter, js_name = maxBandwidthMhz)]
+    pub fn max_bandwidth_mhz(&self) -> u8 {
+        self.capabilities.tx.max_bandwidth_mhz
+    }
+
+    #[wasm_bindgen(getter, js_name = txPowerIndexMax)]
+    pub fn tx_power_index_max(&self) -> u8 {
+        self.capabilities.tx_power.index_max
+    }
+
+    #[wasm_bindgen(getter, js_name = txPowerStepQdb)]
+    pub fn tx_power_step_qdb(&self) -> u8 {
+        self.capabilities.tx_power.step_qdb
+    }
+
+    #[wasm_bindgen(getter, js_name = txPowerOffsetMinQdb)]
+    pub fn tx_power_offset_min_qdb(&self) -> i16 {
+        self.capabilities.tx_power.offset_min_qdb
+    }
+
+    #[wasm_bindgen(getter, js_name = txPowerOffsetMaxQdb)]
+    pub fn tx_power_offset_max_qdb(&self) -> i16 {
+        self.capabilities.tx_power.offset_max_qdb
+    }
+
+    #[wasm_bindgen(getter, js_name = perPacketTxPower)]
+    pub fn per_packet_tx_power(&self) -> bool {
+        self.capabilities.per_packet_tx_power
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn narrowband(&self) -> bool {
+        self.capabilities.narrowband
+    }
+
+    #[wasm_bindgen(getter, js_name = crystalCapMax)]
+    pub fn crystal_cap_max(&self) -> u8 {
+        self.capabilities.crystal_cap_max
+    }
+
+    #[wasm_bindgen(getter, js_name = crystalCapDefault)]
+    pub fn crystal_cap_default(&self) -> u8 {
+        self.capabilities.crystal_cap_default
+    }
+
+    #[wasm_bindgen(getter, js_name = fastRetune)]
+    pub fn fast_retune(&self) -> bool {
+        self.capabilities.fast_retune
+    }
+
+    #[wasm_bindgen(getter, js_name = perChainRssi)]
+    pub fn per_chain_rssi(&self) -> bool {
+        self.capabilities.per_chain_rssi
+    }
+
+    #[wasm_bindgen(getter, js_name = hardwareRxTimestamp)]
+    pub fn hardware_rx_timestamp(&self) -> bool {
+        self.capabilities.hardware_rx_timestamp
+    }
+
+    #[wasm_bindgen(getter, js_name = hardwareBeaconTxTimestamp)]
+    pub fn hardware_beacon_tx_timestamp(&self) -> bool {
+        self.capabilities.hardware_beacon_tx_timestamp
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Per-chain receive activity sampled since the previous read.
+pub struct WebActiveRxPaths {
+    paths: ActiveRxPaths,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+impl WebActiveRxPaths {
+    #[wasm_bindgen(getter)]
+    pub fn valid(&self) -> bool {
+        self.paths.valid
+    }
+
+    #[wasm_bindgen(getter, js_name = activeMask)]
+    pub fn active_mask(&self) -> u8 {
+        self.paths.active_mask
+    }
+
+    #[wasm_bindgen(getter, js_name = chainCount)]
+    pub fn chain_count(&self) -> u8 {
+        self.paths.chain_count
+    }
+
+    #[wasm_bindgen(getter, js_name = activeCount)]
+    pub fn active_count(&self) -> u8 {
+        self.paths.active_count
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn frames(&self) -> u32 {
+        self.paths.frames
+    }
+
+    #[wasm_bindgen(js_name = meanRssiDbm)]
+    pub fn mean_rssi_dbm(&self) -> Int16Array {
+        Int16Array::from(self.paths.rssi_mean_dbm.as_slice())
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// One closed-loop CFO controller result.
+pub struct WebCfoStep {
+    step: Option<CfoStep>,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+impl WebCfoStep {
+    #[wasm_bindgen(getter)]
+    pub fn available(&self) -> bool {
+        self.step.is_some()
+    }
+
+    #[wasm_bindgen(getter, js_name = averageKhz)]
+    pub fn average_khz(&self) -> f64 {
+        self.step.map_or(0.0, |step| step.average_khz)
+    }
+
+    #[wasm_bindgen(getter, js_name = crystalCap)]
+    pub fn crystal_cap(&self) -> i16 {
+        self.step
+            .and_then(|step| step.crystal_cap)
+            .map_or(-1, i16::from)
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -476,6 +742,60 @@ impl WebPowerTrackingReport {
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
+/// Jaguar2 thermal power-tracking report.
+#[derive(Clone, Copy)]
+pub struct WebJaguar2PowerTrackingReport {
+    report: Jaguar2PowerTrackingReport,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl From<Jaguar2PowerTrackingReport> for WebJaguar2PowerTrackingReport {
+    fn from(report: Jaguar2PowerTrackingReport) -> Self {
+        Self { report }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+impl WebJaguar2PowerTrackingReport {
+    #[wasm_bindgen(getter)]
+    pub fn enabled(&self) -> bool {
+        self.report.enabled
+    }
+
+    #[wasm_bindgen(getter, js_name = thermalRaw)]
+    pub fn thermal_raw(&self) -> u8 {
+        self.report.thermal_raw
+    }
+
+    #[wasm_bindgen(getter, js_name = thermalAverage)]
+    pub fn thermal_average(&self) -> u8 {
+        self.report.thermal_average
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn delta(&self) -> u8 {
+        self.report.delta
+    }
+
+    #[wasm_bindgen(getter, js_name = swingA)]
+    pub fn swing_a(&self) -> i16 {
+        self.report.swing[0]
+    }
+
+    #[wasm_bindgen(getter, js_name = swingB)]
+    pub fn swing_b(&self) -> i16 {
+        self.report.swing[1]
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn applied(&self) -> bool {
+        self.report.applied
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
 /// Jaguar3 thermal power-tracking report.
 #[derive(Clone, Copy)]
 pub struct WebJaguar3PowerTrackingReport {
@@ -617,6 +937,24 @@ impl WebUsbRealtekDevice {
     /// Return the selected bulk-OUT endpoint address.
     pub fn bulk_out_endpoint(&self) -> u8 {
         self.driver.bulk_out_ep
+    }
+
+    #[wasm_bindgen(js_name = adapterCapabilities)]
+    /// Return the opened adapter's complete static capability report.
+    pub async fn adapter_capabilities(&self) -> Result<WebAdapterCapabilities, JsValue> {
+        self.driver
+            .adapter_capabilities_async()
+            .await
+            .map(|capabilities| WebAdapterCapabilities { capabilities })
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = activeRxPaths)]
+    /// Drain and classify recent per-chain RSSI samples.
+    pub fn active_rx_paths(&self, margin_db: i16) -> WebActiveRxPaths {
+        WebActiveRxPaths {
+            paths: self.driver.active_rx_paths(margin_db),
+        }
     }
 
     #[wasm_bindgen(js_name = rxDescriptorKind)]
@@ -770,6 +1108,103 @@ impl WebUsbRealtekDevice {
             .fast_retune_async(channel, cache_rf)
             .await
             .map(WebRetuneReport::from)
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = fastSetBandwidth)]
+    /// Switch between 20/10/5 MHz using the generation-specific lean path.
+    pub async fn fast_set_bandwidth(
+        &self,
+        channel_width_mhz: u16,
+    ) -> Result<WebRetuneReport, JsValue> {
+        self.driver
+            .fast_set_bandwidth_async(parse_channel_width(channel_width_mhz)?)
+            .await
+            .map(WebRetuneReport::from)
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = readHardwareTsf)]
+    /// Read the free-running hardware TSF in microseconds.
+    pub async fn read_hardware_tsf(&self) -> Result<u64, JsValue> {
+        self.driver
+            .read_hardware_tsf_async()
+            .await
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = writeHardwareTsf)]
+    /// Set the Jaguar2/3 hardware TSF.
+    pub async fn write_hardware_tsf(&self, tsf: u64) -> Result<(), JsValue> {
+        self.driver
+            .write_hardware_tsf_async(tsf)
+            .await
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = startBeacon)]
+    /// Load an 802.11 beacon MPDU and enable hardware TBTT transmission.
+    pub async fn start_beacon(&self, beacon: &[u8], interval_tu: u16) -> Result<(), JsValue> {
+        self.driver
+            .start_beacon_async(beacon, interval_tu)
+            .await
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = adjustBeaconTiming)]
+    /// Apply one whole-TU beacon timing correction on Jaguar3.
+    pub async fn adjust_beacon_timing(&self, microseconds: i32) -> Result<i32, JsValue> {
+        self.driver
+            .adjust_beacon_timing_async(microseconds)
+            .await
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = adjustBeaconTimingFine)]
+    /// Apply one microsecond-granular beacon timing correction on Jaguar3.
+    pub async fn adjust_beacon_timing_fine(&self, microseconds: i32) -> Result<i32, JsValue> {
+        self.driver
+            .adjust_beacon_timing_fine_async(microseconds)
+            .await
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = setCcaDisabled)]
+    /// Disable or restore the Jaguar2/3 MAC EDCCA deferral gate.
+    pub async fn set_cca_disabled(&self, disabled: bool) -> Result<(), JsValue> {
+        self.driver
+            .set_cca_disabled_async(disabled)
+            .await
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = setCrystalCap)]
+    /// Apply a raw crystal-cap code; pass `-1` to restore the EFUSE default.
+    pub async fn set_crystal_cap(&self, cap: i32) -> Result<u8, JsValue> {
+        let cap = if cap < 0 {
+            None
+        } else {
+            Some(u8::try_from(cap).map_err(|_| JsValue::from_str("crystal cap must fit u8"))?)
+        };
+        self.driver
+            .set_crystal_cap_async(cap)
+            .await
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = setCfoTrackingEnabled)]
+    /// Enable or disable accumulation for periodic CFO correction.
+    pub fn set_cfo_tracking_enabled(&self, enabled: bool) {
+        self.driver.set_cfo_tracking_enabled(enabled);
+    }
+
+    #[wasm_bindgen(js_name = cfoTrackingTick)]
+    /// Drain CFO samples and apply at most one read-free crystal correction.
+    pub async fn cfo_tracking_tick(&self) -> Result<WebCfoStep, JsValue> {
+        self.driver
+            .cfo_tracking_tick_async()
+            .await
+            .map(|step| WebCfoStep { step })
             .map_err(driver_error)
     }
 
@@ -1278,6 +1713,53 @@ impl WebUsbPowerTracking8812 {
             .await
             .map_err(driver_error)?;
         Ok(report.into())
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Stateful Jaguar2 thermal power-tracking helper for WebUSB apps.
+pub struct WebUsbJaguar2PowerTracking {
+    state: Jaguar2PowerTrackingState,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Default for WebUsbJaguar2PowerTracking {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+impl WebUsbJaguar2PowerTracking {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self {
+            state: Jaguar2PowerTrackingState::default(),
+        }
+    }
+
+    #[wasm_bindgen(js_name = init)]
+    pub async fn init(&mut self, device: &WebUsbRealtekDevice) -> Result<(), JsValue> {
+        device
+            .driver
+            .init_jaguar2_power_tracking_async(&mut self.state)
+            .await
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = tick)]
+    pub async fn tick(
+        &mut self,
+        device: &WebUsbRealtekDevice,
+    ) -> Result<WebJaguar2PowerTrackingReport, JsValue> {
+        device
+            .driver
+            .tick_jaguar2_power_tracking_async(&mut self.state)
+            .await
+            .map(WebJaguar2PowerTrackingReport::from)
+            .map_err(driver_error)
     }
 }
 

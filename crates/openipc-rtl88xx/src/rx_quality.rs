@@ -6,6 +6,121 @@ use openipc_core::realtek::RxPacketAttrib;
 
 use crate::{classify_link_health, LinkHealth, LinkHealthInput, LinkHealthThresholds, RxEnergy};
 
+/// Drained classification of receive chains that currently carry useful signal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ActiveRxPaths {
+    /// Whether at least one frame supplied per-chain PHY status.
+    pub valid: bool,
+    /// Frames with at least one sampled chain.
+    pub frames: u32,
+    /// Number of physical chains considered.
+    pub chain_count: u8,
+    /// Number of chains within the configured margin of the strongest chain.
+    pub active_count: u8,
+    /// Bit `n` is set when chain `n` is active.
+    pub active_mask: u8,
+    /// Mean RSSI in dBm for each chain.
+    pub rssi_mean_dbm: [i16; 4],
+    /// Whether each chain supplied a non-zero PHY-status sample.
+    pub chain_sampled: [bool; 4],
+}
+
+/// Classify sampled chains relative to the strongest chain.
+pub fn classify_active_rx_paths(
+    rssi_mean_dbm: [i16; 4],
+    sampled: [bool; 4],
+    chain_count: u8,
+    margin_db: i16,
+) -> (u8, u8) {
+    let count = chain_count.min(4) as usize;
+    let strongest = (0..count)
+        .filter(|index| sampled[*index])
+        .map(|index| rssi_mean_dbm[index])
+        .max();
+    let Some(strongest) = strongest else {
+        return (0, 0);
+    };
+    let mut mask = 0u8;
+    let mut active = 0u8;
+    for index in 0..count {
+        if sampled[index] && strongest - rssi_mean_dbm[index] <= margin_db {
+            mask |= 1 << index;
+            active += 1;
+        }
+    }
+    (active, mask)
+}
+
+#[derive(Debug, Default)]
+struct RxPathState {
+    frames: u32,
+    chain_count: u8,
+    sums: [u64; 4],
+    counts: [u32; 4],
+}
+
+/// Thread-safe rolling per-chain RSSI accumulator with drain semantics.
+#[derive(Debug, Default)]
+pub struct RxPathActivityAccumulator {
+    state: Mutex<RxPathState>,
+}
+
+impl RxPathActivityAccumulator {
+    /// Observe one frame's raw Realtek per-chain RSSI tuple.
+    pub fn observe(&self, rssi: [u8; 4], chain_count: u8) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        state.chain_count = chain_count.min(4);
+        let mut any = false;
+        for (index, value) in rssi
+            .into_iter()
+            .take(usize::from(state.chain_count))
+            .enumerate()
+        {
+            if value == 0 {
+                continue;
+            }
+            state.sums[index] += u64::from(value);
+            state.counts[index] = state.counts[index].saturating_add(1);
+            any = true;
+        }
+        if any {
+            state.frames = state.frames.saturating_add(1);
+        }
+    }
+
+    /// Drain and classify the current receive window.
+    pub fn snapshot(&self, margin_db: i16) -> ActiveRxPaths {
+        let Ok(mut state) = self.state.lock() else {
+            return ActiveRxPaths::default();
+        };
+        let mut rssi_mean_dbm = [0i16; 4];
+        let mut sampled = [false; 4];
+        for index in 0..usize::from(state.chain_count) {
+            if state.counts[index] == 0 {
+                continue;
+            }
+            rssi_mean_dbm[index] =
+                (state.sums[index] / u64::from(state.counts[index])) as i16 - 110;
+            sampled[index] = true;
+        }
+        let (active_count, active_mask) =
+            classify_active_rx_paths(rssi_mean_dbm, sampled, state.chain_count, margin_db);
+        let snapshot = ActiveRxPaths {
+            valid: state.frames != 0,
+            frames: state.frames,
+            chain_count: state.chain_count,
+            active_count,
+            active_mask,
+            rssi_mean_dbm,
+            chain_sampled: sampled,
+        };
+        *state = RxPathState::default();
+        snapshot
+    }
+}
+
 /// Drained aggregate of one receive window in raw Realtek units.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct RxQualitySnapshot {
@@ -213,5 +328,18 @@ mod tests {
         assert_eq!(snapshot.evm_mean_raw, -45);
         assert!((snapshot.noise_floor_dbm - -47.5).abs() < 0.01);
         assert_eq!(accumulator.snapshot().frames, 0);
+    }
+
+    #[test]
+    fn classifies_balanced_and_disconnected_chains() {
+        let accumulator = RxPathActivityAccumulator::default();
+        accumulator.observe([80, 76, 41, 0], 4);
+        accumulator.observe([78, 74, 39, 0], 4);
+        let snapshot = accumulator.snapshot(20);
+        assert_eq!(snapshot.frames, 2);
+        assert_eq!(snapshot.rssi_mean_dbm, [-31, -35, -70, 0]);
+        assert_eq!(snapshot.active_count, 2);
+        assert_eq!(snapshot.active_mask, 0b0011);
+        assert_eq!(accumulator.snapshot(20).frames, 0);
     }
 }

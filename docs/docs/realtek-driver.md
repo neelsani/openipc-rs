@@ -100,6 +100,9 @@ Platform-specific filters are derived from this table:
 - RTL8811CU/RTL8821CU one-path Jaguar2 bring-up with its own firmware,
   power/FIFO tables, RF/channel setup, WLAN antenna grant, regulatory TXAGC,
   descriptor parsing, and CW support,
+- Jaguar2 5/10 MHz re-clocking, RTL8822B RF18 re-latching, MAC/TSF timing,
+  SoML/RxHP setup, KFree/PA-bias trims, spur mitigation, and app-scheduled
+  thermal/CFO tracking,
 - Jaguar3 RTL8812CU/EU and RTL8822CU/EU firmware download, MAC/USB setup,
   RFE-aware BB/AGC/RF tables, 24-byte RX descriptor parsing, 48-byte checksummed
   TX descriptors, 5/10 MHz narrowband setup, native 40/80 MHz RF/MAC setup,
@@ -114,7 +117,11 @@ Platform-specific filters are derived from this table:
 - RFE-aware MAC/BB/RF table loading, including conditional RF table opcodes,
 - monitor filters,
 - channel, channel-width, band-switch, RFE pinmux, and BB-swing setup for
-  RTL8812/RTL8821/RTL8814 plus Jaguar3 5/10/20/40/80 MHz tuning,
+  RTL8812/RTL8821/RTL8814 plus 5/10/20/40/80 MHz tuning on supported Jaguar1,
+  Jaguar2, and Jaguar3 devices,
+- adapter capability reporting, active RX-chain classification, fast
+  bandwidth-only switching, hardware TSF read/write and receive timestamps,
+  Jaguar2/3 hardware beacons with TX-egress TSF, and beacon timing adjustment,
 - the RTL8822C 3-wire/RXBB/AGC/CCK-RXIQ channel sequence required for working
   2.4 GHz receive,
 - Jaguar1/2/3 explicit-sounding controls for SU/MU beamformees and sounders,
@@ -242,13 +249,18 @@ Native builds additionally read devourer-compatible environment variables:
 | `DEVOURER_SKIP_DIG`                | Disable Jaguar2's 100 ms DIG step.                     |
 | `DEVOURER_8821C_NO_PHYST`          | Disable RTL8821C's RX PHY-status block.                |
 | `DEVOURER_IGI=<n>`                 | Override Jaguar2's initial gain index.                 |
+| `DEVOURER_DIS_CCA`                 | Disable the safe Jaguar2/3 MAC EDCCA gate.             |
 | `DEVOURER_8814_FWDL=kernel\|rtw88` | Select the RTL8814 firmware path.                      |
 | `DEVOURER_8814_FWDL_CHUNK=<n>`     | Override RTL8814 kernel-path chunk size.               |
 | `DEVOURER_RX_PATHS=<mask>`         | Select Jaguar1 RX chains after channel setup and IQK.  |
 | `DEVOURER_RFE=<n>`                 | Override the EFUSE-selected RFE front-end type.        |
 | `DEVOURER_TX_PWR=<n>`              | Force a flat Jaguar2 TXAGC index.                      |
 | `DEVOURER_TX_RF_BW=<n>`            | Override Jaguar3's 40 MHz TX RF-BW field.              |
-| `DEVOURER_NB_DAC=<n>`              | Override Jaguar3's narrowband DAC divider.             |
+| `DEVOURER_NB_ADC=<n>`              | Override Jaguar2's narrowband ADC divider.             |
+| `DEVOURER_NB_DAC=<n>`              | Override the generation-specific narrowband DAC divider. |
+| `DEVOURER_XTAL_CAP=<n>`            | Set the post-bring-up crystal-cap trim.                |
+| `DEVOURER_CFO_TRACK`               | Run app-scheduled closed-loop receive CFO correction.  |
+| `DEVOURER_THERMAL_TRACK=0\|1`      | Disable or enable Jaguar2 thermal TX-power tracking.   |
 | `DEVOURER_RX_CSI_MASK=<range>[/w]` | Mask an inclusive MHz range; Jaguar3 weight is `0..7`. |
 | `DEVOURER_RX_NBI=<mhz>`            | Place one receive-side NBI notch.                      |
 | `DEVOURER_TX_TIMEOUT_MS=<n>`       | Set native bulk-OUT timeout before recovery.           |
@@ -318,8 +330,10 @@ Applications should schedule diagnostics at the app boundary:
 
 Available explicit hooks include thermal status, false-alarm counters, RTL8814
 queue-depth registers, BB register/dbgport reads, PHYDM DIG watchdog ticks,
-IQK, RTL8812 power tracking ticks, Jaguar3 coex keepalive, C2H payloads, and
-RTL8814 TX-status parsing.
+IQK, RTL8812/Jaguar2/Jaguar3 power tracking ticks, crystal/CFO tracking,
+Jaguar3 coex keepalive, C2H payloads, and RTL8814 TX-status parsing. Nebulus and
+`wfb-rs` run Jaguar2 DIG at 100 ms and the Jaguar2/Jaguar3 thermal/CFO/coex work
+at a two-second cadence without placing hidden workers in the library.
 
 Every monitor initialization also leaves a structured snapshot on the device:
 
@@ -383,13 +397,13 @@ Current status:
 - RTL8812 thermal power tracking, RTL8812 IQK, RTL8814 IQK, and the PHYDM
   false-alarm/DIG watchdog have Rust implementations. They are exposed natively
   and through WASM, but still need register-trace comparison on real adapters.
-- Jaguar2 support is audited through devourer `40e3a2a`.
+- Jaguar2 support is audited through devourer `11dff09`.
   Both firmware images and their MAC/PHY/AGC/RF/TX-limit tables reproduce from
   checked-in importers. Both chips have their variant-specific software IQK
   state machines; RTL8821C uses its one-path BTG/WLG/WLA LOK/TXK/RXK flow.
   Live cold-plug/on-air validation is required.
 - RTL8812CU/EU and RTL8822CU/EU Jaguar3 support is audited through devourer
-  `40e3a2a`. The RTL8822E firmware and generated table arrays are
+  `11dff09`. The RTL8822E firmware and generated table arrays are
   byte-for-byte equal to the reference commit. Chip-ID dispatch, V1 EFUSE,
   PA-bias, RFE defaults/pinmux, DACK, IQK, TXGAPK, DPK bypass, per-rate TXAGC,
   thermal tracking, descriptors, coex/H2C, and shutdown are implemented. This
@@ -404,7 +418,8 @@ Current status:
   RTL8812 TX-power EFUSE rereads with IC-default fallback, Jaguar3 DACK/IQK
   retries, persistent timeout-free RX submissions, and desktop
   topology-lock/claim-before-reset ownership.
-- Devourer `40e3a2a` fast retuning is represented for Jaguar1, Jaguar2, and
+- Devourer `11dff09` fast retuning and fast bandwidth switching are represented
+  for Jaguar1, Jaguar2, and
   Jaguar3, including automatic full fallback, per-packet radiotap CHANNEL
   selection, shared channel/frequency and sweep-list grammar, write-only
   Jaguar2/Jaguar3 compose caches, and the hardware-validated kickless Jaguar2
@@ -423,6 +438,15 @@ Current status:
   submission failures, rolling RX quality/passive noise floor, link-health
   verdicts, firmware status, and repeated physical EFUSE comparison. Jaguar2
   per-frame power and Jaguar3 self-gated beamforming are included.
+- The post-`40e3a2a` portable additions are represented: static adapter
+  capabilities, extended 5 GHz tuning, RTL8812/RTL8814/Jaguar2/Jaguar3
+  narrowband, Jaguar2 thermal/KFree/spur/MAC/SoML setup, crystal-cap/CFO
+  tracking, hardware TSF, TX-egress timestamp parsing, hardware beacons, and
+  coarse/fine beacon timing adjustment.
+- PCIe/VFIO, kernel timestamp prototypes, and reference transport-floor tools
+  are intentionally excluded. `DEVOURER_REPLAY_WSEQ` is a Jaguar2
+  register-trace delta-debugging hook rather than production radio behavior and
+  is not exposed by this crate.
 - Software-only hardening tests now cover malformed RX aggregates, zero-length
   descriptors, aggregate tail handling, C2H driver-info/shift offsets, PHY
   status byte boundaries, CRC/ICV flag surfacing, firmware-header stripping,

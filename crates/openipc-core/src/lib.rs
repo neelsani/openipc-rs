@@ -30,6 +30,8 @@ pub mod receiver;
 pub mod routes;
 /// RTP parsing and H.264/H.265 depacketization.
 pub mod rtp;
+/// One-way hardware TSF clock synchronization.
+pub mod tsf;
 /// WFB packet, session, crypto, and FEC assembly logic.
 pub mod wfb;
 /// WFB uplink packet transmitter.
@@ -55,7 +57,7 @@ pub use radiotap::{
 };
 pub use realtek::{
     parse_rx_aggregate, parse_rx_aggregate_with_kind, parse_rx_aggregate_with_kind_diagnostics,
-    RealtekRxPacket, RxAggregateDiagnostics, RxDescriptorKind, RxPacketAttrib,
+    tx_egress_tsf, RealtekRxPacket, RxAggregateDiagnostics, RxDescriptorKind, RxPacketAttrib,
 };
 pub use receiver::{
     ReceiverBatch, ReceiverBatchCounters, ReceiverBatchOptions, ReceiverRuntime, RoutePayload,
@@ -69,6 +71,7 @@ pub use rtp::{
     Codec, CodecConfigState, DamagedFramePolicy, DepacketizedFrame, FrameDamage, RtpDepacketizer,
     RtpDepacketizerStatus, RtpHeader, RtpReorderBuffer, RtpReorderStatus,
 };
+pub use tsf::TsfSync;
 pub use wfb::{
     FecCounters, PlainAssembler, WfbKeypair, WfbOutput, WfbPacket, WfbReceiver, WfbSession,
 };

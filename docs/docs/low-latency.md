@@ -144,10 +144,12 @@ stderr/Logcat output from becoming the largest latency source in Very verbose
 mode.
 
 Use **Metrics** for link quality, post-FEC loss, repair rate, bitrate, delivered
-FPS, and processing latency. Use **Diagnostics > Stage latency** to locate a
-specific receiver bottleneck. These are not glass-to-glass measurements; true
-camera-to-display latency requires a transmitter timestamp or synchronized
-visual test.
+FPS, and processing latency. Its composition bar shows the current measured
+completion-to-upload path using only non-overlapping stages; USB/socket wait and
+receive-batch totals are excluded. Use **Diagnostics > Stage latency** for
+rolling last, average, p95, and maximum values when locating a receiver
+bottleneck. These are not glass-to-glass measurements; true camera-to-display
+latency requires a transmitter timestamp or synchronized visual test.
 
 Aviateur adds a local UDP handoff, FFmpeg demux, decoded-frame transfer, and a
 small presentation queue. PixelPilot uses a direct MediaCodec surface on

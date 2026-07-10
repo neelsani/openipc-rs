@@ -1,6 +1,6 @@
 //! WiFi channel/frequency conversion and sweep-list parsing.
 
-/// Map a 2.4 GHz or 5 GHz center frequency in MHz to a WiFi channel.
+/// Map a 2.4 GHz or extended 5 GHz center frequency in MHz to a WiFi channel.
 pub const fn frequency_to_channel(frequency_mhz: u16) -> Option<u8> {
     if frequency_mhz == 2484 {
         return Some(14);
@@ -8,7 +8,7 @@ pub const fn frequency_to_channel(frequency_mhz: u16) -> Option<u8> {
     if frequency_mhz >= 2412 && frequency_mhz <= 2472 {
         return Some(((frequency_mhz - 2407) / 5) as u8);
     }
-    if frequency_mhz >= 5000 && frequency_mhz <= 5895 {
+    if frequency_mhz >= 5000 && frequency_mhz <= 6265 {
         return Some(((frequency_mhz - 5000) / 5) as u8);
     }
     None
@@ -22,10 +22,8 @@ pub const fn channel_to_frequency(channel: u8) -> Option<u16> {
         Some(2484)
     } else if channel <= 13 {
         Some(2407 + 5 * channel as u16)
-    } else if channel <= 179 {
-        Some(5000 + 5 * channel as u16)
     } else {
-        None
+        Some(5000 + 5 * channel as u16)
     }
 }
 
@@ -105,10 +103,15 @@ mod tests {
         assert_eq!(frequency_to_channel(2412), Some(1));
         assert_eq!(frequency_to_channel(2484), Some(14));
         assert_eq!(frequency_to_channel(5180), Some(36));
+        assert_eq!(frequency_to_channel(6165), Some(233));
+        assert_eq!(frequency_to_channel(6265), Some(253));
+        assert_eq!(frequency_to_channel(6270), None);
         assert_eq!(frequency_to_channel(4900), None);
         assert_eq!(channel_to_frequency(1), Some(2412));
         assert_eq!(channel_to_frequency(14), Some(2484));
         assert_eq!(channel_to_frequency(36), Some(5180));
+        assert_eq!(channel_to_frequency(233), Some(6165));
+        assert_eq!(channel_to_frequency(253), Some(6265));
     }
 
     #[test]

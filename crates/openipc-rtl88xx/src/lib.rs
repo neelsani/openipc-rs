@@ -5,6 +5,7 @@
 //! monitor-mode RX setup, and bulk-IN receive transfers. Packet parsing and the
 //! OpenIPC/WFB/RTP pipeline live in `openipc-core`.
 
+mod adapter_caps;
 mod adapter_health;
 mod async_continuous_tx;
 mod async_cw;
@@ -18,6 +19,9 @@ mod async_iqk_8812;
 mod async_jaguar2;
 mod async_jaguar2_8821c_iqk;
 mod async_jaguar2_iqk;
+mod async_jaguar2_kfree;
+mod async_jaguar2_power_tracking;
+mod async_jaguar2_spur;
 mod async_jaguar3;
 mod async_jaguar3_8822e;
 mod async_jaguar3_iqk;
@@ -29,6 +33,7 @@ mod async_sensing;
 mod async_tables;
 mod async_tx_power;
 mod beamforming;
+mod cfo;
 mod device;
 mod diagnostics;
 mod firmware;
@@ -51,12 +56,14 @@ mod usb_lock;
 mod usb_recovery;
 mod usb_transport;
 
+pub use adapter_caps::{AdapterCapabilities, BandRange, ChipGeneration};
 pub use adapter_health::{
     classify_adapter_health, compare_efuse_maps, AdapterHealthInput, AdapterHealthReasons,
     AdapterVerdict, EfuseStability, FirmwareBootStatus, REALTEK_EEPROM_ID,
 };
 pub use async_diagnostics::{BbDbgportRead, ThermalBucket, ThermalStatus};
 pub use async_iqk::IqkReport;
+pub use async_jaguar2_power_tracking::{Jaguar2PowerTrackingReport, Jaguar2PowerTrackingState};
 pub use async_jaguar3_iqk::{Jaguar3PowerTrackingReport, Jaguar3PowerTrackingState};
 pub use async_phydm::{FalseAlarmCounters, PhydmDigState, PhydmWatchdogReport};
 pub use async_power_tracking::{PowerTrackingReport, PowerTrackingState};
@@ -65,6 +72,7 @@ pub use beamforming::{
     decode_beamforming_angles, parse_beamforming_report, BeamformingAngles, BeamformingFeedback,
     BeamformingReport,
 };
+pub use cfo::{CfoStep, CfoTracker};
 pub use device::RealtekDevice;
 pub use diagnostics::{
     DriverDiagnostics, EfuseDiagnostics, InitStageDiagnostics, ProbeDiagnostics,
@@ -73,7 +81,10 @@ pub use diagnostics::{
 pub use link_health::{
     classify_link_health, LinkHealth, LinkHealthInput, LinkHealthThresholds, LinkVerdict,
 };
-pub use rx_quality::{RxQuality, RxQualityAccumulator, RxQualitySnapshot};
+pub use rx_quality::{
+    classify_active_rx_paths, ActiveRxPaths, RxPathActivityAccumulator, RxQuality,
+    RxQualityAccumulator, RxQualitySnapshot,
+};
 pub use tone_mask::{center_frequency_mhz, enumerate_mask_tones, CsiMaskSpec};
 pub use tx::{
     build_usb_tx_frame, bulk_out_requires_zlp, RealtekTxDescriptor, RealtekTxError,

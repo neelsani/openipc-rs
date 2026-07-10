@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.37 - 2026-07-10
+
+### Features
+- Feat(nebulus): expand codec stress testing and Android playback (0507ce1)
+
+
 ## 0.1.36 - 2026-07-10
 
 ### Features

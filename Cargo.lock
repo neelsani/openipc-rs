@@ -3953,7 +3953,7 @@ dependencies = [
 
 [[package]]
 name = "nebulus"
-version = "0.1.36"
+version = "0.1.37"
 dependencies = [
  "android-activity",
  "catppuccin-egui",
@@ -4577,7 +4577,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "openipc-cli"
-version = "0.1.36"
+version = "0.1.37"
 dependencies = [
  "nusb-webusb",
  "openipc-core",
@@ -4587,7 +4587,7 @@ dependencies = [
 
 [[package]]
 name = "openipc-core"
-version = "0.1.36"
+version = "0.1.37"
 dependencies = [
  "chacha20 0.10.1",
  "crypto_box",
@@ -4600,7 +4600,7 @@ dependencies = [
 
 [[package]]
 name = "openipc-rtl88xx"
-version = "0.1.36"
+version = "0.1.37"
 dependencies = [
  "js-sys",
  "log",
@@ -4613,7 +4613,7 @@ dependencies = [
 
 [[package]]
 name = "openipc-uplink"
-version = "0.1.36"
+version = "0.1.37"
 dependencies = [
  "crypto_box",
  "getrandom 0.2.17",
@@ -4628,7 +4628,7 @@ dependencies = [
 
 [[package]]
 name = "openipc-video"
-version = "0.1.36"
+version = "0.1.37"
 dependencies = [
  "bytes",
  "cros-codecs",
@@ -4651,7 +4651,7 @@ dependencies = [
 
 [[package]]
 name = "openipc-web"
-version = "0.1.36"
+version = "0.1.37"
 dependencies = [
  "js-sys",
  "nusb-webusb",
@@ -7540,7 +7540,7 @@ checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 
 [[package]]
 name = "wfb-rs"
-version = "0.1.36"
+version = "0.1.37"
 dependencies = [
  "crypto_box",
  "nusb-webusb",

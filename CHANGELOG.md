@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.39 - 2026-07-10
+
+### Features
+- Feat: sync latest devourer radio capabilities (5a0c378)
+
+### Fixes
+- Fix: move Android fullscreen control above system UI (0488815)
+
+
 ## 0.1.38 - 2026-07-10
 
 

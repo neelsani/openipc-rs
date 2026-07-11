@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.40 - 2026-07-11
+
+### Features
+- Feat(driver): add USB aggregation and hardware ACKs (7d30224)
+
+
 ## 0.1.39 - 2026-07-10
 
 ### Features

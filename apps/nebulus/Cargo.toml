@@ -1,6 +1,6 @@
 [package]
 name = "nebulus"
-version = "0.1.39"
+version = "0.1.40"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -32,10 +32,10 @@ catppuccin-egui = { version = "5.7.0", default-features = false, features = ["eg
 eframe = { version = "0.35", default-features = false, features = ["default_fonts", "persistence"] }
 egui_plot = "0.36"
 nusb.workspace = true
-openipc-core = { version = "0.1.39", path = "../../crates/openipc-core" }
-openipc-rtl88xx = { version = "0.1.39", path = "../../crates/openipc-rtl88xx" }
-openipc-uplink = { version = "0.1.39", path = "../../crates/openipc-uplink" }
-openipc-video = { version = "0.1.39", path = "../../crates/openipc-video" }
+openipc-core = { version = "0.1.40", path = "../../crates/openipc-core" }
+openipc-rtl88xx = { version = "0.1.40", path = "../../crates/openipc-rtl88xx" }
+openipc-uplink = { version = "0.1.40", path = "../../crates/openipc-uplink" }
+openipc-video = { version = "0.1.40", path = "../../crates/openipc-video" }
 muxide = "0.2.5"
 log.workspace = true
 mavlink = { version = "0.18.0", default-features = false, features = ["std", "dialect-common", "mav2-message-extensions", "mav2-message-signing"] }

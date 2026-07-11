@@ -133,6 +133,8 @@ Platform-specific filters are derived from this table:
   RX packet retention for diagnostics,
 - TX bulk writes, TX-mode/radiotap parsing for legacy/HT/VHT injection,
   descriptors, and TX power overrides for adaptive-link feedback,
+- opt-in USB TX aggregation, hardware A-MPDU pacing, CCX TX reports, and a
+  hardware ACK/BlockAck responder,
 - sticky quarter-dB relative TX-power control, flat-index override, saturation
   reporting, Jaguar2 per-packet descriptor power, TX capability validation,
   and driver-side submission statistics,
@@ -266,12 +268,17 @@ Native builds additionally read devourer-compatible environment variables:
 | `DEVOURER_TX_TIMEOUT_MS=<n>`       | Set native bulk-OUT timeout before recovery.           |
 | `DEVOURER_TX_LEGACY_8812_DESC`     | Use the older 8812 TX descriptor shape on RTL8814.     |
 | `DEVOURER_TX_NDPA=<n>`             | Select the beamforming sounding cadence.               |
+| `DEVOURER_TX_USB_AGG=<n>`          | Pack up to `n` frames in one USB TX transfer.           |
+| `DEVOURER_TX_AMPDU_MODE=<spec>`    | Set `tid/max[/density[/noack[/max_time]]]`.             |
+| `DEVOURER_TX_REPORT`               | Request firmware CCX status for transmitted frames.    |
+| `DEVOURER_ACK_RESPONDER=<mac>`     | Arm hardware ACK/BlockAck for one unicast MAC.          |
 
 The browser API exposes the same choices with
 `WebUsbRealtekDevice.fromWebUsbDeviceWithOptions`,
 `initializeMonitorAdvancedWithTxgapk`, `sendPacketForRadio`,
 `armBeamformingSounder`, `armBeamformee`, `applyCsiMask`, and
-`applyNbiNotch`.
+`applyNbiNotch`, `setUsbTxAggregation`, `setAmpduMode`, `setTxReports`, and
+`setAckResponder`.
 
 ## Sounding And Interference Controls
 
@@ -397,13 +404,13 @@ Current status:
 - RTL8812 thermal power tracking, RTL8812 IQK, RTL8814 IQK, and the PHYDM
   false-alarm/DIG watchdog have Rust implementations. They are exposed natively
   and through WASM, but still need register-trace comparison on real adapters.
-- Jaguar2 support is audited through devourer `11dff09`.
+- Jaguar2 support is audited through devourer `bb6c27e`.
   Both firmware images and their MAC/PHY/AGC/RF/TX-limit tables reproduce from
   checked-in importers. Both chips have their variant-specific software IQK
   state machines; RTL8821C uses its one-path BTG/WLG/WLA LOK/TXK/RXK flow.
   Live cold-plug/on-air validation is required.
 - RTL8812CU/EU and RTL8822CU/EU Jaguar3 support is audited through devourer
-  `11dff09`. The RTL8822E firmware and generated table arrays are
+  `bb6c27e`. The RTL8822E firmware and generated table arrays are
   byte-for-byte equal to the reference commit. Chip-ID dispatch, V1 EFUSE,
   PA-bias, RFE defaults/pinmux, DACK, IQK, TXGAPK, DPK bypass, per-rate TXAGC,
   thermal tracking, descriptors, coex/H2C, and shutdown are implemented. This
@@ -418,7 +425,7 @@ Current status:
   RTL8812 TX-power EFUSE rereads with IC-default fallback, Jaguar3 DACK/IQK
   retries, persistent timeout-free RX submissions, and desktop
   topology-lock/claim-before-reset ownership.
-- Devourer `11dff09` fast retuning and fast bandwidth switching are represented
+- Devourer's fast retuning and fast bandwidth switching through `bb6c27e` are represented
   for Jaguar1, Jaguar2, and
   Jaguar3, including automatic full fallback, per-packet radiotap CHANNEL
   selection, shared channel/frequency and sweep-list grammar, write-only
@@ -443,6 +450,11 @@ Current status:
   narrowband, Jaguar2 thermal/KFree/spur/MAC/SoML setup, crystal-cap/CFO
   tracking, hardware TSF, TX-egress timestamp parsing, hardware beacons, and
   coarse/fine beacon timing adjustment.
+- The `3025e2d` TX path is represented with its USB aggregate planner,
+  Jaguar1 OQT limits, HalMAC cap, descriptor packet offsets, A-MPDU pacing,
+  CCX reports, and hardware ACK/BlockAck responder. These remain opt-in.
+- The `bb6c27e` beacon path phase-aligns coarse Jaguar2/3 steering against TSF;
+  Jaguar2 retains and re-downloads its reserved page after either steering mode.
 - PCIe/VFIO, kernel timestamp prototypes, and reference transport-floor tools
   are intentionally excluded. `DEVOURER_REPLAY_WSEQ` is a Jaguar2
   register-trace delta-debugging hook rather than production radio behavior and
@@ -453,6 +465,9 @@ Current status:
   chip-family TX descriptor selection, descriptor checksums, oversized TX
   payload rejection, VHT descriptor fields, and center-channel mapping for
   common 40/80 MHz channels.
+- TX aggregation tests reproduce Devourer's alignment, boundary-shim, OQT,
+  frame/byte cap, aggregate-count, packet-offset, and checksum vectors. RX
+  tests lock `PAGGR`, `PPDU_CNT`, and Jaguar1/HalMAC CCX report layouts.
 - Native register control transfers now go through a small fakeable transport
   boundary with retry tests. Control transfers and normal bulk RX/TX retry
   transient cancellation/timeouts and endpoint stalls, clearing the endpoint

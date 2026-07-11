@@ -56,8 +56,10 @@ pub use radiotap::{
     RadiotapTxMetadata, TxMode, TxModeKind, TxRadioParams, FRAME_TYPE_DATA, FRAME_TYPE_RTS,
 };
 pub use realtek::{
-    parse_rx_aggregate, parse_rx_aggregate_with_kind, parse_rx_aggregate_with_kind_diagnostics,
-    tx_egress_tsf, RealtekRxPacket, RxAggregateDiagnostics, RxDescriptorKind, RxPacketAttrib,
+    is_tx_report_halmac, parse_rx_aggregate, parse_rx_aggregate_with_kind,
+    parse_rx_aggregate_with_kind_diagnostics, parse_tx_report_halmac, parse_tx_report_jaguar1,
+    parse_tx_report_packet, tx_egress_tsf, RealtekRxPacket, RxAggregateDiagnostics,
+    RxDescriptorKind, RxPacketAttrib, TxReport, TxReportFormat,
 };
 pub use receiver::{
     ReceiverBatch, ReceiverBatchCounters, ReceiverBatchOptions, ReceiverRuntime, RoutePayload,

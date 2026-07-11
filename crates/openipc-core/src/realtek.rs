@@ -78,6 +78,13 @@ pub struct RxPacketAttrib {
     /// Realtek reports this as a signed hardware code. The vendor conversion
     /// is approximately `raw * 2.5 kHz` at the ordinary 20 MHz clock rate.
     pub cfo_tail: i8,
+    /// Whether this MPDU arrived inside an A-MPDU aggregate.
+    pub paggr: bool,
+    /// HalMAC two-bit received-PPDU counter.
+    ///
+    /// Consecutive aggregated MPDUs with the same counter value were received
+    /// in one PPDU. Jaguar1 descriptors do not expose this counter.
+    pub ppdu_cnt: u8,
     /// Per-path raw RSSI readings when available.
     pub rssi: [u8; 4],
     /// Per-path raw SNR readings when available.
@@ -113,6 +120,8 @@ impl Default for RxPacketAttrib {
             sgi: 0,
             scrambler: 0,
             cfo_tail: 0,
+            paggr: false,
+            ppdu_cnt: 0,
             rssi: [0; 4],
             snr: [0; 4],
             evm: [0; 4],
@@ -181,6 +190,57 @@ pub struct TxStatusReport8814 {
     pub queue_time_us: u32,
     /// Final data-rate code used by hardware.
     pub final_data_rate: u8,
+}
+
+/// Firmware format used for a decoded per-frame TX status report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxReportFormat {
+    /// Six-byte RTL8812/RTL8821 CCX report after the two-byte C2H envelope.
+    Jaguar1,
+    /// Sixteen-byte HalMAC extended CCX report including its four-byte header.
+    Halmac,
+}
+
+/// Per-frame firmware TX status returned when `SPE_RPT` is set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TxReport {
+    /// On-wire report layout.
+    pub format: TxReportFormat,
+    /// Completion state: zero means delivered/completed, one means retry-drop.
+    pub state: u8,
+    /// Whether the transmitted frame was broadcast or multicast.
+    pub bmc: bool,
+    /// MAC ID associated with the transmission.
+    pub mac_id: u8,
+    /// Hardware queue selector.
+    pub queue_select: u8,
+    /// Number of data retransmissions used.
+    pub data_retries: u8,
+    /// Number of RTS retries, available on HalMAC reports.
+    pub rts_retries: u8,
+    /// Raw firmware queue-residency value.
+    pub queue_time_raw: u16,
+    /// Final descriptor rate used by hardware.
+    pub final_rate: u8,
+    /// HalMAC echo of the descriptor `SW_DEFINE` low byte.
+    pub tag: u8,
+    /// Number of reports firmware dropped before this HalMAC report.
+    pub missed_reports: u8,
+}
+
+impl TxReport {
+    /// Whether firmware reports successful completion.
+    pub const fn delivered(self) -> bool {
+        self.state == 0
+    }
+
+    /// Jaguar1 queue time converted from 256-microsecond units.
+    pub const fn queue_time_us(self) -> Option<u32> {
+        match self.format {
+            TxReportFormat::Jaguar1 => Some(self.queue_time_raw as u32 * 256),
+            TxReportFormat::Halmac => None,
+        }
+    }
 }
 
 /// Error returned while parsing Realtek RX aggregates.
@@ -264,6 +324,12 @@ pub fn parse_rx_descriptor_with_kind(
         shift_sz: bits(d0, 24, 2) as u8,
         physt: bits(d0, 26, 1) != 0,
         data_rate: bits(d3, 0, 7) as u8,
+        paggr: bits(d1, 15, 1) != 0,
+        ppdu_cnt: if kind == RxDescriptorKind::Jaguar1 {
+            0
+        } else {
+            bits(d2, 29, 2) as u8
+        },
         pkt_rpt_type: if bits(d2, 28, 1) != 0 {
             RxPacketType::C2hPacket
         } else {
@@ -382,6 +448,83 @@ pub fn parse_c2h_packet(data: &[u8]) -> Option<C2hPacket<'_>> {
         seq,
         payload,
     })
+}
+
+/// Parse an RTL8812/RTL8821 six-byte CCX report payload.
+///
+/// `payload` starts after the ordinary two-byte C2H command/sequence envelope.
+pub fn parse_tx_report_jaguar1(payload: &[u8]) -> Option<TxReport> {
+    let p = payload.get(..6)?;
+    let lifetime_over = p[0] & (1 << 6) != 0;
+    let retry_over = p[0] & (1 << 7) != 0;
+    Some(TxReport {
+        format: TxReportFormat::Jaguar1,
+        state: if retry_over {
+            1
+        } else if lifetime_over {
+            2
+        } else {
+            0
+        },
+        bmc: p[0] & (1 << 5) != 0,
+        mac_id: p[1],
+        queue_select: p[0] & 0x1f,
+        data_retries: p[2] & 0x3f,
+        rts_retries: 0,
+        queue_time_raw: u16::from_le_bytes([p[3], p[4]]),
+        final_rate: p[5],
+        tag: 0,
+        missed_reports: 0,
+    })
+}
+
+/// Return whether bytes contain a HalMAC extended CCX report.
+pub fn is_tx_report_halmac(data: &[u8]) -> bool {
+    data.len() >= 16 && data[0] == 0xff && data[2] == 0x0f
+}
+
+/// Parse a HalMAC extended CCX report including its four-byte C2H header.
+pub fn parse_tx_report_halmac(data: &[u8]) -> Option<TxReport> {
+    if !is_tx_report_halmac(data) {
+        return None;
+    }
+    let d1 = u32::from_le_bytes(data[4..8].try_into().ok()?);
+    let d2 = u32::from_le_bytes(data[8..12].try_into().ok()?);
+    let d3 = u32::from_le_bytes(data[12..16].try_into().ok()?);
+    Some(TxReport {
+        format: TxReportFormat::Halmac,
+        state: bits(d2, 30, 2) as u8,
+        bmc: bits(d2, 29, 1) != 0,
+        mac_id: bits(d1, 16, 7) as u8,
+        queue_select: bits(d1, 8, 5) as u8,
+        data_retries: bits(d3, 0, 6) as u8,
+        rts_retries: bits(d2, 24, 4) as u8,
+        queue_time_raw: bits(d2, 0, 16) as u16,
+        final_rate: bits(d3, 8, 7) as u8,
+        tag: bits(d2, 16, 8) as u8,
+        missed_reports: bits(d1, 13, 3) as u8,
+    })
+}
+
+/// Parse a CCX TX report from one Realtek RX packet and descriptor generation.
+///
+/// Jaguar1 reports use an ordinary `0x03` C2H envelope. Jaguar2/3 reports use
+/// the extended HalMAC packet beginning with `0xff, seq, 0x0f`.
+pub fn parse_tx_report_packet(
+    packet: &RealtekRxPacket<'_>,
+    descriptor_kind: RxDescriptorKind,
+) -> Option<TxReport> {
+    match descriptor_kind {
+        RxDescriptorKind::Jaguar1 => {
+            let c2h = parse_c2h_packet(packet.data)?;
+            (c2h.cmd_id == 0x03)
+                .then(|| parse_tx_report_jaguar1(c2h.payload))
+                .flatten()
+        }
+        RxDescriptorKind::Jaguar2 | RxDescriptorKind::Jaguar3 => {
+            parse_tx_report_halmac(packet.data)
+        }
+    }
 }
 
 /// Parse RTL8814A TX status reports from a C2H payload.
@@ -549,6 +692,81 @@ mod tests {
         desc[8..12].copy_from_slice(&d2.to_le_bytes());
         desc[12..16].copy_from_slice(&d3.to_le_bytes());
         desc
+    }
+
+    #[test]
+    fn surfaces_aggregation_markers_from_rx_descriptors() {
+        for kind in [RxDescriptorKind::Jaguar1, RxDescriptorKind::Jaguar2] {
+            let mut desc = descriptor(4, 0, 0, 9);
+            let mut d1 = u32::from_le_bytes(desc[4..8].try_into().unwrap());
+            put_bits(&mut d1, 15, 1, 1);
+            desc[4..8].copy_from_slice(&d1.to_le_bytes());
+            let mut d2 = u32::from_le_bytes(desc[8..12].try_into().unwrap());
+            put_bits(&mut d2, 29, 2, 3);
+            desc[8..12].copy_from_slice(&d2.to_le_bytes());
+
+            let attrib = parse_rx_descriptor_with_kind(&desc, kind).unwrap();
+            assert!(attrib.paggr);
+            assert_eq!(
+                attrib.ppdu_cnt,
+                if kind == RxDescriptorKind::Jaguar1 {
+                    0
+                } else {
+                    3
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn parses_jaguar1_ccx_tx_report() {
+        let report = parse_tx_report_jaguar1(&[0x40 | 0x05, 0x2a, 0x3f, 0x34, 0x12, 0x55]).unwrap();
+
+        assert_eq!(report.format, TxReportFormat::Jaguar1);
+        assert_eq!(report.state, 2);
+        assert!(!report.delivered());
+        assert_eq!(report.queue_select, 5);
+        assert_eq!(report.mac_id, 0x2a);
+        assert_eq!(report.data_retries, 0x3f);
+        assert_eq!(report.queue_time_raw, 0x1234);
+        assert_eq!(report.queue_time_us(), Some(0x1234 * 256));
+        assert_eq!(report.final_rate, 0x55);
+    }
+
+    #[test]
+    fn parses_halmac_ccx_tx_report() {
+        let mut report = [0u8; 16];
+        report[0] = 0xff;
+        report[2] = 0x0f;
+        let d1 = (7u32 << 8) | (3u32 << 13) | (0x45u32 << 16);
+        let d2 = 0x1234u32 | (0xabu32 << 16) | (9u32 << 24) | (1u32 << 29);
+        let d3 = 0x2au32 | (0x51u32 << 8);
+        report[4..8].copy_from_slice(&d1.to_le_bytes());
+        report[8..12].copy_from_slice(&d2.to_le_bytes());
+        report[12..16].copy_from_slice(&d3.to_le_bytes());
+
+        let parsed = parse_tx_report_halmac(&report).unwrap();
+        assert_eq!(parsed.format, TxReportFormat::Halmac);
+        assert_eq!(parsed.queue_select, 7);
+        assert_eq!(parsed.missed_reports, 3);
+        assert_eq!(parsed.mac_id, 0x45);
+        assert_eq!(parsed.queue_time_raw, 0x1234);
+        assert_eq!(parsed.tag, 0xab);
+        assert_eq!(parsed.rts_retries, 9);
+        assert!(parsed.bmc);
+        assert_eq!(parsed.data_retries, 0x2a);
+        assert_eq!(parsed.final_rate, 0x51);
+    }
+
+    #[test]
+    fn parses_report_from_generation_tagged_rx_packet() {
+        let packet = RealtekRxPacket {
+            attrib: RxPacketAttrib::default(),
+            data: &[0x03, 0x11, 0x05, 0x2a, 0x03, 0x34, 0x12, 0x55],
+        };
+        let report = parse_tx_report_packet(&packet, RxDescriptorKind::Jaguar1).unwrap();
+        assert_eq!(report.mac_id, 0x2a);
+        assert_eq!(report.queue_time_raw, 0x1234);
     }
 
     #[test]

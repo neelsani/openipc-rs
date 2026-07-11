@@ -7,9 +7,9 @@ use openipc_rtl88xx::is_supported_id;
 use openipc_rtl88xx::SUPPORTED_DEVICES;
 #[cfg(target_arch = "wasm32")]
 use openipc_rtl88xx::{
-    ActiveRxPaths, AdapterCapabilities, BbDbgportRead, BeamformingFeedback, CfoStep, ChannelWidth,
-    ChipGeneration, CsiMaskSpec, DriverOptions, FalseAlarmCounters, Firmware8814Mode, InitReport,
-    InitStatus, IqkReport, Jaguar2PowerTrackingReport, Jaguar2PowerTrackingState,
+    ActiveRxPaths, AdapterCapabilities, AmpduMode, BbDbgportRead, BeamformingFeedback, CfoStep,
+    ChannelWidth, ChipGeneration, CsiMaskSpec, DriverOptions, FalseAlarmCounters, Firmware8814Mode,
+    InitReport, InitStatus, IqkReport, Jaguar2PowerTrackingReport, Jaguar2PowerTrackingState,
     Jaguar3PowerTrackingReport, Jaguar3PowerTrackingState, MonitorOptions, PhydmDigState,
     PhydmWatchdogReport, PowerTrackingReport, PowerTrackingState, RadioConfig, RealtekDevice,
     RealtekTxDescriptor, RealtekTxOptions, RetuneReport, RxEnergy, ThermalBucket, ThermalStatus,
@@ -1355,6 +1355,86 @@ impl WebUsbRealtekDevice {
             )
             .await
             .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = sendPacketBatch)]
+    /// Pack and submit one accepted prefix of `Uint8Array` radiotap packets.
+    pub async fn send_packet_batch(
+        &self,
+        packets: Array,
+        current_channel: u8,
+    ) -> Result<usize, JsValue> {
+        let owned = packets
+            .iter()
+            .map(|value| Uint8Array::new(&value).to_vec())
+            .collect::<Vec<_>>();
+        let packet_refs = owned.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let chip = self.driver.probe_chip_async().await.map_err(driver_error)?;
+        self.driver
+            .send_packet_batch_async(
+                &packet_refs,
+                RealtekTxOptions {
+                    current_channel,
+                    descriptor: RealtekTxDescriptor::for_chip_family(chip.family),
+                    ..RealtekTxOptions::default()
+                },
+            )
+            .await
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = setAckResponder)]
+    /// Arm hardware ACK/BlockAck responses for an exact six-byte unicast MAC.
+    pub async fn set_ack_responder(&self, mac: &[u8]) -> Result<(), JsValue> {
+        self.driver
+            .set_ack_responder_async(required_mac(mac, "mac")?)
+            .await
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = clearAckResponder)]
+    /// Return the adapter to passive monitor-mode acknowledgement behavior.
+    pub async fn clear_ack_responder(&self) -> Result<(), JsValue> {
+        self.driver
+            .clear_ack_responder_async()
+            .await
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = setAmpduMode)]
+    /// Enable A-MPDU from `tid/max[/density[/noack[/max_time]]]` settings.
+    pub async fn set_ampdu_mode(&self, spec: &str) -> Result<(), JsValue> {
+        let mode = spec
+            .parse::<AmpduMode>()
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        self.driver
+            .set_ampdu_mode_async(mode)
+            .await
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = clearAmpduMode)]
+    /// Disable A-MPDU and restore generation-specific pacing defaults.
+    pub async fn clear_ampdu_mode(&self) -> Result<(), JsValue> {
+        self.driver
+            .clear_ampdu_mode_async()
+            .await
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = setUsbTxAggregation)]
+    /// Configure the maximum frames in one WebUSB bulk-OUT transfer.
+    pub async fn set_usb_tx_aggregation(&self, max_frames: usize) -> Result<(), JsValue> {
+        self.driver
+            .set_usb_tx_aggregation_async(max_frames)
+            .await
+            .map_err(driver_error)
+    }
+
+    #[wasm_bindgen(js_name = setTxReports)]
+    /// Enable or disable firmware CCX reports for subsequent transmissions.
+    pub fn set_tx_reports(&self, enabled: bool) {
+        self.driver.set_tx_reports(enabled);
     }
 
     #[wasm_bindgen(js_name = armBeamformingSounder)]

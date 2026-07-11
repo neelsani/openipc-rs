@@ -59,6 +59,8 @@ OpenIPC/devourer 9e91f6e Fast bandwidth-only switching on all generations
 OpenIPC/devourer c37ea5f Hardware TSF and receive timestamps
 OpenIPC/devourer dad6d6d/c991805 Hardware beacons, TX-egress TSF, and TsfSync
 OpenIPC/devourer 11dff09 Latest audited baseline; PCIe reference tooling excluded
+OpenIPC/devourer 3025e2d USB TX aggregation, A-MPDU, TX reports, and hardware ACKs
+OpenIPC/devourer bb6c27e Jaguar2 beacon steering and reserved-page re-download
 ```
 
 ## Audit Plan
@@ -78,6 +80,8 @@ chip family:
 | Channel/BW           | RF18 band bits, SCO, DFIR, 5/10 MHz reclock, 40/80 primary index and DATA_SC      | `async_radio.rs`, `async_jaguar2.rs`, `async_jaguar3.rs`     | tuned to the wrong channel or sample rate      |
 | RX descriptors       | field offsets, packet/C2H split, drvinfo/shift offset, 8-byte aggregate alignment | `openipc-core::realtek`                                      | corrupted 802.11 frames or missed C2H reports  |
 | TX descriptors       | radiotap RATE/MCS/VHT parsing, 5 GHz CCK clamp, descriptor checksum               | `openipc-rtl88xx::tx`                                        | bulk OUT succeeds but nothing goes on-air      |
+| TX aggregation       | aligned blocks, boundary shim, agg count, OQT/caps, packet offset                 | `tx_aggregation.rs`, `tx.rs`                                 | repeated blocks, stalled DMA, poor throughput  |
+| ACK/A-MPDU           | MACID/BSSID/net type, pacing registers, retry/no-ACK descriptor policy            | `async_tx_features.rs`, `ampdu.rs`                           | ACK storm, retries, malformed aggregates       |
 | Runtime polling      | coex keepalive, thermal power tracking, PHYDM/watchdog hooks                      | app-owned RX loop plus explicit driver APIs                  | sustained TX degrades or stops                 |
 | Shutdown             | stop TRX, close RX filter, power-off sequence                                     | `shutdown_monitor*`                                          | adapter wedges until unplug/replug             |
 
@@ -310,6 +314,11 @@ The `3ec1ab1..11dff09` portable runtime APIs are represented directly in Rust:
   Descriptor building clears STBC on a 1T1R adapter, as Devourer does.
 - `TxStats` tracks submissions and final failures, retaining whether the last
   failure was timeout/backpressure, stall, disconnect, or another error.
+- `plan_tx_aggregate` and `build_usb_tx_aggregate` mirror `3025e2d`: aligned
+  blocks, Jaguar1's first reserve and OQT limits, HalMAC's three-frame cap,
+  USB-MPS boundary escape, aggregate-count descriptors, and checksums.
+- `AmpduMode`, CCX report parsing, and the ACK/BlockAck methods expose the same
+  opt-in pacing, retry, feedback, and MAC responder controls on native/WASM.
 - `RxQualityAccumulator` drains windowed RSSI/SNR/EVM, computes the passive
   `RSSI - SNR` noise floor, and combines it with `RxEnergy` through the measured
   `LinkHealth` classifier.
@@ -331,6 +340,8 @@ The `3ec1ab1..11dff09` portable runtime APIs are represented directly in Rust:
 - `read_hardware_tsf[_async]`, `write_hardware_tsf[_async]`, beacon start,
   coarse/fine timing adjustment, per-frame `tsfl`, TX-egress TSF parsing, and
   `openipc_core::TsfSync` provide the portable hardware-time primitives.
+  The `bb6c27e` Jaguar2 path retains and re-downloads its reserved-page beacon
+  after coarse/fine steering; coarse Jaguar2/3 changes are TSF phase-aligned.
 
 These are explicit calls and state objects. The crate does not start thermal,
 quality, health, or control threads. Native apps normally schedule them on the

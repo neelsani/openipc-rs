@@ -268,6 +268,17 @@ await radio.applyNbiNotch(149, 80, 0, 5805);
 const sounderMac = new Uint8Array([0x02, 0, 0, 0, 0, 1]);
 await radio.armBeamformingSounder(sounderMac);
 await secondRadio.armBeamformee(sounderMac, new Uint8Array(), false);
+
+// Optional transmit batching and MAC aggregation. Both are disabled by default.
+await radio.setUsbTxAggregation(3);
+await radio.setAmpduMode("0/16");
+radio.setTxReports(true);
+
+// This makes the monitor adapter actively ACK one unicast receiver address.
+await radio.setAckResponder(new Uint8Array([0x02, 0, 0, 0, 0, 1]));
+
+// One WebUSB transfer can contain an accepted prefix of these frames.
+const sent = await radio.sendPacketBatch([frameA, frameB, frameC], 149);
 ```
 
 `applyCsiMask` and `applyNbiNotch` configure the receive path only. They do not

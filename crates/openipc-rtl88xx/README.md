@@ -72,6 +72,14 @@ lists.
   matching Devourer's behavior instead of transmitting an undecodable descriptor.
 - Driver-side TX submission statistics distinguish timeout/backpressure from
   stalls, disconnects, and other transport errors.
+- Opt-in USB TX aggregation packs aligned descriptor/frame blocks into one
+  bulk transfer with Jaguar1 OQT limits, HalMAC's three-frame cap, boundary
+  shims, generation-specific checksums, and channel-change flushes.
+- Opt-in hardware A-MPDU mode programs per-frame aggregation fields and the
+  Jaguar1/2/3 pacing registers. Firmware CCX reports expose completion state,
+  retries, final rate, queue time, and HalMAC correlation tags.
+- The hardware ACK/BlockAck responder can actively acknowledge traffic for one
+  unicast MAC while monitor RX and injection remain enabled.
 - Explicit Jaguar1/2/3 SU/MU beamformee and sounding-engine controls, NDPA TX
   descriptor support, and compressed beamforming report angle decoding.
 - Jaguar3 closed-loop TX beamforming entry/apply support. Steering remains
@@ -267,7 +275,27 @@ DEVOURER_BF_ARM_BFEE=<mac>        arm a beamformee for one peer
 DEVOURER_BF_ARM_BFEE_MU           request MU beamformee feedback
 DEVOURER_BF_TXBF=<mac>            arm Jaguar3 closed-loop TX beamforming
 DEVOURER_TX_NDPA=<n>              mark sounding frames at the selected cadence
+DEVOURER_TX_USB_AGG=<n>           pack up to n frames in each USB TX transfer
+DEVOURER_TX_AMPDU_MODE=<spec>     tid/max[/density[/noack[/max_time]]]
+DEVOURER_TX_REPORT                request firmware CCX reports for TX frames
+DEVOURER_ACK_RESPONDER=<mac>      arm hardware ACK/BlockAck for a unicast MAC
 ```
+
+The same controls are available without environment variables:
+
+```rust
+use openipc_rtl88xx::AmpduMode;
+
+device.set_usb_tx_aggregation(3)?;
+device.set_ampdu_mode(AmpduMode::OPENIPC)?;
+device.set_tx_reports(true);
+device.set_ack_responder([0x02, 0, 0, 0, 0, 1])?;
+```
+
+`send_packet_batch_on_tracked` submits the accepted prefix as one USB transfer;
+call it again with the remainder. The async equivalents work on native and
+WASM. These features are disabled by default, and the ACK responder must use a
+unicast address because it makes a passive monitor radio transmit responses.
 
 ## Native And WebUSB
 

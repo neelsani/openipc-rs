@@ -15,7 +15,7 @@ use crate::device::discover_bulk_endpoints_with_override;
 use crate::device::RealtekDevice;
 use crate::phy::RfPath;
 use crate::regs::*;
-use crate::tx::{build_usb_tx_frame, RealtekTxOptions};
+use crate::tx::{build_usb_tx_aggregate, build_usb_tx_frame, RealtekTxOptions};
 #[cfg(target_arch = "wasm32")]
 use crate::types::is_supported_id;
 use crate::types::{
@@ -116,6 +116,8 @@ impl RealtekDevice {
             crystal_cap: std::sync::atomic::AtomicU8::new(u8::MAX),
             crystal_cap_bases: std::sync::Mutex::new(None),
             beacon_interval_tu: std::sync::atomic::AtomicU16::new(0),
+            beacon_mpdu: std::sync::Mutex::new(Vec::new()),
+            beacon_tbtt_offset_us: std::sync::atomic::AtomicI64::new(0),
             cca_disabled: std::sync::Mutex::new(false),
             beamforming_peer: std::sync::Mutex::new(None),
             beamforming_report_ready: std::sync::atomic::AtomicBool::new(false),
@@ -134,6 +136,10 @@ impl RealtekDevice {
             tx_endpoint_prepared: std::sync::atomic::AtomicBool::new(false),
             tx_wedged: std::sync::atomic::AtomicBool::new(false),
             jaguar3_rx_wanted: std::sync::atomic::AtomicBool::new(true),
+            ampdu_mode: std::sync::Mutex::new(crate::AmpduMode::disabled()),
+            tx_reports_enabled: std::sync::atomic::AtomicBool::new(false),
+            tx_report_tag: std::sync::atomic::AtomicU8::new(0),
+            usb_tx_aggregate_max: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -480,6 +486,17 @@ impl RealtekDevice {
     ) -> Result<(), DriverError> {
         if options.cw_tone_gain.is_some() {
             return Ok(());
+        }
+        self.set_tx_reports(options.tx_reports);
+        if options.usb_tx_aggregate_max != 0 {
+            self.set_usb_tx_aggregation_async(options.usb_tx_aggregate_max)
+                .await?;
+        }
+        if let Some(mac) = options.ack_responder {
+            self.set_ack_responder_async(mac).await?;
+        }
+        if let Some(mode) = options.ampdu_mode {
+            self.set_ampdu_mode_async(mode).await?;
         }
         if options.disable_cca && !chip.family.is_jaguar1() {
             self.set_cca_disabled_async(true).await?;
@@ -1052,14 +1069,19 @@ impl RealtekDevice {
         }
         self.beacon_interval_tu
             .store(interval_tu, Ordering::Release);
+        *self
+            .beacon_mpdu
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)? = mpdu.to_vec();
+        self.beacon_tbtt_offset_us.store(0, Ordering::Release);
         Ok(())
     }
 
-    /// Shift a Jaguar3 hardware beacon by a whole-TU one-shot interval change.
+    /// Shift a Jaguar2/3 hardware beacon by a whole-TU one-shot interval change.
     pub async fn adjust_beacon_timing_async(&self, microseconds: i32) -> Result<i32, DriverError> {
         let chip = self.probe_chip_async().await?;
         let nominal = self.beacon_interval_tu.load(Ordering::Acquire);
-        if nominal == 0 || chip.family.is_jaguar2() {
+        if nominal == 0 {
             return Ok(0);
         }
         if chip.family.is_jaguar1() {
@@ -1075,19 +1097,34 @@ impl RealtekDevice {
         }
         let one_shot = (i32::from(nominal) + delta_tu).max(1);
         delta_tu = one_shot - i32::from(nominal);
+        let period_us = i64::from(nominal) * 1024;
+        let mut position = self.beacon_grid_position_async(period_us).await?;
+        if position > period_us - 20_000 {
+            crate::time::sleep_micros((period_us - position + 5_000).max(0) as u32).await;
+        }
+        position = self.beacon_grid_position_async(period_us).await?;
         self.write_u16_async(0x0554, one_shot as u16).await?;
-        crate::time::sleep_micros(one_shot as u32 * 1024 + 2000).await;
+        let restore_delay = (period_us - position) + i64::from(one_shot) * 512;
+        crate::time::sleep_micros(restore_delay.max(0) as u32).await;
         self.write_u16_async(0x0554, nominal).await?;
+        let previous = self.beacon_tbtt_offset_us.load(Ordering::Acquire);
+        self.beacon_tbtt_offset_us.store(
+            (previous + i64::from(delta_tu) * 1024).rem_euclid(period_us),
+            Ordering::Release,
+        );
+        if chip.family.is_jaguar2() {
+            self.redownload_jaguar2_beacon_async(chip.family).await?;
+        }
         Ok(delta_tu * 1024)
     }
 
-    /// Shift a Jaguar3 hardware beacon at microsecond resolution.
+    /// Shift a Jaguar2/3 hardware beacon at microsecond resolution.
     pub async fn adjust_beacon_timing_fine_async(
         &self,
         microseconds: i32,
     ) -> Result<i32, DriverError> {
         let chip = self.probe_chip_async().await?;
-        if self.beacon_interval_tu.load(Ordering::Acquire) == 0 || chip.family.is_jaguar2() {
+        if self.beacon_interval_tu.load(Ordering::Acquire) == 0 {
             return Ok(0);
         }
         if chip.family.is_jaguar1() {
@@ -1104,7 +1141,30 @@ impl RealtekDevice {
         self.write_u32_async(0x0560, shifted as u32).await?;
         self.write_u32_async(0x0564, (shifted >> 32) as u32).await?;
         self.write_u8_async(0x0550, control | BIT3 as u8).await?;
+        self.beacon_tbtt_offset_us.store(0, Ordering::Release);
+        if chip.family.is_jaguar2() {
+            self.redownload_jaguar2_beacon_async(chip.family).await?;
+        }
         Ok(microseconds)
+    }
+
+    async fn beacon_grid_position_async(&self, period_us: i64) -> Result<i64, DriverError> {
+        let tsf = self.read_hardware_tsf_async().await?;
+        let position = (tsf % period_us as u64) as i64;
+        let offset = self.beacon_tbtt_offset_us.load(Ordering::Acquire);
+        Ok((position - offset).rem_euclid(period_us))
+    }
+
+    async fn redownload_jaguar2_beacon_async(&self, family: ChipFamily) -> Result<(), DriverError> {
+        let mpdu = self
+            .beacon_mpdu
+            .lock()
+            .map_err(|_| DriverError::DriverStatePoisoned)?
+            .clone();
+        if mpdu.is_empty() {
+            return Err(DriverError::InvalidBeacon);
+        }
+        self.download_beacon_page_jaguar2_async(family, &mpdu).await
     }
 
     /// Set both crystal load-capacitance legs to a raw trim code.
@@ -1682,6 +1742,47 @@ impl RealtekDevice {
         .await
     }
 
+    /// Pack and submit one accepted prefix of radiotap packets asynchronously.
+    ///
+    /// The return value is the number of packets represented by the transfer;
+    /// this API is shared by native executors and browser WebUSB callers.
+    pub async fn send_packet_batch_async(
+        &self,
+        packets: &[&[u8]],
+        mut options: RealtekTxOptions,
+    ) -> Result<usize, DriverError> {
+        if packets.is_empty() {
+            return Ok(0);
+        }
+        self.apply_pending_beamforming_async().await?;
+        let chip = self.probe_chip_async().await?;
+        options.capabilities = Some(crate::TxCapabilities::for_chip(chip));
+        if let Some(channel) = openipc_core::parse_radiotap_tx_channel(packets[0])
+            .map_err(|error| DriverError::TxBuild(error.into()))?
+        {
+            let report = self.fast_retune_async(channel, true).await?;
+            options.current_channel = report.radio.channel;
+            options.configured_channel_width = report.radio.channel_width;
+            options.configured_channel_offset = report.radio.channel_offset;
+        }
+        options =
+            self.apply_persistent_tx_options_for_batch(chip.family, options, packets.len())?;
+        let aggregate = build_usb_tx_aggregate(
+            packets,
+            options,
+            usb_bulk_size(self.device.speed()),
+            self.usb_tx_aggregation().max(1),
+        )
+        .map_err(DriverError::TxBuild)?;
+        log::trace!(target: "openipc_rtl88xx::tx", "USB TX aggregate frames={} bytes={} shim={}", aggregate.frame_count, aggregate.bytes.len(), aggregate.first_shim);
+        self.write_tx_transfer_terminated_async(
+            &aggregate.bytes,
+            options.descriptor.uses_terminated_bulk_out(),
+        )
+        .await?;
+        Ok(aggregate.frame_count)
+    }
+
     /// Read raw bytes from a Realtek vendor register.
     #[cfg(target_arch = "wasm32")]
     pub async fn read_register_async(
@@ -1883,6 +1984,15 @@ fn hex_bytes(bytes: &[u8]) -> String {
         let _ = write!(output, "{byte:02x}");
     }
     output
+}
+
+const fn usb_bulk_size(speed: Option<nusb::Speed>) -> usize {
+    match speed {
+        Some(nusb::Speed::Super | nusb::Speed::SuperPlus) => 1024,
+        Some(nusb::Speed::High) => 512,
+        Some(nusb::Speed::Low | nusb::Speed::Full) | None => 64,
+        _ => 64,
+    }
 }
 
 fn tx_error_kind(error: TransferError) -> crate::TxErrorKind {

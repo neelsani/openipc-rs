@@ -7,6 +7,7 @@
 
 mod adapter_caps;
 mod adapter_health;
+mod ampdu;
 mod async_continuous_tx;
 mod async_cw;
 mod async_diagnostics;
@@ -31,6 +32,7 @@ mod async_power_tracking;
 mod async_radio;
 mod async_sensing;
 mod async_tables;
+mod async_tx_features;
 mod async_tx_power;
 mod beamforming;
 mod cfo;
@@ -48,6 +50,7 @@ mod rx_quality;
 mod time;
 mod tone_mask;
 mod tx;
+mod tx_aggregation;
 mod tx_control;
 mod tx_power_defaults;
 mod types;
@@ -61,6 +64,7 @@ pub use adapter_health::{
     classify_adapter_health, compare_efuse_maps, AdapterHealthInput, AdapterHealthReasons,
     AdapterVerdict, EfuseStability, FirmwareBootStatus, REALTEK_EEPROM_ID,
 };
+pub use ampdu::{AmpduMode, ParseAmpduModeError};
 pub use async_diagnostics::{BbDbgportRead, ThermalBucket, ThermalStatus};
 pub use async_iqk::IqkReport;
 pub use async_jaguar2_power_tracking::{Jaguar2PowerTrackingReport, Jaguar2PowerTrackingState};
@@ -87,8 +91,11 @@ pub use rx_quality::{
 };
 pub use tone_mask::{center_frequency_mhz, enumerate_mask_tones, CsiMaskSpec};
 pub use tx::{
-    build_usb_tx_frame, bulk_out_requires_zlp, RealtekTxDescriptor, RealtekTxError,
-    RealtekTxOptions, TX_DESC_SIZE, TX_DESC_SIZE_8822C,
+    build_usb_tx_aggregate, build_usb_tx_frame, bulk_out_requires_zlp, RealtekTxDescriptor,
+    RealtekTxError, RealtekTxOptions, RealtekUsbTxAggregate, TX_DESC_SIZE, TX_DESC_SIZE_8822C,
+};
+pub use tx_aggregation::{
+    plan_tx_aggregate, TxAggregateBlock, TxAggregateLimits, TxAggregatePlan, MAX_TX_AGGREGATE_BYTES,
 };
 pub use tx_control::{
     jaguar2_packet_power_db, jaguar2_packet_power_step, quantize_tx_power_offset_qdb,

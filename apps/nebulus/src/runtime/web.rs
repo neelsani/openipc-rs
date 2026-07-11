@@ -510,16 +510,17 @@ mod worker {
     use nusb::transfer::{Buffer, Bulk, Completion, In, Out, TransferError};
     use openipc_core::{
         realtek::{
-            parse_rx_aggregate_with_kind, parse_rx_aggregate_with_kind_diagnostics, AggregateError,
+            parse_8814_tx_status_reports, parse_rx_aggregate_with_kind,
+            parse_rx_aggregate_with_kind_diagnostics, parse_tx_report_packet, AggregateError,
             RxPacketType,
         },
         AdaptiveLink, ChannelId, DiversityCombiner, DiversityDecision, DiversitySourceId,
         FecCounters, FrameLayout, PayloadRouteId, ReceiverRuntime, WfbKeypair, WfbTxKeypair,
     };
     use openipc_rtl88xx::{
-        build_usb_tx_frame, ChannelWidth, ChipFamily, DriverOptions, Jaguar2PowerTrackingState,
-        Jaguar3PowerTrackingState, RadioConfig, RealtekDevice, RealtekTxDescriptor,
-        RealtekTxOptions,
+        build_usb_tx_aggregate, build_usb_tx_frame, ChannelWidth, ChipFamily, DriverOptions,
+        Jaguar2PowerTrackingState, Jaguar3PowerTrackingState, RadioConfig, RealtekDevice,
+        RealtekTxDescriptor, RealtekTxOptions,
     };
     use openipc_uplink::{
         TxBatch, TxFailureKind, TxOutcome, UplinkEngine, UplinkEngineMetrics, UserspaceNetwork,
@@ -549,6 +550,7 @@ mod worker {
 
     struct WebRadio {
         source_id: u16,
+        chip: ChipFamily,
         descriptor: openipc_core::RxDescriptorKind,
         endpoint_address: u8,
         endpoint: nusb::Endpoint<Bulk, In>,
@@ -960,18 +962,18 @@ mod worker {
         submitted: u64,
         completed: u64,
         transfers: VecDeque<WebTransfer>,
-        pending_zlp: HashMap<u64, TxOutcome>,
+        pending_zlp: HashMap<u64, (Vec<u64>, TxOutcome)>,
         in_flight_frames: usize,
     }
 
     enum WebTransfer {
         Frame {
-            ticket: u64,
+            tickets: Vec<u64>,
             expected: usize,
             terminating_zlp: bool,
         },
         Zlp {
-            ticket: u64,
+            key: u64,
         },
     }
 
@@ -1018,44 +1020,83 @@ mod worker {
             options: RealtekTxOptions,
         ) -> Result<bool, String> {
             let mut prepared = Vec::with_capacity(batch.frames().len());
-            let options = self
-                .device
-                .apply_persistent_tx_options(self.chip, options)
-                .map_err(|error| error.to_string())?;
             let mut required = 0usize;
-            for frame in batch.frames() {
-                let usb_frame = build_usb_tx_frame(frame.bytes(), options)
+            let mut cursor = 0usize;
+            while cursor < batch.frames().len() {
+                let frame_options = self
+                    .device
+                    .apply_persistent_tx_options_for_batch(
+                        self.chip,
+                        options,
+                        batch.frames().len() - cursor,
+                    )
                     .map_err(|error| error.to_string())?;
-                let terminate = options.descriptor.uses_terminated_bulk_out()
+                let max_frames = self.device.usb_tx_aggregation();
+                let (usb_frame, frame_count, first_shim) = if max_frames > 1 {
+                    let packets = batch.frames()[cursor..]
+                        .iter()
+                        .map(|frame| frame.bytes())
+                        .collect::<Vec<_>>();
+                    let aggregate = build_usb_tx_aggregate(
+                        &packets,
+                        frame_options,
+                        self.endpoint.max_packet_size(),
+                        max_frames,
+                    )
+                    .map_err(|error| error.to_string())?;
+                    (aggregate.bytes, aggregate.frame_count, aggregate.first_shim)
+                } else {
+                    (
+                        build_usb_tx_frame(batch.frames()[cursor].bytes(), frame_options)
+                            .map_err(|error| error.to_string())?,
+                        1,
+                        false,
+                    )
+                };
+                let selected = &batch.frames()[cursor..cursor + frame_count];
+                let tickets = selected
+                    .iter()
+                    .map(|frame| frame.ticket())
+                    .collect::<Vec<_>>();
+                let radio_bytes = selected
+                    .iter()
+                    .map(|frame| frame.bytes().len())
+                    .sum::<usize>();
+                let terminate = frame_count == 1
+                    && frame_options.descriptor.uses_terminated_bulk_out()
                     && !usb_frame.is_empty()
                     && usb_frame
                         .len()
                         .is_multiple_of(self.endpoint.max_packet_size());
                 required += if terminate { 2 } else { 1 };
-                prepared.push((frame.ticket(), frame.bytes().len(), usb_frame, terminate));
+                prepared.push((tickets, radio_bytes, usb_frame, terminate, first_shim));
+                cursor += frame_count;
             }
             if self.stalled || self.endpoint.pending() + required > TX_TRANSFERS_IN_FLIGHT {
                 return Ok(false);
             }
-            for (ticket, radio_bytes, usb_frame, terminate) in prepared {
+            for (tickets, radio_bytes, usb_frame, terminate, first_shim) in prepared {
+                let first_submission = self.submitted == 0;
                 let usb_bytes = usb_frame.len();
                 self.endpoint.submit(Buffer::from(usb_frame));
                 self.transfers.push_back(WebTransfer::Frame {
-                    ticket,
+                    tickets: tickets.clone(),
                     expected: usb_bytes,
                     terminating_zlp: terminate,
                 });
-                self.submitted = self.submitted.saturating_add(1);
-                if self.submitted == 1 {
+                self.submitted = self.submitted.saturating_add(tickets.len() as u64);
+                if first_submission {
                     log::info!(
                         target: "nebulus::uplink",
-                        "first WebUSB TX transfer queued endpoint=0x{:02x} radio_bytes={radio_bytes} usb_bytes={usb_bytes} terminate={terminate}",
+                        "first WebUSB TX transfer queued endpoint=0x{:02x} frames={} radio_bytes={radio_bytes} usb_bytes={usb_bytes} shim={first_shim} terminate={terminate}",
                         self.device.bulk_out_endpoint_address(),
+                        tickets.len(),
                     );
                 }
                 if terminate {
+                    let key = tickets[0];
                     self.endpoint.submit(Buffer::new(0));
-                    self.transfers.push_back(WebTransfer::Zlp { ticket });
+                    self.transfers.push_back(WebTransfer::Zlp { key });
                 }
             }
             self.in_flight_frames = self.in_flight_frames.saturating_add(batch.frames().len());
@@ -1077,7 +1118,7 @@ mod worker {
                 };
                 match transfer {
                     WebTransfer::Frame {
-                        ticket,
+                        tickets,
                         expected,
                         terminating_zlp,
                     } => {
@@ -1090,16 +1131,18 @@ mod worker {
                             ));
                         }
                         if terminating_zlp {
-                            self.pending_zlp.insert(ticket, outcome);
+                            self.pending_zlp.insert(tickets[0], (tickets, outcome));
                         } else {
-                            self.finish_frame(ticket, outcome, &mut outcomes);
+                            for ticket in tickets {
+                                self.finish_frame(ticket, outcome, &mut outcomes);
+                            }
                         }
                     }
-                    WebTransfer::Zlp { ticket } => {
-                        let data_outcome = self
+                    WebTransfer::Zlp { key } => {
+                        let (tickets, data_outcome) = self
                             .pending_zlp
-                            .remove(&ticket)
-                            .unwrap_or(TxOutcome::Fatal(TxFailureKind::Other));
+                            .remove(&key)
+                            .unwrap_or_else(|| (vec![key], TxOutcome::Fatal(TxFailureKind::Other)));
                         let outcome = if data_outcome == TxOutcome::Completed {
                             web_completion_outcome(&completion, 0)
                         } else {
@@ -1108,7 +1151,9 @@ mod worker {
                         if outcome != TxOutcome::Completed {
                             self.stalled = true;
                         }
-                        self.finish_frame(ticket, outcome, &mut outcomes);
+                        for ticket in tickets {
+                            self.finish_frame(ticket, outcome, &mut outcomes);
+                        }
                     }
                 }
             }
@@ -1433,6 +1478,7 @@ mod worker {
             receiver_infos.push(receiver_info);
             radios.push(WebRadio {
                 source_id,
+                chip: report.chip.family,
                 descriptor: device.rx_descriptor_kind(),
                 endpoint_address: device.bulk_in_endpoint_address(),
                 endpoint,
@@ -1832,6 +1878,15 @@ mod worker {
                     }
                     if packet.attrib.pkt_rpt_type != RxPacketType::NormalRx {
                         metrics.report_packets = metrics.report_packets.saturating_add(1);
+                        if radio.chip == ChipFamily::Rtl8814 {
+                            for report in parse_8814_tx_status_reports(packet.data) {
+                                log::trace!(target: "openipc_rtl88xx::tx_report", "RTL8814 TX report retries={} final_rate={} queue_time_us={} bmc={} mac_id={}", report.data_retry_count, report.final_data_rate, report.queue_time_us, report.packet_broadcast, report.mac_id);
+                            }
+                        } else if let Some(report) =
+                            parse_tx_report_packet(packet, radio.descriptor)
+                        {
+                            log::trace!(target: "openipc_rtl88xx::tx_report", "TX report format={:?} state={} retries={} final_rate={} queue_time={} bmc={} mac_id={} tag={} missed={}", report.format, report.state, report.data_retries, report.final_rate, report.queue_time_raw, report.bmc, report.mac_id, report.tag, report.missed_reports);
+                        }
                     }
                 }
             }

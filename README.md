@@ -147,7 +147,9 @@ beamforming sounding, CSI/NBI receive masking, per-rate TX power, PHYDM, power
 tracking, IQK, C2H/TX-status packets, clean shutdown, runtime quarter-dB power
 control, Jaguar2 per-packet power, TX capability guards/statistics, rolling RX
 quality and link-health classification, adapter-health probes, and self-gated
-Jaguar3 TX beamforming. Driver diagnostics include structured probe, EFUSE,
+Jaguar3 TX beamforming. Opt-in TX support includes multi-frame USB transfers,
+A-MPDU pacing, per-frame CCX reports, and hardware ACK/BlockAck responses.
+Driver diagnostics include structured probe, EFUSE,
 initialization-stage, register-trace, and post-init snapshots. Runtime polling
 remains explicit and app-owned; the library does not create hidden polling
 threads.

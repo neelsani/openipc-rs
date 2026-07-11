@@ -322,7 +322,8 @@ mod worker {
     use nusb::MaybeFuture;
     use openipc_core::{
         realtek::{
-            parse_rx_aggregate_with_kind, parse_rx_aggregate_with_kind_diagnostics, AggregateError,
+            parse_8814_tx_status_reports, parse_rx_aggregate_with_kind,
+            parse_rx_aggregate_with_kind_diagnostics, parse_tx_report_packet, AggregateError,
             RxAggregateDiagnostics, RxDescriptorKind, RxPacketType,
         },
         AdaptiveLink, ChannelId, DiversityCombiner, DiversityDecision, DiversitySourceId,
@@ -1225,7 +1226,10 @@ mod worker {
                         let wait = interval.saturating_sub(last_maintenance.elapsed());
                         match receiver.recv_timeout(wait) {
                             Ok(RadioCommand::TransmitBatch { frames, options }) => {
-                                for frame in frames {
+                                let mut cursor = 0usize;
+                                while cursor < frames.len() {
+                                    let remaining = &frames[cursor..];
+                                    let aggregation = device.usb_tx_aggregation() > 1;
                                     let result = endpoint.as_mut().map_or_else(
                                         || {
                                             Err(DriverError::Nusb(
@@ -1233,39 +1237,71 @@ mod worker {
                                             ))
                                         },
                                         |endpoint| {
-                                            device
-                                                .send_packet_on_tracked(
-                                                    endpoint,
-                                                    frame.bytes(),
-                                                    options,
+                                            if aggregation {
+                                                let packets = remaining
+                                                    .iter()
+                                                    .map(|frame| frame.bytes())
+                                                    .collect::<Vec<_>>();
+                                                device.send_packet_batch_on_tracked(
+                                                    endpoint, &packets, options,
                                                 )
-                                                .map(|_| ())
+                                            } else {
+                                                device
+                                                    .send_packet_on_tracked(
+                                                        endpoint,
+                                                        remaining[0].bytes(),
+                                                        options,
+                                                    )
+                                                    .map(|_| 1)
+                                            }
                                         },
                                     );
-                                    let outcome = match &result {
-                                        Ok(()) => TxOutcome::Completed,
-                                        Err(error) => tx_outcome(error),
-                                    };
-                                    if let Err(error) = result {
-                                        let now = Instant::now();
-                                        if last_tx_error_log.is_none_or(|last: Instant| {
-                                            now.duration_since(last) >= Duration::from_secs(1)
-                                        }) {
-                                            log(
-                                                &events,
-                                                &context,
-                                                LogLevel::Warn,
-                                                "radio-tx",
-                                                error.to_string(),
-                                            );
-                                            last_tx_error_log = Some(now);
+                                    match result {
+                                        Ok(sent) if sent != 0 => {
+                                            for frame in &remaining[..sent] {
+                                                let _ = completion_sender.send(RadioCompletion {
+                                                    ticket: frame.ticket(),
+                                                    outcome: TxOutcome::Completed,
+                                                });
+                                                worker_outstanding.fetch_sub(1, Ordering::AcqRel);
+                                            }
+                                            cursor += sent;
+                                        }
+                                        Ok(_) => {
+                                            for frame in remaining {
+                                                let _ = completion_sender.send(RadioCompletion {
+                                                    ticket: frame.ticket(),
+                                                    outcome: TxOutcome::Fatal(TxFailureKind::Other),
+                                                });
+                                                worker_outstanding.fetch_sub(1, Ordering::AcqRel);
+                                            }
+                                            break;
+                                        }
+                                        Err(error) => {
+                                            let outcome = tx_outcome(&error);
+                                            let now = Instant::now();
+                                            if last_tx_error_log.is_none_or(|last: Instant| {
+                                                now.duration_since(last) >= Duration::from_secs(1)
+                                            }) {
+                                                log(
+                                                    &events,
+                                                    &context,
+                                                    LogLevel::Warn,
+                                                    "radio-tx",
+                                                    error.to_string(),
+                                                );
+                                                last_tx_error_log = Some(now);
+                                            }
+                                            for frame in remaining {
+                                                let _ = completion_sender.send(RadioCompletion {
+                                                    ticket: frame.ticket(),
+                                                    outcome,
+                                                });
+                                                worker_outstanding.fetch_sub(1, Ordering::AcqRel);
+                                            }
+                                            break;
                                         }
                                     }
-                                    let _ = completion_sender.send(RadioCompletion {
-                                        ticket: frame.ticket(),
-                                        outcome,
-                                    });
-                                    worker_outstanding.fetch_sub(1, Ordering::AcqRel);
                                 }
                             }
                             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -2112,6 +2148,14 @@ mod worker {
                     capture_metrics
                         .report_packets
                         .fetch_add(1, Ordering::Relaxed);
+                    if adapter.chip == ChipFamily::Rtl8814 {
+                        for report in parse_8814_tx_status_reports(packet.data) {
+                            log::trace!(target: "openipc_rtl88xx::tx_report", "RTL8814 TX report retries={} final_rate={} queue_time_us={} bmc={} mac_id={}", report.data_retry_count, report.final_data_rate, report.queue_time_us, report.packet_broadcast, report.mac_id);
+                        }
+                    } else if let Some(report) = parse_tx_report_packet(packet, adapter.descriptor)
+                    {
+                        log::trace!(target: "openipc_rtl88xx::tx_report", "TX report format={:?} state={} retries={} final_rate={} queue_time={} bmc={} mac_id={} tag={} missed={}", report.format, report.state, report.data_retries, report.final_rate, report.queue_time_raw, report.bmc, report.mac_id, report.tag, report.missed_reports);
+                    }
                 }
             }
             let parse_latency_ms = parse_start.elapsed().as_secs_f64() * 1000.0;

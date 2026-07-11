@@ -8,7 +8,9 @@ use nusb::transfer::{Bulk, In, Out};
 #[cfg(not(target_arch = "wasm32"))]
 use nusb::MaybeFuture;
 use openipc_core::realtek::{parse_rx_aggregate_with_kind, RealtekRxPacket, RxDescriptorKind};
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicI64, AtomicU16, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
+};
 use std::sync::{Mutex, OnceLock};
 
 use crate::async_continuous_tx::ContinuousTxState;
@@ -75,6 +77,8 @@ pub struct RealtekDevice {
     pub(crate) crystal_cap: AtomicU8,
     pub(crate) crystal_cap_bases: Mutex<Option<[u32; 2]>>,
     pub(crate) beacon_interval_tu: AtomicU16,
+    pub(crate) beacon_mpdu: Mutex<Vec<u8>>,
+    pub(crate) beacon_tbtt_offset_us: AtomicI64,
     pub(crate) cca_disabled: Mutex<bool>,
     pub(crate) beamforming_peer: Mutex<Option<[u8; 6]>>,
     pub(crate) beamforming_report_ready: AtomicBool,
@@ -93,6 +97,10 @@ pub struct RealtekDevice {
     pub(crate) tx_endpoint_prepared: AtomicBool,
     pub(crate) tx_wedged: AtomicBool,
     pub(crate) jaguar3_rx_wanted: AtomicBool,
+    pub(crate) ampdu_mode: Mutex<crate::AmpduMode>,
+    pub(crate) tx_reports_enabled: AtomicBool,
+    pub(crate) tx_report_tag: AtomicU8,
+    pub(crate) usb_tx_aggregate_max: AtomicUsize,
     #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
     pub(crate) _usb_lock: Option<UsbDeviceLock>,
 }
@@ -369,6 +377,8 @@ impl RealtekDevice {
             crystal_cap: AtomicU8::new(u8::MAX),
             crystal_cap_bases: Mutex::new(None),
             beacon_interval_tu: AtomicU16::new(0),
+            beacon_mpdu: Mutex::new(Vec::new()),
+            beacon_tbtt_offset_us: AtomicI64::new(0),
             cca_disabled: Mutex::new(false),
             beamforming_peer: Mutex::new(None),
             beamforming_report_ready: AtomicBool::new(false),
@@ -387,6 +397,10 @@ impl RealtekDevice {
             tx_endpoint_prepared: AtomicBool::new(false),
             tx_wedged: AtomicBool::new(false),
             jaguar3_rx_wanted: AtomicBool::new(true),
+            ampdu_mode: Mutex::new(crate::AmpduMode::disabled()),
+            tx_reports_enabled: AtomicBool::new(false),
+            tx_report_tag: AtomicU8::new(0),
+            usb_tx_aggregate_max: AtomicUsize::new(0),
             #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
             _usb_lock: usb_lock,
         })
@@ -573,6 +587,36 @@ impl RealtekDevice {
     pub fn set_ndpa_period(&self, period: u32) {
         self.ndpa_period.store(period, Ordering::Release);
         self.ndpa_counter.store(0, Ordering::Release);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Arm hardware ACK and BlockAck responses for one unicast MAC address.
+    pub fn set_ack_responder(&self, mac: [u8; 6]) -> Result<(), DriverError> {
+        block_on_ready(self.set_ack_responder_async(mac))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Return the adapter to passive monitor-mode acknowledgement behavior.
+    pub fn clear_ack_responder(&self) -> Result<(), DriverError> {
+        block_on_ready(self.clear_ack_responder_async())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Apply persistent A-MPDU descriptor settings and MAC pacing registers.
+    pub fn set_ampdu_mode(&self, mode: crate::AmpduMode) -> Result<(), DriverError> {
+        block_on_ready(self.set_ampdu_mode_async(mode))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Disable A-MPDU operation and restore generation defaults.
+    pub fn clear_ampdu_mode(&self) -> Result<(), DriverError> {
+        block_on_ready(self.clear_ampdu_mode_async())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Configure generation-specific TXDMA support and USB packet aggregation.
+    pub fn set_usb_tx_aggregation(&self, max_frames: usize) -> Result<(), DriverError> {
+        block_on_ready(self.set_usb_tx_aggregation_async(max_frames))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -858,6 +902,36 @@ impl RealtekDevice {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Pack and submit one accepted prefix of packets through an open endpoint.
+    ///
+    /// The returned value is the number of input packets sent in the USB
+    /// transfer. Reinvoke with the remainder until all packets are consumed.
+    pub fn send_packet_batch_on_tracked(
+        &self,
+        ep: &mut nusb::Endpoint<Bulk, Out>,
+        packets: &[&[u8]],
+        options: RealtekTxOptions,
+    ) -> Result<usize, DriverError> {
+        if packets.is_empty() {
+            return Ok(0);
+        }
+        let chip = self.probe_chip()?;
+        let options =
+            self.apply_persistent_tx_options_for_batch(chip.family, options, packets.len())?;
+        let max_frames = self.usb_tx_aggregation().max(1);
+        let aggregate =
+            crate::build_usb_tx_aggregate(packets, options, ep.max_packet_size(), max_frames)
+                .map_err(DriverError::TxBuild)?;
+        log::trace!(target: "openipc_rtl88xx::tx", "USB TX aggregate frames={} bytes={} shim={}", aggregate.frame_count, aggregate.bytes.len(), aggregate.first_shim);
+        self.send_usb_tx_frame_tracked_on(
+            ep,
+            &aggregate.bytes,
+            options.descriptor.uses_terminated_bulk_out(),
+        )?;
+        Ok(aggregate.frame_count)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     /// Send a fully-built Realtek USB TX frame on an existing endpoint.
     pub fn send_usb_tx_frame_on(
         ep: &mut nusb::Endpoint<Bulk, Out>,
@@ -1006,7 +1080,20 @@ impl RealtekDevice {
     pub fn apply_persistent_tx_options(
         &self,
         family: crate::ChipFamily,
+        options: RealtekTxOptions,
+    ) -> Result<RealtekTxOptions, DriverError> {
+        self.apply_persistent_tx_options_for_batch(family, options, 1)
+    }
+
+    /// Merge device defaults while reserving unique report tags for a batch.
+    ///
+    /// Reserving the candidate count may leave harmless gaps when USB packing
+    /// accepts only a prefix, but it prevents correlation-tag reuse in flight.
+    pub fn apply_persistent_tx_options_for_batch(
+        &self,
+        family: crate::ChipFamily,
         mut options: RealtekTxOptions,
+        candidate_frames: usize,
     ) -> Result<RealtekTxOptions, DriverError> {
         if options.tx_mode_default.is_none() {
             options.tx_mode_default = *self
@@ -1031,6 +1118,24 @@ impl RealtekDevice {
                     family.is_jaguar3() && period > 1 && options.beamforming_ndpa;
             }
         }
+        if let Ok(mode) = self.ampdu_mode.lock() {
+            if mode.enabled {
+                options.ampdu = *mode;
+            }
+        }
+        if self.tx_reports_enabled.load(Ordering::Acquire) {
+            options.tx_report = true;
+            options.tx_report_tag = self.tx_report_tag.fetch_add(
+                candidate_frames.clamp(1, u8::MAX as usize) as u8,
+                Ordering::Relaxed,
+            );
+        }
+        options.aggregation_descriptors_per_bulk = match family {
+            crate::ChipFamily::Rtl8812 => 1,
+            crate::ChipFamily::Rtl8814 => 3,
+            crate::ChipFamily::Rtl8821 => 6,
+            _ => 0,
+        };
         Ok(options)
     }
 

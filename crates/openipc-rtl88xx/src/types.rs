@@ -557,6 +557,14 @@ pub struct MonitorOptions {
     /// This is an RF test mode. When set, initialization arms a bare carrier
     /// at the configured channel center instead of entering normal runtime.
     pub cw_tone_gain: Option<u8>,
+    /// Optional unicast MAC for the hardware ACK and BlockAck responder.
+    pub ack_responder: Option<[u8; 6]>,
+    /// Maximum frames in one USB TX transfer; zero disables aggregation.
+    pub usb_tx_aggregate_max: usize,
+    /// Request firmware CCX status reports for transmitted frames.
+    pub tx_reports: bool,
+    /// Optional hardware A-MPDU descriptor and pacing settings.
+    pub ampdu_mode: Option<crate::AmpduMode>,
 }
 
 impl Default for MonitorOptions {
@@ -596,6 +604,10 @@ impl Default for MonitorOptions {
             csi_mask: None,
             nbi_frequency_khz: None,
             cw_tone_gain: None,
+            ack_responder: None,
+            usb_tx_aggregate_max: 0,
+            tx_reports: false,
+            ampdu_mode: None,
         }
     }
 }
@@ -663,6 +675,14 @@ impl MonitorOptions {
                     .and_then(|frequency| frequency.checked_mul(1000)),
                 cw_tone_gain: read_env_flag("DEVOURER_CW_TONE")
                     .then(|| read_env_u8("DEVOURER_CW_TONE_GAIN").unwrap_or(0) & 0x1f),
+                ack_responder: std::env::var("DEVOURER_ACK_RESPONDER")
+                    .ok()
+                    .and_then(|value| parse_mac_address(&value)),
+                usb_tx_aggregate_max: read_env_usize("DEVOURER_TX_USB_AGG").unwrap_or(0),
+                tx_reports: read_env_flag("DEVOURER_TX_REPORT"),
+                ampdu_mode: std::env::var("DEVOURER_TX_AMPDU_MODE")
+                    .ok()
+                    .and_then(|value| value.parse().ok()),
             }
         }
     }
@@ -789,6 +809,8 @@ pub enum DriverError {
     UnsupportedBeacon(ChipFamily),
     /// Beacon bytes were not a complete raw 802.11 beacon MPDU.
     InvalidBeacon,
+    /// Hardware ACK responders can only match an individual/unicast address.
+    InvalidAckResponderMac([u8; 6]),
     /// Requested beamforming feedback mode is unsupported on this generation.
     UnsupportedBeamformingMode(ChipFamily),
     /// TX power override was outside the Realtek TXAGC range.
@@ -863,6 +885,11 @@ impl fmt::Display for DriverError {
                 write!(f, "{} does not support hardware beaconing", chip.name())
             }
             Self::InvalidBeacon => write!(f, "invalid 802.11 beacon MPDU"),
+            Self::InvalidAckResponderMac(mac) => write!(
+                f,
+                "ACK responder MAC must be unicast, got {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+            ),
             Self::UnsupportedBeamformingMode(chip) => {
                 write!(
                     f,

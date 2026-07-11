@@ -32,6 +32,8 @@ the next release.
   paths, plus a batch WebUSB read API.
 - Done: C2H packet handling, RTL8814 TX-status parsing, and optional
   corrupted-FCS packet retention for diagnostics.
+- Done: Devourer-compatible USB TX aggregation, A-MPDU descriptor/pacing
+  controls, Jaguar1/HalMAC CCX reports, and hardware ACK/BlockAck response.
 - Done: thermal, false-alarm counters, RTL8814 queue-depth, BB-register, and
   BB-dbgport diagnostics.
 - Done: EFUSE-backed MAC/RFE parsing and RFE-aware table loading.

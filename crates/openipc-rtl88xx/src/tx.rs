@@ -1,7 +1,10 @@
 use openipc_core::radiotap::{radiotap_len, ChannelBandwidth, RadiotapError, TxMode, TxModeKind};
 
 use crate::types::{ChannelWidth, ChipFamily};
-use crate::{jaguar2_packet_power_step, TxCapabilities};
+use crate::{
+    jaguar2_packet_power_step, plan_tx_aggregate, AmpduMode, TxAggregateLimits, TxCapabilities,
+    MAX_TX_AGGREGATE_BYTES,
+};
 
 /// Size of the Realtek USB TX descriptor prepended before injected frames.
 pub const TX_DESC_SIZE: usize = 40;
@@ -89,6 +92,16 @@ pub struct RealtekTxOptions {
     pub jaguar2_packet_power_step: u8,
     /// Probed hardware capabilities used to reject unsupported modulation.
     pub capabilities: Option<TxCapabilities>,
+    /// Optional hardware A-MPDU descriptor settings.
+    pub ampdu: AmpduMode,
+    /// Ask firmware to return a per-frame CCX TX report.
+    pub tx_report: bool,
+    /// Rotating HalMAC correlation value echoed by a CCX TX report.
+    pub tx_report_tag: u8,
+    /// Eight-byte units reserved between this descriptor and its frame.
+    pub packet_offset: u8,
+    /// Jaguar1 descriptor-start allowance in one USB bulk window.
+    pub aggregation_descriptors_per_bulk: usize,
 }
 
 impl Default for RealtekTxOptions {
@@ -104,8 +117,24 @@ impl Default for RealtekTxOptions {
             beamforming_ndpa_periodic: false,
             jaguar2_packet_power_step: 0,
             capabilities: None,
+            ampdu: AmpduMode::disabled(),
+            tx_report: false,
+            tx_report_tag: 0,
+            packet_offset: 0,
+            aggregation_descriptors_per_bulk: 1,
         }
     }
+}
+
+/// One packed Realtek USB bulk-OUT transfer and its accepted frame count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RealtekUsbTxAggregate {
+    /// Descriptor/frame blocks ready for one USB bulk write.
+    pub bytes: Vec<u8>,
+    /// Number of input packets represented by `bytes`.
+    pub frame_count: usize,
+    /// Whether the first descriptor includes the 8-byte boundary shim.
+    pub first_shim: bool,
 }
 
 /// Error returned while constructing a Realtek TX USB frame.
@@ -183,7 +212,9 @@ pub fn build_usb_tx_frame(
         );
     }
 
-    let mut out = vec![0; TX_DESC_SIZE + payload.len()];
+    let packet_offset = options.packet_offset & 0x1f;
+    let packet_pad = usize::from(packet_offset) * 8;
+    let mut out = vec![0; TX_DESC_SIZE + packet_pad + payload.len()];
     set_bits_le32(
         &mut out,
         20,
@@ -215,6 +246,7 @@ pub fn build_usb_tx_frame(
         },
     );
     set_bits_le32(&mut out, 4, 8, 5, 0x12);
+    set_bits_le32(&mut out, 4, 24, 5, u32::from(packet_offset));
     if use_8814_descriptor_exceptions {
         set_bits_le32(&mut out, 24, 0, 12, 0x001);
         set_bits_le32(&mut out, 32, 15, 1, 1);
@@ -225,6 +257,7 @@ pub fn build_usb_tx_frame(
         set_bits_le32(&mut out, 32, 15, 1, 1);
     }
     set_bits_le32(&mut out, 16, 17, 1, 1);
+    apply_optional_tx_fields(&mut out, options);
     if tx_mode.short_gi {
         set_bits_le32(&mut out, 20, 4, 1, 1);
     }
@@ -238,7 +271,7 @@ pub fn build_usb_tx_frame(
         apply_ndpa_descriptor_fields(&mut out);
     }
     tx_desc_checksum(&mut out[..TX_DESC_SIZE]);
-    out[TX_DESC_SIZE..].copy_from_slice(payload);
+    out[TX_DESC_SIZE + packet_pad..].copy_from_slice(payload);
     Ok(out)
 }
 
@@ -249,7 +282,9 @@ fn build_usb_tx_frame_halmac(
     packet_power_db: Option<i8>,
     options: RealtekTxOptions,
 ) -> Result<Vec<u8>, RealtekTxError> {
-    let mut out = vec![0; TX_DESC_SIZE_8822C + payload.len()];
+    let packet_offset = options.packet_offset & 0x1f;
+    let packet_pad = usize::from(packet_offset) * 8;
+    let mut out = vec![0; TX_DESC_SIZE_8822C + packet_pad + payload.len()];
     set_bits_le32(&mut out, 0, 0, 16, payload.len() as u32);
     set_bits_le32(&mut out, 0, 16, 8, TX_DESC_SIZE_8822C as u32);
     if payload.get(4).is_some_and(|octet| octet & 1 != 0) {
@@ -259,6 +294,7 @@ fn build_usb_tx_frame_halmac(
     set_bits_le32(&mut out, 0, 31, 1, 1);
     set_bits_le32(&mut out, 4, 0, 7, 0x01);
     set_bits_le32(&mut out, 4, 8, 5, 0x12);
+    set_bits_le32(&mut out, 4, 24, 5, u32::from(packet_offset));
     set_bits_le32(&mut out, 4, 16, 5, 9);
     set_bits_le32(&mut out, 8, 24, 6, 0x3f);
     set_bits_le32(&mut out, 12, 8, 1, 1);
@@ -288,18 +324,129 @@ fn build_usb_tx_frame_halmac(
         set_bits_le32(&mut out, 20, 28, 3, u32::from(step & 0x07));
     }
     set_bits_le32(&mut out, 32, 15, 1, 1);
+    apply_optional_tx_fields(&mut out, options);
     if options.beamforming_ndpa {
         apply_ndpa_descriptor_fields(&mut out);
     }
     match options.descriptor {
         RealtekTxDescriptor::Jaguar2 => tx_desc_checksum_8822b(&mut out[..TX_DESC_SIZE_8822C]),
-        RealtekTxDescriptor::Jaguar3 => tx_desc_checksum_8822c(&mut out[..TX_DESC_SIZE_8822C]),
+        RealtekTxDescriptor::Jaguar3 => tx_desc_checksum_8822c(&mut out),
         RealtekTxDescriptor::Jaguar1 | RealtekTxDescriptor::Rtl8814 => {
             unreachable!("HalMAC builder only accepts Jaguar2/3 descriptors")
         }
     }
-    out[TX_DESC_SIZE_8822C..].copy_from_slice(payload);
+    out[TX_DESC_SIZE_8822C + packet_pad..].copy_from_slice(payload);
     Ok(out)
+}
+
+fn apply_optional_tx_fields(desc: &mut [u8], options: RealtekTxOptions) {
+    if options.tx_report {
+        set_bits_le32(desc, 8, 19, 1, 1);
+        if matches!(
+            options.descriptor,
+            RealtekTxDescriptor::Jaguar2 | RealtekTxDescriptor::Jaguar3
+        ) {
+            set_bits_le32(desc, 24, 0, 12, u32::from(options.tx_report_tag));
+        }
+    }
+    if options.ampdu.enabled {
+        let (tid, max_num, density, retry_limit) = options.ampdu.descriptor_values();
+        set_bits_le32(desc, 4, 8, 5, u32::from(tid));
+        set_bits_le32(desc, 8, 12, 1, 1);
+        set_bits_le32(desc, 8, 20, 3, u32::from(density));
+        set_bits_le32(desc, 12, 17, 5, u32::from(max_num));
+        set_bits_le32(desc, 16, 18, 6, u32::from(retry_limit));
+    }
+}
+
+/// Pack an accepted prefix of radiotap frames into one Realtek USB transfer.
+///
+/// `max_frames` is clamped to the generation's hardware limit. Callers submit
+/// `frame_count` frames, then invoke this function again for any remainder.
+pub fn build_usb_tx_aggregate(
+    packets: &[&[u8]],
+    options: RealtekTxOptions,
+    bulk_size: usize,
+    max_frames: usize,
+) -> Result<RealtekUsbTxAggregate, RealtekTxError> {
+    if packets.is_empty() {
+        return Ok(RealtekUsbTxAggregate {
+            bytes: Vec::new(),
+            frame_count: 0,
+            first_shim: false,
+        });
+    }
+    let mut frame_lengths = Vec::with_capacity(packets.len());
+    let mut run_channel = None;
+    for packet in packets {
+        let length = radiotap_len(packet)?;
+        let channel = openipc_core::parse_radiotap_tx_channel(packet)?;
+        if frame_lengths.is_empty() {
+            run_channel = channel;
+        } else if channel.is_some() && channel != run_channel.or(Some(options.current_channel)) {
+            break;
+        }
+        frame_lengths.push(packet.len() - length);
+    }
+    let halmac = matches!(
+        options.descriptor,
+        RealtekTxDescriptor::Jaguar2 | RealtekTxDescriptor::Jaguar3
+    );
+    let generation_limit = if halmac { 3 } else { 64 };
+    let limits = TxAggregateLimits {
+        descriptor_size: if halmac {
+            TX_DESC_SIZE_8822C
+        } else {
+            TX_DESC_SIZE
+        },
+        bulk_size,
+        max_bytes: MAX_TX_AGGREGATE_BYTES,
+        max_frames: max_frames.min(generation_limit).min(u8::MAX as usize),
+        descriptors_per_bulk: if halmac {
+            0
+        } else {
+            options.aggregation_descriptors_per_bulk
+        },
+        first_reserve: !halmac,
+    };
+    let plan = plan_tx_aggregate(&frame_lengths, limits);
+    if plan.frame_count() <= 1 {
+        let bytes = build_usb_tx_frame(packets.first().copied().unwrap_or_default(), options)?;
+        return Ok(RealtekUsbTxAggregate {
+            bytes,
+            frame_count: usize::from(!packets.is_empty()),
+            first_shim: false,
+        });
+    }
+
+    let mut bytes = vec![0; plan.total];
+    for (index, block) in plan.blocks.iter().enumerate() {
+        let mut frame_options = options;
+        frame_options.packet_offset = u8::from(index == 0 && plan.first_shim);
+        frame_options.tx_report_tag = options.tx_report_tag.wrapping_add(index as u8);
+        let frame = build_usb_tx_frame(packets[index], frame_options)?;
+        debug_assert_eq!(frame.len(), block.length);
+        bytes[block.offset..block.offset + block.length].copy_from_slice(&frame);
+    }
+
+    set_bits_le32(&mut bytes, 28, 24, 8, plan.frame_count() as u32);
+    match options.descriptor {
+        RealtekTxDescriptor::Jaguar1 | RealtekTxDescriptor::Rtl8814 => {
+            tx_desc_checksum(&mut bytes[..TX_DESC_SIZE]);
+        }
+        RealtekTxDescriptor::Jaguar2 => {
+            tx_desc_checksum_8822b(&mut bytes[..TX_DESC_SIZE_8822C]);
+        }
+        RealtekTxDescriptor::Jaguar3 => {
+            let checksum_span = TX_DESC_SIZE_8822C + usize::from(plan.first_shim) * 8;
+            tx_desc_checksum_8822c(&mut bytes[..checksum_span]);
+        }
+    }
+    Ok(RealtekUsbTxAggregate {
+        bytes,
+        frame_count: plan.frame_count(),
+        first_shim: plan.first_shim,
+    })
 }
 
 fn data_subchannel(options: RealtekTxOptions, tx_mode: TxMode) -> u32 {
@@ -1040,6 +1187,99 @@ mod tests {
         assert_eq!(
             test_bits(read_le32(&jaguar3, 28), 0, 16) as u16,
             checksum_8822c_descriptor(&jaguar3[..TX_DESC_SIZE_8822C])
+        );
+    }
+
+    fn aggregate_packets(payload_length: usize, count: usize) -> Vec<Vec<u8>> {
+        (0..count)
+            .map(|index| {
+                let mut packet = build_stream_radiotap(TxMode::ht(0));
+                packet.extend(std::iter::repeat_n(index as u8, payload_length));
+                packet
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ampdu_and_report_fields_match_devourer_descriptors() {
+        let packets = aggregate_packets(100, 1);
+        for descriptor in [
+            RealtekTxDescriptor::Jaguar1,
+            RealtekTxDescriptor::Jaguar2,
+            RealtekTxDescriptor::Jaguar3,
+        ] {
+            let frame = build_usb_tx_frame(
+                &packets[0],
+                RealtekTxOptions {
+                    descriptor,
+                    ampdu: AmpduMode::OPENIPC,
+                    tx_report: true,
+                    tx_report_tag: 0xab,
+                    ..RealtekTxOptions::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(test_bits(read_le32(&frame, 4), 8, 5), 0);
+            assert_eq!(test_bits(read_le32(&frame, 8), 12, 1), 1);
+            assert_eq!(test_bits(read_le32(&frame, 8), 19, 1), 1);
+            assert_eq!(test_bits(read_le32(&frame, 8), 20, 3), 7);
+            assert_eq!(test_bits(read_le32(&frame, 12), 17, 5), 16);
+            assert_eq!(test_bits(read_le32(&frame, 16), 18, 6), 0);
+            if descriptor == RealtekTxDescriptor::Jaguar1 {
+                assert_eq!(test_bits(read_le32(&frame, 24), 0, 12), 1);
+            } else {
+                assert_eq!(test_bits(read_le32(&frame, 24), 0, 12), 0xab);
+            }
+        }
+    }
+
+    #[test]
+    fn aggregate_builder_sets_count_offsets_and_checksums() {
+        let packets = aggregate_packets(1500, 4);
+        let refs = packets.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let aggregate = build_usb_tx_aggregate(
+            &refs,
+            RealtekTxOptions {
+                descriptor: RealtekTxDescriptor::Jaguar2,
+                tx_report: true,
+                tx_report_tag: 0x20,
+                ..RealtekTxOptions::default()
+            },
+            512,
+            16,
+        )
+        .unwrap();
+
+        assert_eq!(aggregate.frame_count, 3);
+        assert_eq!(aggregate.bytes[31], 3);
+        assert_eq!(
+            test_bits(read_le32(&aggregate.bytes, 28), 0, 16) as u16,
+            checksum_8822b_descriptor(&aggregate.bytes[..TX_DESC_SIZE_8822C])
+        );
+        let second_offset = (TX_DESC_SIZE_8822C + 1500 + 7) & !7;
+        assert_eq!(
+            test_bits(read_le32(&aggregate.bytes, second_offset + 24), 0, 12),
+            0x21
+        );
+    }
+
+    #[test]
+    fn jaguar3_packet_offset_shim_is_covered_by_checksum() {
+        let packets = aggregate_packets(464, 1);
+        let frame = build_usb_tx_frame(
+            &packets[0],
+            RealtekTxOptions {
+                descriptor: RealtekTxDescriptor::Jaguar3,
+                packet_offset: 1,
+                ..RealtekTxOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(frame.len(), 520);
+        assert_eq!(test_bits(read_le32(&frame, 4), 24, 5), 1);
+        assert_eq!(
+            test_bits(read_le32(&frame, 28), 0, 16) as u16,
+            checksum_8822c_descriptor(&frame[..56])
         );
     }
 }

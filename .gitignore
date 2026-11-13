@@ -21,3 +21,4 @@ __pycache__/
 *.pcap
 *.pcapng
 *.tgz
+result
